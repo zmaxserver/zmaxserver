@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 pub mod vhost_json;
 pub use vhost_json::*;
 
+// [kart-5] Sanal konak hotlink koruması ve IP ACL şeması
+pub mod security_ext;
+pub use security_ext::{default_hotlink_extensions, HotlinkConfig, VhostAclConfig};
+
 /// Popüler paneller (cPanel, Plesk, DirectAdmin, CyberPanel, HestiaCP, aaPanel, zPanel vb.)
 /// ve OS ephemeral aralıkları (Linux 32768-60999, Windows 49152-65535) ile çakışmayan
 /// ZMax Server standart port bloğu (IANA Unassigned).
@@ -405,6 +409,10 @@ pub struct VHostEntry {
     pub tls: VHostTlsSection,
     #[serde(default, rename = "static")]
     pub static_files: VHostStaticSection,
+    #[serde(default)]
+    pub hotlink: HotlinkConfig,
+    #[serde(default)]
+    pub acl: VhostAclConfig,
 }
 
 impl Default for VHostEntry {
@@ -429,6 +437,8 @@ impl Default for VHostEntry {
             error_docs: VHostErrorDocsSection::default(),
             tls: VHostTlsSection::default(),
             static_files: VHostStaticSection::default(),
+            hotlink: HotlinkConfig::default(),
+            acl: VhostAclConfig::default(),
         }
     }
 }
@@ -493,7 +503,38 @@ impl VHostEntry {
         let scope = format!("vHost '{}'", self.name);
         validate_ip_acl_list(&scope, "security.allow_ips", &self.security.allow_ips)?;
         validate_ip_acl_list(&scope, "security.deny_ips", &self.security.deny_ips)?;
+        self.acl.validate(&scope)?;
+        self.hotlink.validate(&scope)?;
         self.validate_sections()
+    }
+
+    /// Etkin hotlink koruma yapılandırmasını döndürür.
+    /// Doğrudan `[vhost.hotlink]` tanımlıysa onu; aksi halde geriye uyumluluk için `[vhost.security.hotlink_protection]` değerini temel alır.
+    pub fn effective_hotlink(&self) -> HotlinkConfig {
+        if self.hotlink.enabled || !self.hotlink.allowed_referers.is_empty() {
+            self.hotlink.clone()
+        } else if self.security.hotlink_protection {
+            HotlinkConfig {
+                enabled: true,
+                allowed_referers: Vec::new(),
+                extensions: default_hotlink_extensions(),
+            }
+        } else {
+            self.hotlink.clone()
+        }
+    }
+
+    /// Etkin IP ACL yapılandırmasını döndürür.
+    /// `[vhost.acl]` tanımlıysa onu; boşsa geriye uyumluluk için `[vhost.security.allow_ips]` ve `deny_ips` değerlerini temel alır.
+    pub fn effective_acl(&self) -> VhostAclConfig {
+        if !self.acl.allow_ips.is_empty() || !self.acl.deny_ips.is_empty() {
+            self.acl.clone()
+        } else {
+            VhostAclConfig {
+                allow_ips: self.security.allow_ips.clone(),
+                deny_ips: self.security.deny_ips.clone(),
+            }
+        }
     }
 
     /// Alan adı ve IP ACL dışında kalan bölüm düzeyindeki ayarları doğrular.
