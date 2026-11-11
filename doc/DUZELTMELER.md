@@ -24,8 +24,9 @@
 | 2 | Günlükte gerçek bayt, panel/fail2ban uyumu | BEKLİYOR (başlanabilir) | — |
 | 4 | `.htaccess` ve yönlendirme | **ONAYLI** (denetçi, 1. denetim; UNIT TESTED düzeyi) | 2026-11-12 |
 | 7 | Go: `RenderZmaxVhost` genişletme (panel) | **ONAYLI** (denetçi, 1. denetim) | 2026-11-12 |
-| 3 | vhost API CRUD (**not:** `api.rs` `merge_vhost_json_patch` ön çalışması Kart 1 sırasında yapıldı; Kart 3'te PUT↔GET turu, geri alma ve testle KANITLANACAK) | BEKLİYOR | — |
-| 5, 6, 8–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
+| 3 | vhost API CRUD — **ONAYLI** (denetçi, 1. denetim; INTEGRATION TESTED in-process) (**not:** `api.rs` `merge_vhost_json_patch` ön çalışması Kart 1 sırasında yapıldı; Kart 3'te PUT↔GET turu, geri alma ve testle KANITLANACAK) | BEKLİYOR | — |
+| 5 | Hotlink listesi + IP ACL | RAPOR GELDİ (denetim sürüyor) | — |
+| 6, 8–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
 
 ---
 
@@ -181,3 +182,11 @@ Kart 1'in kararı RED (küçük): 2 madde açık. DUZELTMELER.md'deki "ONAYLI" k
 1. **Dal tabanı yanlış:** `kart-4-htaccess` `origin/main`'den değil, onaylanmamış **Kart 2'nin ucundan** (`718948e`) açılmış (kural §8c.3: `origin/main`'den). `main..kart-4` farkında Kart 2'nin `logger.rs`/`goentegre.md` değişiklikleri de görünüyordu. Ben yalnız Kart 4 commit'ini aldım. Sonraki kartlarda `git checkout -b kart-<no> origin/main`.
 2. Rapor "kural sürümü v5" diyor; o sırada geçerli sürüm v6 idi (çalışırken kuralı yeniden okumadı). Sürekli yeniden okuma kuralı (§ "Sürekli kurala bak").
 3. Kartın kabul testi `curl`/gerçek istek maddeleri (WordPress `/ornek-yazi/` 200, `force_https` 301, www↔non-www 301, FilesMatch 403) **istek hattından (zmax-bin) geçirilmedi**; yalnız `zmax-rewrite` birim testleri. `Outcome::Forbidden`'ın (FilesMatch) `web_engine.rs`'te 403'e çevrildiği ayrıca doğrulanmadı. Bu madde **Kart 12 (OLS denklik kapısı / yan yana test)** içinde kanıtlanacak; o zamana kadar etiket UNIT TESTED kalır.
+
+
+---
+
+## Kart 3 — 1. denetim (2026-11-12 ~03:05) — KARAR: ONAYLI (denetçi yazdı)
+
+**Bağımsız doğrulananlar (ayrı worktree, `main` üzerine cherry-pick, ayrı `target`):** `cargo test --workspace --offline` **232 geçti / 0 kaldı / 0 atlandı** (228 + 4 yeni test: 3 `zmax-config` birim + 1 `zmax-bin` API entegrasyonu; rapor ile uyumlu) · `8a04448` yalnız `crates/zmax-bin/src/api.rs`, `crates/zmax-config/src/{lib.rs,vhost_json.rs}` (sahip olunan dosyalar; `lib.rs`'e yalnız `pub mod/pub use` = ortak dosya kuralına uygun) · testte `assert_eq!(after_bad_toml, original_toml)` (bozuk gövde 400 + dosya baytı değişmemiş) ve geçersiz IP/traversal 400 var (`api.rs:2178-2185`) · artık dosya yok.
+**Notlar:** (1) Dal tabanı yine onaysız Kart 2 ucu (`718948e`); yalnız `8a04448` alındı. Sonraki kartta `origin/main`'den aç. (2) Rapor "kural v5" okundu diyor (geçerli v6): çalışırken sürümü yeniden kontrol et. (3) `api.rs`'te ~940 satırlık yeniden düzenleme (fonksiyonlar `zmax-config::vhost_json`'a taşındı): testler geçti ama VM/canlı API denenmedi; `live_smoke.py` ve `verify_all_acceptance.py` Kart 12'de yeniden koşulacak. (4) Çalışma klasörü `D:\zmaxserver-ajan03` bir KLON; `origin` GitHub değil yerel `D:\zmaxserver`: dalı GitHub'a itmek için `git remote set-url origin https://github.com/zmaxserver/zmaxserver.git` (denetçi dalı ittirdi).
