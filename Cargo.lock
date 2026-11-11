@@ -1605,6 +1605,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "tokio",
+ "zmax-config",
 ]
 
 [[package]]

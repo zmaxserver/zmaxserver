@@ -1233,6 +1233,8 @@ where
             let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
             let file_info = handler
                 .resolve_with_index(&static_path, &vhost_ctx.index_files)
+                // [kart-6] ACME challenge ve TLS reload
+                .or_else(|| handler.resolve_acme_challenge(&static_path))
                 .or_else(|| resolve_predecoded_static_file(&vhost_ctx.doc_root, &static_path));
 
             if let Some(info) = file_info {

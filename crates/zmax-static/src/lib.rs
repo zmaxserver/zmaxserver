@@ -24,8 +24,27 @@ pub fn clear_global_acme_root() {
 }
 
 /// Global ortak ACME kök dizinini döndürür.
+/// Sırasıyla:
+/// 1. `set_global_acme_root` ile ayarlanmış özel yol,
+/// 2. `ZMAX_ACME_ROOT` çevre değişkeni (tanımlıysa),
+/// 3. Standart `/var/www/acme` dizini (diskte mevcutsa).
 pub fn get_global_acme_root() -> Option<PathBuf> {
-    GLOBAL_ACME_ROOT.read().ok().and_then(|lock| lock.clone())
+    if let Ok(lock) = GLOBAL_ACME_ROOT.read() {
+        if let Some(ref path) = *lock {
+            return Some(path.clone());
+        }
+    }
+    if let Ok(env_root) = std::env::var("ZMAX_ACME_ROOT") {
+        let p = PathBuf::from(env_root.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    let default_var_acme = PathBuf::from("/var/www/acme");
+    if default_var_acme.exists() {
+        return Some(default_var_acme);
+    }
+    None
 }
 
 /// İstek yolunun ACME HTTP-01 challenge yolu olup olmadığını kontrol eder.
