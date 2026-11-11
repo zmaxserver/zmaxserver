@@ -13,6 +13,9 @@ pub use vhost_json::*;
 pub mod security_ext;
 pub use security_ext::{default_hotlink_extensions, HotlinkConfig, VhostAclConfig};
 
+pub mod acme;
+pub use acme::AcmeConfig;
+
 /// Popüler paneller (cPanel, Plesk, DirectAdmin, CyberPanel, HestiaCP, aaPanel, zPanel vb.)
 /// ve OS ephemeral aralıkları (Linux 32768-60999, Windows 49152-65535) ile çakışmayan
 /// ZMax Server standart port bloğu (IANA Unassigned).
@@ -89,7 +92,11 @@ pub struct ServerGlobalConfig {
     pub reuseport_workers: bool,
     #[serde(default = "default_graceful_shutdown_secs")]
     pub graceful_shutdown_secs: u64,
+    #[serde(default)]
+    pub acme: AcmeConfig,
 }
+
+pub type ServerConfig = ServerGlobalConfig;
 
 impl Default for ServerGlobalConfig {
     fn default() -> Self {
@@ -102,6 +109,7 @@ impl Default for ServerGlobalConfig {
             workers: 0,
             reuseport_workers: true,
             graceful_shutdown_secs: default_graceful_shutdown_secs(),
+            acme: AcmeConfig::default(),
         }
     }
 }
@@ -378,6 +386,8 @@ pub struct ZMaxConfig {
     pub logging: LoggingConfig,
     pub vhosts_dir: VHostsDirConfig,
     #[serde(default)]
+    pub acme: AcmeConfig,
+    #[serde(default)]
     pub vhosts: HashMap<String, VHostEntry>,
 }
 
@@ -413,6 +423,8 @@ pub struct VHostEntry {
     pub hotlink: HotlinkConfig,
     #[serde(default)]
     pub acl: VhostAclConfig,
+    #[serde(default)]
+    pub acme: AcmeConfig,
 }
 
 impl Default for VHostEntry {
@@ -439,6 +451,7 @@ impl Default for VHostEntry {
             static_files: VHostStaticSection::default(),
             hotlink: HotlinkConfig::default(),
             acl: VhostAclConfig::default(),
+            acme: AcmeConfig::default(),
         }
     }
 }
@@ -2873,5 +2886,39 @@ x_accel_prefix = "/protected/"
         bad_vh.tls.min_version = "1.0".to_string();
         bad_inline.vhosts.insert("inline.example.com".to_string(), bad_vh);
         assert!(bad_inline.validate().is_err());
+    }
+
+    #[test]
+    fn test_acme_config_vhost_and_server_roundtrip() {
+        let toml_str = r#"
+            [server]
+            server_name = "ZMax-ACME-Test"
+
+            [server.acme]
+            acme_root = "/var/www/acme"
+            force_https_exempt = true
+
+            [vhost]
+            name = "acme.example.com"
+            document_root = "/var/www/acme.example.com"
+
+            [vhost.acme]
+            acme_root = "/var/www/custom-acme"
+            force_https_exempt = true
+        "#;
+        let vh_doc: VHostFileDocument = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            vh_doc.vhost.acme.acme_root,
+            Some(PathBuf::from("/var/www/custom-acme"))
+        );
+        assert!(vh_doc.vhost.acme.force_https_exempt);
+
+        let cfg: ZMaxConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.server.server_name, "ZMax-ACME-Test");
+        assert_eq!(
+            cfg.server.acme.acme_root,
+            Some(PathBuf::from("/var/www/acme"))
+        );
+        assert!(cfg.server.acme.force_https_exempt);
     }
 }
