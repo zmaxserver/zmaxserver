@@ -5,7 +5,7 @@
 pub use crate::api::ParsedHttpRequest;
 use crate::api::{read_http_request_with_limits, send_http_read_error, ServerState};
 use crate::modules_runtime::{
-    append_access_log_limit, append_error_log_limit, is_hotlink_blocked,
+    append_access_log_limit, append_error_log_limit,
     resolve_vhost_security_headers, select_negotiated_image_path,
 };
 use std::net::{IpAddr, SocketAddr};
@@ -999,8 +999,12 @@ where
             path: static_path,
             query: effective_query,
         } => {
+            // [kart-5] hotlink ve ACL kontrolü
             if vhost_ctx.hotlink_protection
-                && is_hotlink_blocked(
+                && zmax_security::is_hotlink_blocked(
+                    vhost_ctx.hotlink_protection,
+                    &[],
+                    &[],
                     extract_header(&req.headers, "referer"),
                     &req.host,
                     &vhost_ctx.vhost_name,
