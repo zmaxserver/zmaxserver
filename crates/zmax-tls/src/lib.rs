@@ -69,6 +69,7 @@ struct CertTable {
 /// SNI ile sertifika seçen, çalışırken değiştirilebilir çözümleyici.
 pub struct SniResolver {
     table: RwLock<Arc<CertTable>>,
+    sources: RwLock<Vec<CertSource>>,
 }
 
 impl std::fmt::Debug for SniResolver {
@@ -81,16 +82,43 @@ impl SniResolver {
     pub fn new() -> Self {
         Self {
             table: RwLock::new(Arc::new(CertTable::default())),
+            sources: RwLock::new(Vec::new()),
         }
     }
 
     /// Kaynaklardan yeni tablo kurar ve tek hamlede değiştirir (sıfır kesinti).
+    /// Verilen kaynaklar ilerideki `reload()` çağrıları için saklanır.
     pub fn replace(&self, sources: &[CertSource]) -> LoadReport {
+        if let Ok(mut s) = self.sources.write() {
+            *s = sources.to_vec();
+        }
         let (table, report) = build_table(sources);
         if let Ok(mut guard) = self.table.write() {
             *guard = Arc::new(table);
         }
         report
+    }
+
+    /// Saklanan sertifika kaynaklarını diskten YENİDEN okuyarak tabloyu atomik olarak günceller.
+    /// Certbot veya harici bir araç diskteki sertifikayı yenilediğinde dinleyiciyi durdurmadan yeni sertifikayı sunar.
+    pub fn reload(&self) -> LoadReport {
+        let current_sources = self.sources.read().map(|s| s.clone()).unwrap_or_default();
+        let (table, report) = build_table(&current_sources);
+        if let Ok(mut guard) = self.table.write() {
+            *guard = Arc::new(table);
+        }
+        report
+    }
+
+    /// vhost tablosundaki güncel yapılandırmadan kaynakları çıkarır ve tabloyu günceller.
+    pub fn reload_from_vhosts(&self, vhosts: &[LoadedVHost], base_dir: &Path) -> LoadReport {
+        let sources = sources_from_vhosts(vhosts, base_dir);
+        self.replace(&sources)
+    }
+
+    /// Çözümleyicide kayıtlı mevcut sertifika kaynaklarını döndürür.
+    pub fn current_sources(&self) -> Vec<CertSource> {
+        self.sources.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     pub fn has_default(&self) -> bool {
@@ -110,6 +138,14 @@ impl SniResolver {
             }
         }
         table.default.clone()
+    }
+
+    /// Belirtilen SNI adı (veya varsayılan) için sunulacak sertifikanın
+    /// X.509 seri numarasını küçük harf onaltılık (hex) dize olarak döndürür.
+    pub fn lookup_serial(&self, sni: Option<&str>) -> Option<String> {
+        let ck = self.lookup(sni)?;
+        let first_der = ck.cert.first()?;
+        extract_cert_serial_hex(first_der.as_ref())
     }
 }
 
@@ -285,6 +321,75 @@ pub fn client_sni<T>(stream: &tokio_rustls::server::TlsStream<T>) -> Option<Stri
     stream.get_ref().1.server_name().map(|s| s.to_string())
 }
 
+/// Basit ASN.1 DER (Tag-Length-Value) ayrıştırıcısı.
+fn parse_der_tlv<'a>(input: &'a [u8]) -> Option<(u8, &'a [u8], &'a [u8])> {
+    if input.is_empty() {
+        return None;
+    }
+    let tag = input[0];
+    let mut i = 1;
+    if i >= input.len() {
+        return None;
+    }
+    let len_byte = input[i];
+    i += 1;
+    let len = if len_byte & 0x80 == 0 {
+        len_byte as usize
+    } else {
+        let count = (len_byte & 0x7f) as usize;
+        if count == 0 || count > 4 || i + count > input.len() {
+            return None;
+        }
+        let mut l = 0usize;
+        for &b in &input[i..i + count] {
+            l = (l << 8) | (b as usize);
+        }
+        i += count;
+        l
+    };
+    if i + len > input.len() {
+        return None;
+    }
+    let value = &input[i..i + len];
+    let rest = &input[i + len..];
+    Some((tag, value, rest))
+}
+
+/// Bir DER kodlu X.509 sertifikasının seri numarasını onaltılık (hex) dize olarak çıkarır.
+pub fn extract_cert_serial_hex(cert_der: &[u8]) -> Option<String> {
+    // 1. Certificate SEQUENCE
+    let (tag, cert_val, _) = parse_der_tlv(cert_der)?;
+    if tag != 0x30 {
+        return None;
+    }
+    // 2. TBSCertificate SEQUENCE
+    let (tag, mut tbs_val, _) = parse_der_tlv(cert_val)?;
+    if tag != 0x30 {
+        return None;
+    }
+    // 3. Opsiyonel [0] EXPLICIT version varsa geç
+    if let Some((0xa0, _, rest)) = parse_der_tlv(tbs_val) {
+        tbs_val = rest;
+    }
+    // 4. INTEGER serialNumber
+    let (tag, serial_bytes, _) = parse_der_tlv(tbs_val)?;
+    if tag != 0x02 || serial_bytes.is_empty() {
+        return None;
+    }
+    // Pozitif ASN.1 INTEGER için baştaki 0x00 işaret baytını ayıkla
+    let s_bytes = if serial_bytes.len() > 1 && serial_bytes[0] == 0 {
+        &serial_bytes[1..]
+    } else {
+        serial_bytes
+    };
+    let mut hex = String::with_capacity(s_bytes.len() * 2);
+    for b in s_bytes {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    Some(hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +500,63 @@ mod tests {
         r.replace(&[a2]);
         let after = r.lookup(Some("a.test")).unwrap();
         assert!(!Arc::ptr_eq(&before, &after));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn reload_reads_updated_files_from_disk_and_updates_serial() {
+        let d = temp_dir("reload_disk_serial");
+        let cert_source = make_cert(&d, "site", &["ornek1.test"]);
+        let resolver = Arc::new(SniResolver::new());
+        let rep1 = resolver.replace(std::slice::from_ref(&cert_source));
+        assert_eq!(rep1.loaded, 1);
+
+        let serial_before = resolver
+            .lookup_serial(Some("ornek1.test"))
+            .expect("ilk sertifika serisi okunabilmeli");
+        assert!(!serial_before.is_empty());
+
+        let acceptor = build_acceptor(Arc::clone(&resolver)).unwrap();
+
+        // 1. İlk sertifika ile canlı TLS el sıkışması
+        let leaf1 = CertificateDer::from_pem_file(&cert_source.cert_path).unwrap();
+        assert_tls_handshake_and_echo(
+            acceptor.clone(),
+            "ornek1.test",
+            &leaf1,
+            vec![b"http/1.1".to_vec()],
+            Some(b"http/1.1"),
+        )
+        .await;
+
+        // 2. Diskteki sertifika dosyasını yenile (certbot cert renewal simülasyonu)
+        let _updated_cert = make_cert(&d, "site", &["ornek1.test"]);
+        let leaf2 = CertificateDer::from_pem_file(&cert_source.cert_path).unwrap();
+        assert_ne!(leaf1.as_ref(), leaf2.as_ref(), "Yeni sertifika baytları farklı olmalı");
+
+        // 3. SniResolver::reload() çağrısı ile diskten güncelle
+        let rep2 = resolver.reload();
+        assert_eq!(rep2.loaded, 1);
+
+        let serial_after = resolver
+            .lookup_serial(Some("ornek1.test"))
+            .expect("yenilenen sertifika serisi okunabilmeli");
+        assert_ne!(
+            serial_before, serial_after,
+            "Yenileme sonrası sertifika seri numarası değişmiş olmalı (Önce: {}, Sonra: {})",
+            serial_before, serial_after
+        );
+
+        // 4. Dinleyiciyi yeniden başlatmadan YENİ sertifikanın sunulduğunu el sıkışmayla doğrula
+        assert_tls_handshake_and_echo(
+            acceptor,
+            "ornek1.test",
+            &leaf2,
+            vec![b"http/1.1".to_vec()],
+            Some(b"http/1.1"),
+        )
+        .await;
+
         let _ = std::fs::remove_dir_all(&d);
     }
 
