@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// [kart-3] vHost REST API tam alan JSON ayrıştırma ve TOML turu
+pub mod vhost_json;
+pub use vhost_json::*;
+
 /// Popüler paneller (cPanel, Plesk, DirectAdmin, CyberPanel, HestiaCP, aaPanel, zPanel vb.)
 /// ve OS ephemeral aralıkları (Linux 32768-60999, Windows 49152-65535) ile çakışmayan
 /// ZMax Server standart port bloğu (IANA Unassigned).

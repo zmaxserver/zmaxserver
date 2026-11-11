@@ -558,244 +558,7 @@ pub async fn reload_runtime_state(state: &Arc<ServerState>) -> Result<usize, Str
 }
 
 fn format_vhost_json(v: &LoadedVHost) -> String {
-    let mut root = match serde_json::to_value(&v.entry) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    };
-    let has_ssl = !v.entry.ssl.certificate.trim().is_empty();
-    let effective_upstreams = v.entry.effective_php_upstreams();
-
-    root.insert(
-        "domain".to_string(),
-        serde_json::Value::String(v.entry.name.clone()),
-    );
-    root.insert(
-        "resolved_root".to_string(),
-        serde_json::Value::String(v.resolved_doc_root.to_string_lossy().into_owned()),
-    );
-    root.insert(
-        "file".to_string(),
-        serde_json::Value::String(v.file_name.clone()),
-    );
-
-    // Geriye dönük uyumlu üst-düzey kısayol alanları
-    root.insert(
-        "php_enabled".to_string(),
-        serde_json::Value::Bool(v.entry.php.enabled),
-    );
-    root.insert(
-        "php_sapi".to_string(),
-        serde_json::Value::String(v.entry.php.sapi.clone()),
-    );
-    root.insert(
-        "php_upstream".to_string(),
-        serde_json::Value::String(v.entry.php.upstream.clone()),
-    );
-    root.insert(
-        "php_timeout".to_string(),
-        serde_json::Value::from(v.entry.php.timeout),
-    );
-    root.insert(
-        "php_upstreams".to_string(),
-        serde_json::json!(effective_upstreams),
-    );
-    root.insert(
-        "upstreams".to_string(),
-        serde_json::json!(v.entry.php.upstreams),
-    );
-    root.insert(
-        "lb_policy".to_string(),
-        serde_json::Value::String(v.entry.php.lb_policy.clone()),
-    );
-    root.insert(
-        "dial_timeout_ms".to_string(),
-        serde_json::Value::from(v.entry.php.dial_timeout_ms),
-    );
-    root.insert(
-        "io_timeout_secs".to_string(),
-        serde_json::Value::from(v.entry.php.io_timeout_secs),
-    );
-    root.insert(
-        "keep_conn".to_string(),
-        serde_json::Value::Bool(v.entry.php.keep_conn),
-    );
-    root.insert(
-        "max_idle_conns".to_string(),
-        serde_json::Value::from(v.entry.php.max_idle_conns as u64),
-    );
-    root.insert(
-        "resolve_root_symlink".to_string(),
-        serde_json::Value::Bool(v.entry.php.resolve_root_symlink),
-    );
-    root.insert(
-        "allow_x_accel_redirect".to_string(),
-        serde_json::Value::Bool(v.entry.php.allow_x_accel_redirect),
-    );
-    root.insert(
-        "x_accel_prefix".to_string(),
-        serde_json::Value::String(v.entry.php.x_accel_prefix.clone()),
-    );
-
-    root.insert(
-        "cache_enabled".to_string(),
-        serde_json::Value::Bool(v.entry.cache.enabled),
-    );
-    root.insert(
-        "cache_expire".to_string(),
-        serde_json::Value::from(v.entry.cache.expire),
-    );
-
-    root.insert("ssl_enabled".to_string(), serde_json::Value::Bool(has_ssl));
-    root.insert(
-        "ssl_cert".to_string(),
-        serde_json::Value::String(v.entry.ssl.certificate.clone()),
-    );
-    root.insert(
-        "ssl_key".to_string(),
-        serde_json::Value::String(v.entry.ssl.key.clone()),
-    );
-
-    root.insert(
-        "force_https".to_string(),
-        serde_json::Value::Bool(v.entry.security.force_https),
-    );
-    root.insert(
-        "hotlink_protection".to_string(),
-        serde_json::Value::Bool(v.entry.security.hotlink_protection),
-    );
-    root.insert(
-        "allow_ips".to_string(),
-        serde_json::json!(v.entry.security.allow_ips),
-    );
-    root.insert(
-        "deny_ips".to_string(),
-        serde_json::json!(v.entry.security.deny_ips),
-    );
-    root.insert(
-        "waf_enabled".to_string(),
-        serde_json::json!(v.entry.security.waf_enabled),
-    );
-    root.insert(
-        "wp_brute_force".to_string(),
-        serde_json::Value::Bool(v.entry.security.wp_brute_force),
-    );
-    root.insert(
-        "waf_exclude_paths".to_string(),
-        serde_json::json!(v.entry.security.waf_exclude_paths),
-    );
-
-    root.insert(
-        "proxy_enabled".to_string(),
-        serde_json::Value::Bool(v.entry.proxy.enabled),
-    );
-    root.insert(
-        "proxy_upstream".to_string(),
-        serde_json::Value::String(v.entry.proxy.upstream.clone()),
-    );
-    root.insert(
-        "proxy_path_prefix".to_string(),
-        serde_json::Value::String(v.entry.proxy.path_prefix.clone()),
-    );
-    root.insert(
-        "preserve_host".to_string(),
-        serde_json::Value::Bool(v.entry.proxy.preserve_host),
-    );
-    root.insert(
-        "websocket".to_string(),
-        serde_json::Value::Bool(v.entry.proxy.websocket),
-    );
-
-    root.insert(
-        "rewrite_enabled".to_string(),
-        serde_json::Value::Bool(v.entry.rewrite.enabled),
-    );
-    root.insert(
-        "try_files".to_string(),
-        serde_json::Value::Bool(v.entry.rewrite.try_files),
-    );
-    root.insert(
-        "htaccess".to_string(),
-        serde_json::Value::Bool(v.entry.rewrite.htaccess),
-    );
-
-    root.insert(
-        "logging_enabled".to_string(),
-        serde_json::Value::Bool(v.entry.logging.enabled),
-    );
-    root.insert(
-        "access_log".to_string(),
-        serde_json::Value::String(v.entry.logging.access_log.clone()),
-    );
-    root.insert(
-        "error_log".to_string(),
-        serde_json::Value::String(v.entry.logging.error_log.clone()),
-    );
-    root.insert(
-        "log_format".to_string(),
-        serde_json::Value::String(v.entry.logging.format.clone()),
-    );
-    root.insert(
-        "max_log_size_mb".to_string(),
-        serde_json::Value::from(v.entry.logging.max_log_size_mb),
-    );
-    root.insert(
-        "also_write_global".to_string(),
-        serde_json::Value::Bool(v.entry.logging.also_write_global),
-    );
-
-    root.insert(
-        "http2".to_string(),
-        serde_json::Value::Bool(v.entry.tls.http2),
-    );
-    root.insert(
-        "strict_sni".to_string(),
-        serde_json::Value::Bool(v.entry.tls.strict_sni),
-    );
-    root.insert(
-        "tls_min_version".to_string(),
-        serde_json::Value::String(v.entry.tls.min_version.clone()),
-    );
-
-    root.insert(
-        "precompressed".to_string(),
-        serde_json::Value::Bool(v.entry.static_files.precompressed),
-    );
-    root.insert(
-        "brotli".to_string(),
-        serde_json::Value::Bool(v.entry.static_files.brotli),
-    );
-    root.insert(
-        "gzip".to_string(),
-        serde_json::Value::Bool(v.entry.static_files.gzip),
-    );
-    root.insert(
-        "autoindex".to_string(),
-        serde_json::Value::Bool(v.entry.static_files.autoindex),
-    );
-    root.insert(
-        "sendfile".to_string(),
-        serde_json::Value::Bool(v.entry.static_files.sendfile),
-    );
-
-    root.insert(
-        "security_headers".to_string(),
-        serde_json::Value::Bool(v.entry.headers.security_headers),
-    );
-    root.insert(
-        "hsts".to_string(),
-        serde_json::Value::Bool(v.entry.headers.hsts),
-    );
-
-    root.insert(
-        "error_docs_enabled".to_string(),
-        serde_json::Value::Bool(v.entry.error_docs.enabled),
-    );
-    root.insert(
-        "error_docs_dir".to_string(),
-        serde_json::Value::String(v.entry.error_docs.dir.clone()),
-    );
-
-    serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_else(|_| "{}".to_string())
+    zmax_config::vhost_json::format_loaded_vhost_json(v)
 }
 
 fn classify_ban_reason_key(reason: &str) -> &'static str {
@@ -811,19 +574,29 @@ fn classify_ban_reason_key(reason: &str) -> &'static str {
     }
 }
 
-async fn write_vhost_atomic(vhosts_dir: &Path, domain: &str, entry: &VHostEntry) -> Result<(), String> {
-    write_vhost_atomic_to_file(vhosts_dir, &format!("{}.toml", domain), domain, entry).await
-}
-
-async fn write_vhost_atomic_to_file(
+async fn write_vhost_atomic_with_rollback(
     vhosts_dir: &Path,
-    file_name: &str,
     domain: &str,
     entry: &VHostEntry,
-) -> Result<(), String> {
+    state: &Arc<ServerState>,
+) -> Result<usize, String> {
     tokio::fs::create_dir_all(vhosts_dir)
         .await
         .map_err(|e| format!("vhosts dizini oluşturulamadı: {}", e))?;
+
+    let file_name = format!("{}.toml", domain);
+    let target = vhosts_dir.join(&file_name);
+    let tmp_path = vhosts_dir.join(format!(".{}.tmp", file_name));
+
+    // Var olan dosyanın içeriğini belleğe yedekle (varsa)
+    let backup_bytes: Option<Vec<u8>> = if target.exists() {
+        match tokio::fs::read(&target).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) => return Err(format!("Mevcut vHost dosyası yedeklenemedi: {}", e)),
+        }
+    } else {
+        None
+    };
 
     let toml_text = serialize_vhost_toml(entry)
         .map_err(|e| format!("TOML serileştirme hatası: {}", e))?;
@@ -832,25 +605,60 @@ async fn write_vhost_atomic_to_file(
         domain, toml_text
     );
 
-    let safe_file = if file_name.trim().is_empty()
-        || file_name.contains('/')
-        || file_name.contains('\\')
-        || file_name.contains("..")
-    {
-        format!("{}.toml", domain)
-    } else {
-        file_name.to_string()
-    };
-    let target = vhosts_dir.join(&safe_file);
-    let tmp_path = vhosts_dir.join(format!(".{}.tmp", safe_file));
-    tokio::fs::write(&tmp_path, content.as_bytes())
-        .await
-        .map_err(|e| format!("Geçici vHost dosyası yazılamadı: {}", e))?;
+    // 1. Önce geçici dosyaya yaz
+    if let Err(e) = tokio::fs::write(&tmp_path, content.as_bytes()).await {
+        return Err(format!("Geçici vHost dosyası yazılamadı: {}", e));
+    }
+
+    // 2. Atomik rename ile asıl dosyanın üzerine taşı
     if let Err(e) = tokio::fs::rename(&tmp_path, &target).await {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(format!("vHost dosyası taşınamadı: {}", e));
     }
-    Ok(())
+
+    // 3. Çalışma zamanı durumunu (runtime) reload et
+    match reload_runtime_state(state).await {
+        Ok(count) => {
+            // Aktif çalışma zamanındaki vHost ile yazılanın birebir eşit olduğunu doğrula
+            let rt = state.runtime.read().await;
+            if let Some(loaded) = rt
+                .vhosts
+                .iter()
+                .find(|v| v.entry.name.eq_ignore_ascii_case(domain))
+            {
+                if let Some(diff) = zmax_config::vhost_entry_diff(entry, &loaded.entry) {
+                    drop(rt);
+                    rollback_vhost_file(&target, backup_bytes.as_deref()).await;
+                    let _ = reload_runtime_state(state).await;
+                    return Err(format!(
+                        "Aktif çalışma zamanı yapılandırması yazılanla eşleşmiyor: {}",
+                        diff
+                    ));
+                }
+            }
+            Ok(count)
+        }
+        Err(err) => {
+            // RELOAD HATASI: Çalışan eski TOML dosyasına geri dön (ROLLBACK)
+            rollback_vhost_file(&target, backup_bytes.as_deref()).await;
+            let _ = reload_runtime_state(state).await;
+            Err(format!(
+                "vHost uygulanamadı, çalışan TOML geri yüklendi: {}",
+                err
+            ))
+        }
+    }
+}
+
+async fn rollback_vhost_file(target: &Path, backup: Option<&[u8]>) {
+    match backup {
+        Some(old_content) => {
+            let _ = tokio::fs::write(target, old_content).await;
+        }
+        None => {
+            let _ = tokio::fs::remove_file(target).await;
+        }
+    }
 }
 
 fn percent_decode_component(input: &str) -> String {
@@ -904,318 +712,12 @@ fn parse_query_param(query: &str, key: &str) -> Option<String> {
     None
 }
 
-fn has_parent_dir_traversal(path: &str) -> bool {
-    path.contains('\0') || path.split(['/', '\\']).any(|seg| seg == "..")
-}
-
-fn merge_section_object(
-    root: &mut serde_json::Map<String, serde_json::Value>,
-    section_key: &str,
-    patch: &serde_json::Value,
-) -> Result<(), String> {
-    let patch_obj = patch.as_object().ok_or_else(|| {
-        format!("'{}' alani bir JSON nesnesi ({{...}}) olmalidir", section_key)
-    })?;
-    let target_entry = root
-        .entry(section_key.to_string())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    if !target_entry.is_object() {
-        *target_entry = serde_json::Value::Object(serde_json::Map::new());
-    }
-    if let Some(target_map) = target_entry.as_object_mut() {
-        for (k, v) in patch_obj {
-            target_map.insert(k.clone(), v.clone());
-        }
-    }
-    Ok(())
-}
-
-fn val_as_str(v: &serde_json::Value, field: &str) -> Result<String, String> {
-    v.as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("'{}' alani metin (string) olmalidir", field))
-}
-
-fn val_as_bool(v: &serde_json::Value, field: &str) -> Result<bool, String> {
-    v.as_bool()
-        .ok_or_else(|| format!("'{}' alani mantiksal (bool) olmalidir", field))
-}
-
-fn val_as_u64(v: &serde_json::Value, field: &str) -> Result<u64, String> {
-    v.as_u64()
-        .ok_or_else(|| format!("'{}' alani negatif olmayan tamsayi olmalidir", field))
-}
-
-fn val_as_usize(v: &serde_json::Value, field: &str) -> Result<usize, String> {
-    let n = val_as_u64(v, field)?;
-    usize::try_from(n).map_err(|_| format!("'{}' degeri tasma sinirini asiyor", field))
-}
-
-fn val_as_string_list(v: &serde_json::Value, field: &str) -> Result<Vec<String>, String> {
-    let arr = v
-        .as_array()
-        .ok_or_else(|| format!("'{}' alani dizi ([...]) olmalidir", field))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let s = item
-            .as_str()
-            .ok_or_else(|| format!("'{}' dizisi yalnizca metin icermelidir", field))?;
-        out.push(s.to_string());
-    }
-    Ok(out)
-}
-
 fn merge_vhost_json_patch(
     base: &VHostEntry,
     domain: &str,
     body: &[u8],
 ) -> Result<VHostEntry, String> {
-    let parsed: serde_json::Value = if body.iter().all(|b| b.is_ascii_whitespace()) {
-        serde_json::json!({})
-    } else {
-        serde_json::from_slice(body)
-            .map_err(|e| format!("Gecersiz JSON govdesi: {}", e))?
-    };
-    let obj = parsed
-        .as_object()
-        .ok_or_else(|| "JSON govdesi nesne ({...}) olmalidir".to_string())?;
-
-    let mut base_map = match serde_json::to_value(base) {
-        Ok(serde_json::Value::Object(m)) => m,
-        Ok(_) => return Err("Temel vHost serilestirme bicimi hatali".to_string()),
-        Err(e) => return Err(format!("Temel vHost serilestirilemedi: {}", e)),
-    };
-
-    if let Some(v) = obj.get("aliases") {
-        base_map.insert("aliases".to_string(), v.clone());
-    }
-    if let Some(v) = obj.get("document_root") {
-        base_map.insert("document_root".to_string(), v.clone());
-    }
-    if let Some(v) = obj.get("index_files") {
-        base_map.insert("index_files".to_string(), v.clone());
-    }
-
-    for section in [
-        "cache",
-        "php",
-        "ssl",
-        "security",
-        "rewrite",
-        "proxy",
-        "headers",
-        "logging",
-        "error_docs",
-        "tls",
-        "static",
-    ] {
-        if let Some(patch) = obj.get(section) {
-            merge_section_object(&mut base_map, section, patch)?;
-        }
-    }
-    if let Some(patch) = obj.get("static_files") {
-        merge_section_object(&mut base_map, "static", patch)?;
-    }
-
-    let mut entry: VHostEntry = serde_json::from_value(serde_json::Value::Object(base_map))
-        .map_err(|e| format!("vHost alanlari ayristirilamadi: {}", e))?;
-    entry.name = domain.to_string();
-
-    // Geriye dönük düz kısayol alanlarını uygula
-    if let Some(v) = obj.get("cache_enabled") {
-        entry.cache.enabled = val_as_bool(v, "cache_enabled")?;
-    }
-    if let Some(v) = obj.get("cache_expire") {
-        entry.cache.expire = val_as_u64(v, "cache_expire")?;
-    }
-
-    if let Some(v) = obj.get("php_enabled") {
-        entry.php.enabled = val_as_bool(v, "php_enabled")?;
-    }
-    if let Some(v) = obj.get("php_sapi") {
-        entry.php.sapi = val_as_str(v, "php_sapi")?;
-    }
-    if let Some(v) = obj.get("php_upstream") {
-        entry.php.upstream = val_as_str(v, "php_upstream")?;
-    }
-    if let Some(v) = obj.get("php_timeout") {
-        entry.php.timeout = val_as_u64(v, "php_timeout")?;
-    }
-    if let Some(v) = obj.get("php_upstreams").or_else(|| obj.get("upstreams")) {
-        entry.php.upstreams = val_as_string_list(v, "upstreams")?;
-    }
-    if let Some(v) = obj.get("lb_policy") {
-        entry.php.lb_policy = val_as_str(v, "lb_policy")?;
-    }
-    if let Some(v) = obj.get("dial_timeout_ms") {
-        entry.php.dial_timeout_ms = val_as_u64(v, "dial_timeout_ms")?;
-    }
-    if let Some(v) = obj.get("io_timeout_secs") {
-        entry.php.io_timeout_secs = val_as_u64(v, "io_timeout_secs")?;
-    }
-    if let Some(v) = obj.get("keep_conn") {
-        entry.php.keep_conn = val_as_bool(v, "keep_conn")?;
-    }
-    if let Some(v) = obj.get("max_idle_conns") {
-        entry.php.max_idle_conns = val_as_usize(v, "max_idle_conns")?;
-    }
-    if let Some(v) = obj.get("resolve_root_symlink") {
-        entry.php.resolve_root_symlink = val_as_bool(v, "resolve_root_symlink")?;
-    }
-    if let Some(v) = obj.get("allow_x_accel_redirect") {
-        entry.php.allow_x_accel_redirect = val_as_bool(v, "allow_x_accel_redirect")?;
-    }
-    if let Some(v) = obj.get("x_accel_prefix") {
-        entry.php.x_accel_prefix = val_as_str(v, "x_accel_prefix")?;
-    }
-
-    if let Some(v) = obj.get("ssl_cert") {
-        entry.ssl.certificate = val_as_str(v, "ssl_cert")?;
-    }
-    if let Some(v) = obj.get("ssl_key") {
-        entry.ssl.key = val_as_str(v, "ssl_key")?;
-    }
-
-    if let Some(v) = obj.get("hotlink_protection") {
-        entry.security.hotlink_protection = val_as_bool(v, "hotlink_protection")?;
-    }
-    if let Some(v) = obj.get("force_https") {
-        entry.security.force_https = val_as_bool(v, "force_https")?;
-    }
-    if let Some(v) = obj.get("allow_ips") {
-        entry.security.allow_ips = val_as_string_list(v, "allow_ips")?;
-    }
-    if let Some(v) = obj.get("deny_ips") {
-        entry.security.deny_ips = val_as_string_list(v, "deny_ips")?;
-    }
-    if let Some(v) = obj.get("waf_enabled") {
-        entry.security.waf_enabled = match v {
-            serde_json::Value::Null => None,
-            serde_json::Value::Bool(b) => Some(*b),
-            _ => {
-                return Err("'waf_enabled' alani bool veya null olmalidir".to_string());
-            }
-        };
-    }
-    if let Some(v) = obj.get("wp_brute_force") {
-        entry.security.wp_brute_force = val_as_bool(v, "wp_brute_force")?;
-    }
-    if let Some(v) = obj.get("waf_exclude_paths") {
-        entry.security.waf_exclude_paths = val_as_string_list(v, "waf_exclude_paths")?;
-    }
-
-    if let Some(v) = obj.get("logging_enabled") {
-        entry.logging.enabled = val_as_bool(v, "logging_enabled")?;
-    }
-    if let Some(v) = obj.get("access_log") {
-        entry.logging.access_log = val_as_str(v, "access_log")?;
-    }
-    if let Some(v) = obj.get("error_log") {
-        entry.logging.error_log = val_as_str(v, "error_log")?;
-    }
-    if let Some(v) = obj.get("log_format") {
-        entry.logging.format = val_as_str(v, "log_format")?;
-    }
-    if let Some(v) = obj.get("max_log_size_mb") {
-        entry.logging.max_log_size_mb = val_as_u64(v, "max_log_size_mb")?;
-    }
-    if let Some(v) = obj.get("also_write_global") {
-        entry.logging.also_write_global = val_as_bool(v, "also_write_global")?;
-    }
-
-    if let Some(v) = obj.get("http2") {
-        entry.tls.http2 = val_as_bool(v, "http2")?;
-    }
-    if let Some(v) = obj.get("strict_sni") {
-        entry.tls.strict_sni = val_as_bool(v, "strict_sni")?;
-    }
-    if let Some(v) = obj.get("tls_min_version") {
-        entry.tls.min_version = val_as_str(v, "tls_min_version")?;
-    }
-
-    if let Some(v) = obj.get("precompressed") {
-        entry.static_files.precompressed = val_as_bool(v, "precompressed")?;
-    }
-    if let Some(v) = obj.get("brotli") {
-        entry.static_files.brotli = val_as_bool(v, "brotli")?;
-    }
-    if let Some(v) = obj.get("gzip") {
-        entry.static_files.gzip = val_as_bool(v, "gzip")?;
-    }
-    if let Some(v) = obj.get("autoindex") {
-        entry.static_files.autoindex = val_as_bool(v, "autoindex")?;
-    }
-    if let Some(v) = obj.get("sendfile") {
-        entry.static_files.sendfile = val_as_bool(v, "sendfile")?;
-    }
-
-    if let Some(v) = obj.get("rewrite_enabled") {
-        entry.rewrite.enabled = val_as_bool(v, "rewrite_enabled")?;
-    }
-    if let Some(v) = obj.get("try_files") {
-        entry.rewrite.try_files = val_as_bool(v, "try_files")?;
-    }
-    if let Some(v) = obj.get("htaccess") {
-        entry.rewrite.htaccess = val_as_bool(v, "htaccess")?;
-    }
-
-    if let Some(v) = obj.get("proxy_enabled") {
-        entry.proxy.enabled = val_as_bool(v, "proxy_enabled")?;
-    }
-    if let Some(v) = obj.get("proxy_upstream") {
-        entry.proxy.upstream = val_as_str(v, "proxy_upstream")?;
-    }
-    if let Some(v) = obj.get("proxy_path_prefix") {
-        entry.proxy.path_prefix = val_as_str(v, "proxy_path_prefix")?;
-    }
-    if let Some(v) = obj.get("preserve_host") {
-        entry.proxy.preserve_host = val_as_bool(v, "preserve_host")?;
-    }
-    if let Some(v) = obj.get("websocket") {
-        entry.proxy.websocket = val_as_bool(v, "websocket")?;
-    }
-
-    if let Some(v) = obj.get("security_headers") {
-        entry.headers.security_headers = val_as_bool(v, "security_headers")?;
-    }
-    if let Some(v) = obj.get("hsts") {
-        entry.headers.hsts = val_as_bool(v, "hsts")?;
-    }
-
-    if let Some(v) = obj.get("error_docs_enabled") {
-        entry.error_docs.enabled = val_as_bool(v, "error_docs_enabled")?;
-    }
-    if let Some(v) = obj.get("error_docs_dir") {
-        entry.error_docs.dir = val_as_str(v, "error_docs_dir")?;
-    }
-
-    if entry.document_root.contains("..")
-        || entry.document_root.contains('\0')
-        || entry.document_root.trim().is_empty()
-    {
-        return Err("Gecersiz document_root yolu".to_string());
-    }
-    for (label, path_val) in [
-        ("logging.access_log", entry.logging.access_log.as_str()),
-        ("logging.error_log", entry.logging.error_log.as_str()),
-        ("error_docs.dir", entry.error_docs.dir.as_str()),
-        ("ssl.certificate", entry.ssl.certificate.as_str()),
-        ("ssl.key", entry.ssl.key.as_str()),
-    ] {
-        if has_parent_dir_traversal(path_val) {
-            return Err(format!("Gecersiz {} dosya yolu: '{}'", label, path_val));
-        }
-    }
-
-    entry.validate()?;
-    if entry.php.enabled && entry.effective_php_upstreams().is_empty() {
-        return Err("PHP etkin ancak upstream bos olamaz".to_string());
-    }
-    if entry.proxy.enabled && entry.proxy.upstream.trim().is_empty() {
-        return Err("Proxy etkin ancak upstream bos olamaz".to_string());
-    }
-
-    Ok(entry)
+    zmax_config::vhost_json::merge_vhost_json_patch(base, domain, body)
 }
 
 /// Ters vekil arkasındaki panel/API isteklerinden yapılandırılmış `proxy_prefix` önekini soyar.
@@ -2084,22 +1586,31 @@ where
             }
         };
 
-        let document_root = if let Some(doc_root) = extract_json_string(&body_str, "document_root") {
+        let (existing_opt, vhosts_dir) = {
+            let rt = state.runtime.read().await;
+            (
+                rt.vhosts
+                    .iter()
+                    .find(|v| v.entry.name.eq_ignore_ascii_case(&domain))
+                    .map(|v| v.entry.clone()),
+                rt.vhosts_dir.clone(),
+            )
+        };
+
+        let mut base_entry = existing_opt.unwrap_or_else(|| VHostEntry {
+            name: domain.clone(),
+            document_root: format!("www/{}", domain),
+            ..VHostEntry::default()
+        });
+
+        if let Some(doc_root) = extract_json_string(&body_str, "document_root") {
             if doc_root.contains("..") || doc_root.contains('\0') || doc_root.trim().is_empty() {
                 let err = r#"{"ok":false,"error":"Gecersiz document_root yolu"}"#;
                 send_json_response(socket, 400, "Bad Request", &cors_origin, err).await?;
                 return Ok(true);
             }
-            doc_root
-        } else {
-            format!("www/{}", domain)
-        };
-
-        let base_entry = VHostEntry {
-            name: domain.clone(),
-            document_root,
-            ..VHostEntry::default()
-        };
+            base_entry.document_root = doc_root;
+        }
 
         let entry = match merge_vhost_json_patch(&base_entry, &domain, &req.body) {
             Ok(e) => e,
@@ -2110,20 +1621,20 @@ where
             }
         };
 
-        let vhosts_dir = state.runtime.read().await.vhosts_dir.clone();
-        if let Err(e) = write_vhost_atomic(&vhosts_dir, &domain, &entry).await {
-            let err = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&e));
-            send_json_response(socket, 500, "Internal Server Error", &cors_origin, &err).await?;
-            return Ok(true);
+        match write_vhost_atomic_with_rollback(&vhosts_dir, &domain, &entry, state).await {
+            Ok(count) => {
+                let json = format!(
+                    r#"{{"ok":true,"status":"saved","domain":"{}","vhosts_loaded":{}}}"#,
+                    json_escape(&domain),
+                    count
+                );
+                send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
+            }
+            Err(e) => {
+                let err = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&e));
+                send_json_response(socket, 400, "Bad Request", &cors_origin, &err).await?;
+            }
         }
-
-        let count = reload_runtime_state(state).await.unwrap_or(0);
-        let json = format!(
-            r#"{{"ok":true,"status":"saved","domain":"{}","vhosts_loaded":{}}}"#,
-            json_escape(&domain),
-            count
-        );
-        send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
         return Ok(true);
     }
 
@@ -2451,5 +1962,255 @@ token = "api-secret-token"
             call_route(&state, true, "GET", "/v1/zmax/api", Vec::new()).await;
         assert!(handled_api_root);
         assert!(resp_api_root.contains(r#""status":"ok""#), "{resp_api_root}");
+    }
+
+    #[tokio::test]
+    async fn test_vhost_api_crud_full_fields_put_get_equality_and_atomic_rollback() {
+        use tokio::io::AsyncReadExt;
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let test_dir = std::env::temp_dir().join(format!("zmax_test_crud_{}_{}", std::process::id(), nanos));
+        let conf_dir = test_dir.join("conf");
+        let vhosts_dir = conf_dir.join("vhosts");
+        let modules_dir = test_dir.join("modules");
+        let www_dir = test_dir.join("www");
+        std::fs::create_dir_all(&vhosts_dir).unwrap();
+        std::fs::create_dir_all(&modules_dir).unwrap();
+        std::fs::create_dir_all(&www_dir).unwrap();
+
+        let conf_path = conf_dir.join("zmax.toml");
+        std::fs::write(
+            &conf_path,
+            r#"
+[server]
+server_name = "ZMax/Test"
+
+[vhosts_dir]
+path = "conf/vhosts"
+"#,
+        )
+        .unwrap();
+
+        let cfg = ZMaxConfig::load_or_default(&conf_path).unwrap();
+        let modules = LoadedModules::default();
+        let policies = compile_policies(&cfg, &modules);
+        let auth = compute_effective_auth(&cfg);
+
+        let state = Arc::new(ServerState {
+            base_dir: test_dir.clone(),
+            cache: zmax_cache::ZMaxCache::new(1024 * 1024, 60),
+            limiter: RwLock::new(zmax_security::RateLimiter::new(1000)),
+            ban_manager: Arc::new(zmax_security::IpBanManager::new()),
+            wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
+            buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
+            upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
+            runtime: RwLock::new(RuntimeState {
+                config: cfg,
+                vhosts: Vec::new(),
+                modules,
+                policies,
+                redis_client: None,
+                auth,
+                conf_path: conf_path.clone(),
+                vhosts_dir: vhosts_dir.clone(),
+                modules_dir: modules_dir.clone(),
+            }),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(test_dir.clone())),
+            tls: Arc::new(zmax_tls::SniResolver::new()),
+            admin_tls: Arc::new(zmax_tls::SniResolver::new()),
+            api_tls: Arc::new(zmax_tls::SniResolver::new()),
+            log_manager: Arc::new(crate::logger::AsyncLogManager::new(
+                test_dir.clone(),
+                test_dir.join("logs/access.log"),
+                test_dir.join("logs/error.log"),
+                250,
+                64,
+            )),
+            htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
+            shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            access_logs: Mutex::new(VecDeque::new()),
+            stats: ServerStats {
+                start_time: Instant::now(),
+                total_requests: AtomicU64::new(0),
+                cache_hits: AtomicU64::new(0),
+                cache_misses: AtomicU64::new(0),
+            },
+        });
+
+        async fn run_api_req(
+            state: &Arc<ServerState>,
+            method: &str,
+            path: &str,
+            body: &[u8],
+        ) -> (bool, String) {
+            let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+            let req = ParsedHttpRequest {
+                method: method.to_string(),
+                path: path.to_string(),
+                query: String::new(),
+                version: 1,
+                host: "127.0.0.1".to_string(),
+                headers: Vec::new(),
+                body: body.to_vec(),
+                keep_alive: false,
+            };
+            let st = Arc::clone(state);
+            let task = tokio::spawn(async move {
+                let handled = handle_api_route(&mut server, &req, &st, true).await.unwrap();
+                let _ = server.shutdown().await;
+                handled
+            });
+            let mut out = Vec::new();
+            client.read_to_end(&mut out).await.unwrap();
+            let handled = task.await.unwrap();
+            (handled, String::from_utf8_lossy(&out).into_owned())
+        }
+
+        let toml_file = vhosts_dir.join("crud.test.toml");
+
+        // 1. PUT /api/v1/vhosts/crud.test - Tüm alanların yazılması
+        let put_body = r#"{
+            "document_root": "www/crud.test",
+            "aliases": ["www.crud.test"],
+            "hotlink_protection": true,
+            "allow_ips": ["10.0.0.1/32"],
+            "deny_ips": ["192.168.1.100"],
+            "waf_enabled": true,
+            "wp_brute_force": false,
+            "waf_exclude_paths": ["/muaf/yol"],
+            "security_headers": true,
+            "hsts": true,
+            "logging_enabled": true,
+            "access_log": "logs/crud_access.log",
+            "error_log": "logs/crud_error.log",
+            "log_format": "%h %l %u %t \"%r\" %>s %b",
+            "max_log_size_mb": 42,
+            "also_write_global": false,
+            "error_docs_enabled": true,
+            "error_docs_dir": "errors",
+            "error_docs_pages": {
+                "404": "404.html",
+                "500": "500.html"
+            },
+            "rewrite_enabled": true,
+            "try_files": true,
+            "htaccess": false,
+            "rewrite_rules": [
+                {
+                    "pattern": "^/eski$",
+                    "target": "/yeni",
+                    "status": 301,
+                    "flags": ["L"],
+                    "last": true
+                }
+            ],
+            "http2": true,
+            "strict_sni": true,
+            "tls_min_version": "1.3"
+        }"#;
+
+        let (handled, resp) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", put_body.as_bytes()).await;
+        assert!(handled);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "{resp}");
+        assert!(resp.contains(r#""status":"saved""#), "{resp}");
+        assert!(toml_file.exists(), "vHost TOML dosyası diske yazılmış olmalıdır");
+
+        let original_toml = std::fs::read_to_string(&toml_file).unwrap();
+        assert!(!original_toml.is_empty());
+
+        // 2. GET /api/v1/vhosts/crud.test - Geri okuma ve birebir eşitlik
+        let (handled_get, resp_get) = run_api_req(&state, "GET", "/api/v1/vhosts/crud.test", &[]).await;
+        assert!(handled_get);
+        assert!(resp_get.starts_with("HTTP/1.1 200 OK"), "{resp_get}");
+
+        let body_json = resp_get.split("\r\n\r\n").nth(1).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body_json).unwrap();
+        assert_eq!(v["ok"], true);
+        let vhost = &v["vhost"];
+
+        assert_eq!(vhost["domain"], "crud.test");
+        assert_eq!(vhost["document_root"], "www/crud.test");
+        assert_eq!(vhost["hotlink_protection"], true);
+        assert_eq!(vhost["security"]["hotlink_protection"], true);
+        assert_eq!(vhost["allow_ips"], serde_json::json!(["10.0.0.1/32"]));
+        assert_eq!(vhost["security"]["allow_ips"], serde_json::json!(["10.0.0.1/32"]));
+        assert_eq!(vhost["deny_ips"], serde_json::json!(["192.168.1.100"]));
+        assert_eq!(vhost["waf_enabled"], true);
+        assert_eq!(vhost["security"]["waf_enabled"], true);
+        assert_eq!(vhost["wp_brute_force"], false);
+        assert_eq!(vhost["waf_exclude_paths"], serde_json::json!(["/muaf/yol"]));
+        assert_eq!(vhost["security_headers"], true);
+        assert_eq!(vhost["headers"]["security_headers"], true);
+        assert_eq!(vhost["hsts"], true);
+        assert_eq!(vhost["logging_enabled"], true);
+        assert_eq!(vhost["access_log"], "logs/crud_access.log");
+        assert_eq!(vhost["error_log"], "logs/crud_error.log");
+        assert_eq!(vhost["log_format"], "%h %l %u %t \"%r\" %>s %b");
+        assert_eq!(vhost["max_log_size_mb"], 42);
+        assert_eq!(vhost["also_write_global"], false);
+        assert_eq!(vhost["error_docs_enabled"], true);
+        assert_eq!(vhost["error_docs_dir"], "errors");
+        assert_eq!(vhost["error_docs_pages"]["404"], "404.html");
+        assert_eq!(vhost["error_docs_pages"]["500"], "500.html");
+        assert_eq!(vhost["rewrite_enabled"], true);
+        assert_eq!(vhost["rewrite_rules"][0]["pattern"], "^/eski$");
+        assert_eq!(vhost["rewrite_rules"][0]["status"], 301);
+        assert_eq!(vhost["http2"], true);
+        assert_eq!(vhost["tls_min_version"], "1.3");
+
+        // Aktif çalışma zamanındaki nesne eşitliği
+        {
+            let rt = state.runtime.read().await;
+            let loaded = rt.vhosts.iter().find(|x| x.entry.name == "crud.test").expect("vHost runtime'da bulunmalıdır");
+            assert!(loaded.entry.security.hotlink_protection);
+            assert_eq!(loaded.entry.security.allow_ips, vec!["10.0.0.1/32"]);
+            assert_eq!(loaded.entry.security.waf_exclude_paths, vec!["/muaf/yol"]);
+            assert_eq!(loaded.entry.rewrite.rules.len(), 1);
+            assert_eq!(loaded.entry.error_docs.pages.get(&404).map(String::as_str), Some("404.html"));
+        }
+
+        // 3. Bozuk JSON durumunda 400 Bad Request ve dosyanın DEĞİŞMEMESİ
+        let (handled_bad, resp_bad) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", b"{bozuk_json:").await;
+        assert!(handled_bad);
+        assert!(resp_bad.starts_with("HTTP/1.1 400 Bad Request"), "{resp_bad}");
+        let after_bad_toml = std::fs::read_to_string(&toml_file).unwrap();
+        assert_eq!(after_bad_toml, original_toml, "Bozuk JSON sonrası TOML dosyası asla değişmemelidir");
+
+        // 4. Geçersiz alan (geçersiz IP ACL) durumunda 400 Bad Request ve dosyanın DEĞİŞMEMESİ
+        let (handled_inv, resp_inv) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", br#"{"allow_ips":["gecersiz_ip_degeri"]}"#).await;
+        assert!(handled_inv);
+        assert!(resp_inv.starts_with("HTTP/1.1 400 Bad Request"), "{resp_inv}");
+        let after_inv_toml = std::fs::read_to_string(&toml_file).unwrap();
+        assert_eq!(after_inv_toml, original_toml, "Geçersiz alan sonrası TOML dosyası asla değişmemelidir");
+
+        // 5. Path traversal durumunda 400 Bad Request ve dosyanın DEĞİŞMEMESİ
+        let (handled_trav, resp_trav) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", br#"{"document_root":"../../../etc/passwd"}"#).await;
+        assert!(handled_trav);
+        assert!(resp_trav.starts_with("HTTP/1.1 400 Bad Request"), "{resp_trav}");
+        let after_trav_toml = std::fs::read_to_string(&toml_file).unwrap();
+        assert_eq!(after_trav_toml, original_toml, "Traversal saldırısı sonrası TOML dosyası asla değişmemelidir");
+
+        // 6. Kısmi Alan Güncellemesi (Patch)
+        let patch_body = r#"{"hotlink_protection": false, "security": {"waf_enabled": false}}"#;
+        let (handled_patch, resp_patch) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", patch_body.as_bytes()).await;
+        assert!(handled_patch);
+        assert!(resp_patch.starts_with("HTTP/1.1 200 OK"), "{resp_patch}");
+
+        let (handled_patch_get, resp_patch_get) = run_api_req(&state, "GET", "/api/v1/vhosts/crud.test", &[]).await;
+        assert!(handled_patch_get);
+        let patch_json: serde_json::Value = serde_json::from_str(resp_patch_get.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let patch_vhost = &patch_json["vhost"];
+        assert_eq!(patch_vhost["hotlink_protection"], false);
+        assert_eq!(patch_vhost["security"]["waf_enabled"], false);
+        // Önceki alanlar korunmuş olmalıdır
+        assert_eq!(patch_vhost["allow_ips"], serde_json::json!(["10.0.0.1/32"]));
+        assert_eq!(patch_vhost["error_docs_pages"]["404"], "404.html");
+        assert_eq!(patch_vhost["rewrite_rules"][0]["pattern"], "^/eski$");
+
+        // Temizlik
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }
