@@ -22,8 +22,10 @@
 |---|---|---|---|
 | 1 | Faz 0 doğrulama + istek hattı entegrasyon testleri | **ONAYLI** (denetçi, 6. denetim) | 2026-11-12 |
 | 2 | Günlükte gerçek bayt, panel/fail2ban uyumu | BEKLİYOR (başlanabilir) | — |
+| 4 | `.htaccess` ve yönlendirme | **ONAYLI** (denetçi, 1. denetim; UNIT TESTED düzeyi) | 2026-11-12 |
+| 7 | Go: `RenderZmaxVhost` genişletme (panel) | **ONAYLI** (denetçi, 1. denetim) | 2026-11-12 |
 | 3 | vhost API CRUD (**not:** `api.rs` `merge_vhost_json_patch` ön çalışması Kart 1 sırasında yapıldı; Kart 3'te PUT↔GET turu, geri alma ve testle KANITLANACAK) | BEKLİYOR | — |
-| 4–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
+| 5, 6, 8–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
 
 ---
 
@@ -147,3 +149,35 @@ Kart 1'in kararı RED (küçük): 2 madde açık. DUZELTMELER.md'deki "ONAYLI" k
 3. Küçük: betik hem "BAYAT" işaretli hem "KANITLANDI" yazıyor; ya BAYAT notunu kaldır ya betiği çalıştırma. (Not: betik HTTP/2'yi sınamıyor; "8 madde kanıtlandı" ifadesi abartılı.)
 
 **Sonraki:** Kart 2 başlayabilir. Kural: raporunu `BITTI.md`'ye yaz, öz denetimini uygula, kararı bekle.
+
+
+---
+
+## Kart 7 — 1. denetim (2026-11-12 ~02:35) — KARAR: ONAYLI (denetçi yazdı; 5 karara cevap)
+
+**Bağımsız doğrulananlar (benim çalıştırmam):** `go test -count=1` — `internal/{sites,webserver,domainsec,modsec,redirects,zmaxconf}`: hepsi `ok` · `gofmt -l` çıktı boş · `GOOS=linux go vet` (sites/webserver/domainsec) çıkış 0 · `zz_dump_test.go` artık dosyası yok · `D:\zmaxserver` altında kart dışı dosya değişikliği yok (yalnız `bitti/KART-7.md`) · rapor dürüst: etiketler UNIT TESTED/`zmax -t` yapılandırma doğrulaması, "istek hattında gerçek istek ve VM DENENMEDİ" açıkça yazılı, kart dışı iş (`webserver.Service.Selected`, `rpc` 2 satır) gerekçeli.
+
+**Raporun denetçi kararı istediği 5 nokta:**
+| # | Karar | Cevap |
+|---|---|---|
+| 1 | Hotlink: izinli ek alan adı varsa `false` | **KABUL.** Ortak site kesilmesin (fail-open). ZMax şemasına izinli liste gelince (Kart 5) güncellenecek. |
+| 2 | WAF detect kipinde `waf_enabled` yazma | **KABUL.** |
+| 3 | WAF istisnası: rule-id → yol bazlı tam muafiyet (kök hariç) | **KABUL, risk kayıtlı:** panelde tek kural için istisna ZMax'te o yolun WAF'ını tümden kapatır. Kart 11'de (WAF olay günlüğü/kural bazlı istisna) yeniden ele alınacak. |
+| 4 | `[vhost.proxy]` yazılmadı (talimat 'şemada yok' demişti, şemada VAR) | **ERTELENDİ:** Rust Kart 10 (vekil davranışı) ONAYLI olunca ayrı iş "Kart 7b: `[vhost.proxy]` (Node/webmail/Zplus)". |
+| 5 | `also_write_global=false`, `max_log_size_mb=2047` | **KABUL** (OLS karşılığı). Döndürmenin kimde olduğu (panel/ZMax) Kart 2 sözleşmesinde netleşecek. |
+
+**Açık kalanlar (Kart 7'nin içi değil, yol haritasında):** günlük dizini yoksa `[vhost.logging]` yazılmaması (panel `SyncZmax` dizini yaratmıyor) · ZMax işçi hesabının günlük dizinine yazma izni · panelin ürettiği TOML ile GERÇEK istek ve VM denemesi · parola koruması (Kart 9) · hotlink liste/uzantı (Kart 5) · güvenlik başlıkları, `[[vhost.rewrite]]`, www zorlaması, ACME ortak kök, kaba kuvvet, keep-alive, `lsapi`.
+**Sonraki (Go):** Kart 7b ve günlük dizini yaratma, ilgili Rust kartları ONAYLI oldukça.
+
+
+---
+
+## Kart 4 — 1. denetim (2026-11-12 ~02:55) — KARAR: ONAYLI (denetçi yazdı; UNIT TESTED düzeyi)
+
+**Bağımsız doğrulananlar (benim çalıştırmam, ayrı worktree + ayrı `target`):** `cargo test --workspace --offline` kart dalında **228 geçti / 0 kaldı / 0 atlandı** (220 + 8 yeni) · `cargo test -p zmax-rewrite` **33/0** (rapor: 25→33, doğru) · Kart 4 commit'i (`3bbd596`) yalnız `crates/zmax-rewrite/src/{htaccess.rs,lib.rs}` değiştiriyor (sahip olunan dosyalar; kart dışı dosya yok) · artık dosya yok · rapor dürüst: etiketler UNIT TESTED, "VM ve gerçek `curl` DENENMEDİ" yazılı.
+**`main`'e birleştirildi:** yalnız `3bbd596` `main` üzerine cherry-pick edildi (`079a1c3`), `main`'de `cargo test --workspace` **228/0/0**, GitHub'a itildi.
+
+**Notlar (tekrarlanmasın):**
+1. **Dal tabanı yanlış:** `kart-4-htaccess` `origin/main`'den değil, onaylanmamış **Kart 2'nin ucundan** (`718948e`) açılmış (kural §8c.3: `origin/main`'den). `main..kart-4` farkında Kart 2'nin `logger.rs`/`goentegre.md` değişiklikleri de görünüyordu. Ben yalnız Kart 4 commit'ini aldım. Sonraki kartlarda `git checkout -b kart-<no> origin/main`.
+2. Rapor "kural sürümü v5" diyor; o sırada geçerli sürüm v6 idi (çalışırken kuralı yeniden okumadı). Sürekli yeniden okuma kuralı (§ "Sürekli kurala bak").
+3. Kartın kabul testi `curl`/gerçek istek maddeleri (WordPress `/ornek-yazi/` 200, `force_https` 301, www↔non-www 301, FilesMatch 403) **istek hattından (zmax-bin) geçirilmedi**; yalnız `zmax-rewrite` birim testleri. `Outcome::Forbidden`'ın (FilesMatch) `web_engine.rs`'te 403'e çevrildiği ayrıca doğrulanmadı. Bu madde **Kart 12 (OLS denklik kapısı / yan yana test)** içinde kanıtlanacak; o zamana kadar etiket UNIT TESTED kalır.

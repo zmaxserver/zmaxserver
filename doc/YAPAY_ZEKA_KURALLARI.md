@@ -1,7 +1,7 @@
 # ZMax Server — Yapay Zeka Çalışma Kuralları
 
 Bu klasörde (`D:\zmaxserver`) kod ya da belge yazan her yapay zeka işe başlamadan bu dosyayı okur ve aynen uygular.
-**Kural sürümü: v5 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, bölüm 8c.)
+**Kural sürümü: v6 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, bölüm 8c. v6: çakışma önleme + git kancaları, bölüm 8c madde 9.)
 **SÜREKLİ KURALA BAK (zorunlu):** Bu dosyayı yalnız işe başlarken değil **çalışırken de** yeniden oku: (a) her yeni görev kartının başında, (b) her ~30 dakikada ya da ~20 araç çağrısında bir, (c) kod yazmaya/silmeye/bağlamaya başlamadan hemen önce, (d) bir testi "geçti" ya da bir özelliği "bitti" demeden önce, (e) uzun bir kesintiden (bağlam sıkıştırma, yeniden başlatma) sonra, (f) `DUZELTMELER.md` yeni karar yazdığında. Her okumada **kural sürümü** satırını bir öncekiyle karşılaştır; değiştiyse dosyanın tamamını baştan oku. Hafızandaki eski kurala güvenme. Raporda "Kural son okunma: <saat>, sürüm v4" yaz.
 **ZORUNLU OKUMA (işe başlamadan, bu sırayla; okumadan kod yazma):**
 1. Bu dosya.
@@ -98,6 +98,13 @@ Bu denetimi atlayan rapor geçersiz sayılır.
 6. **RED'de** aynı dala yeni commit at, `git push` et (aynı dal); yeni bölümü rapora ekle.
 7. Rapor/karar dosyaları (`BITTI.md`, `bitti/`, `DUZELTMELER.md`) `main`'dedir: **`DUZELTMELER.md`'yi yalnız denetçi commit eder**; sen dalında bu dosyayı değiştirme.
 8. Çakışma çıkarsa **çözmeye çalışma, durma**: raporda "çakışma: <dosya>" yaz; denetçi çözer.
+9. **ÇAKIŞMAYI ÖNLEME (v6, zorunlu):**
+   - **Ana klasör `D:\zmaxserver` iletişim yeridir** (karar/rapor dosyaları orada). Devam eden kartını bu klasörde bitirebilirsin; **bir sonraki karttan itibaren kendi worktree'ni aç ve orada çalış:** `git worktree add D:\zmaxserver-ajan\<ad> -b kart-<no>-<ad> origin/main`. Aynı klasörde iki dal olmaz.
+   - **Karar ve rapor dosyalarını ABSOLUT yolla oku/yaz:** `D:\zmaxserver\doc\DUZELTMELER.md` (yalnız oku), `D:\zmaxserver\doc\bitti\KART-<no>.md` (yaz). Bu dosyalar **dal commit'ine GİRMEZ**.
+   - **`git add -A`, `git add .`, `git commit -a` YASAK.** Değiştirdiğin dosyaları **adıyla** ekle; her commit öncesi `git diff --cached --stat` ile kart dışı dosya olmadığını doğrula.
+   - **Commit etme:** `doc/DUZELTMELER.md`, `doc/BITTI.md`, `doc/bitti/` (denetçi `main`'de commit eder), `doc/ornekmimariler/`, `target/`, `*.pem`, `*.key`.
+   - **Bu kurallar şu an git kancasıyla ZORLANMIYOR** (kanca kurulumu sahip onayını bekliyor); uyum **denetçi tarafından commit geçmişinden (`git log`, `git diff --stat`) kontrol edilir**: `main`'e ajan commit'i, dal commit'inde iletişim dosyası ya da kart dışı dosya bulunursa kart RED olur. İleride kanca kurulursa (`.git/hooks`) onu atlatma/değiştirme/silme (`--no-verify`, `core.hooksPath`) **kesin yasak**.
+   - Başka birinin (denetçi/ajan) dosyasını **değiştirme, geri alma (`git checkout -- <dosya>`), silme**.
 
 ## 8b. Köprü: denetçiyle otomatik bildirim (bil ve ona göre yaz)
 Seninle denetçi (Claude) arasında **otomatik bir köprü çalışır**: `doc/tools/kopru_izle.py` her 5 sn'de `BITTI.md` ve `DUZELTMELER.md`'yi izler; içerik değişince denetçiye anında bildirim gider. Bu yüzden:
