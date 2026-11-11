@@ -122,10 +122,10 @@ Ban akışı: ZMax saldırganı kapıda keser; Go `GET /api/v1/security/bans` il
 
 ## 6. Günlük sözleşmesi (Go ↔ Rust)
 
-- ZMax vhost başına `access.log` ve `error.log` yazar (hedef biçim NCSA combined: `IP - - [%d/%b/%Y:%H:%M:%S %z] "METHOD PATH HTTP/x" STATUS BAYT "Referer" "UA"`; isteğe bağlı JSON; `X-Request-Id`), `max_log_size_mb` ile döndürür, `SIGUSR1` ile dosyaları yeniden açar. **Bugün:** şema var, `zmax-bin` vhost günlüğünü okumuyor; satırda zaman damgası yok ve bayt sabit `-` (IMPLEMENTED, yalnız şema).
-- Panelin günlük sayfası, istatistik ve **trafik/kota hesabı** bu baytlara dayanacağı için, ZMax gerçek gönderilen baytı yazana kadar trafik rakamı ZMax altında doğru olmaz.
-- Günlük dosya yolu: panel şu an OpenLiteSpeed yolunu (`/var/log/zpanel/<alan>/access.log`) okur; ZMax tarafı için kaynaklar `/var/www/vhosts/<alan>/logs/access.log` ya da `logs/vhosts/<alan>.access.log` yazıyordu. **Hangisinin kullanılacağı kesinleşmedi (bilinmiyor)** — Faz 1 başında Go ve Rust birlikte tek yolu seçer ve bu satır güncellenir.
-- Go: günlük sayfası, `.gz` arşiv/döndürme, istatistik ve trafik hesabını ZMax günlüğüne bağlar; ZMax yeniden açma sinyalini rotasyondan sonra bekler.
+- ZMax vhost başına `access_log` ve `error_log` yazar (hedef biçim NCSA combined: `IP - - [%d/%b/%Y:%H:%M:%S %z] "METHOD PATH HTTP/x" STATUS BAYT "Referer" "UA"`; isteğe bağlı JSON; `X-Request-Id`), `max_log_size_mb` ile döndürür, `SIGUSR1` ile dosyaları yeniden açar.
+- Panelin günlük sayfası, istatistik ve **trafik/kota hesabı** bu baytlara dayanır. NCSA `%b` standardına tam uyumludur: gövde içeren yanıtlarda gerçek gönderilen sayısal bayt, gövdesiz yanıtlarda (HEAD, 304, 204 veya 0 bayt) `-` yazılır.
+- **Kesinleşen Günlük Yolu (Tek Yol):** Vhost günlükleri için standart yol `/var/log/zmax/vhosts/<alan>.access.log` ve `/var/log/zmax/vhosts/<alan>.error.log` olarak belirlenmiştir (ZMAX_HOME göreli yapılandırmalarda: `logs/vhosts/<alan>.access.log` ve `logs/vhosts/<alan>.error.log`). Panel ZMax TOML dosyalarına `[vhost.logging]` bloğunu bu yolla yazar.
+- Go: günlük sayfası, `.gz` arşiv/döndürme, istatistik ve trafik hesabını ZMax günlüğüne bağlar; ZMax yeniden açma sinyalini (`POST /api/v1/logs/reopen` veya `SIGUSR1`) rotasyondan sonra tetikler.
 
 ## 7. Go (ZPanel) tarafında bekleyen işler (ZMax kodu değil)
 
