@@ -1,7 +1,7 @@
 # ZMax Server — Yapay Zeka Çalışma Kuralları
 
 Bu klasörde (`D:\zmaxserver`) kod ya da belge yazan her yapay zeka işe başlamadan bu dosyayı okur ve aynen uygular.
-**Kural sürümü: v4 (2026-11-12).** Bu dosya sık güncellenir.
+**Kural sürümü: v5 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, bölüm 8c.)
 **SÜREKLİ KURALA BAK (zorunlu):** Bu dosyayı yalnız işe başlarken değil **çalışırken de** yeniden oku: (a) her yeni görev kartının başında, (b) her ~30 dakikada ya da ~20 araç çağrısında bir, (c) kod yazmaya/silmeye/bağlamaya başlamadan hemen önce, (d) bir testi "geçti" ya da bir özelliği "bitti" demeden önce, (e) uzun bir kesintiden (bağlam sıkıştırma, yeniden başlatma) sonra, (f) `DUZELTMELER.md` yeni karar yazdığında. Her okumada **kural sürümü** satırını bir öncekiyle karşılaştır; değiştiyse dosyanın tamamını baştan oku. Hafızandaki eski kurala güvenme. Raporda "Kural son okunma: <saat>, sürüm v4" yaz.
 **ZORUNLU OKUMA (işe başlamadan, bu sırayla; okumadan kod yazma):**
 1. Bu dosya.
@@ -87,6 +87,17 @@ Her işi bitirdiğini düşündüğünde **raporu yazmadan önce** şu sırayı 
 4. Kart dışı değişiklik, artık dosya, ölçülmemiş iddia, "kanıtlandı/hatasız/tamamlandı" kelimesi var mı bak; varsa kaldır ya da kanıtla.
 5. Rapora **"Kural ve düzeltme kontrolü:"** satırı ekle: neyi kontrol ettin, hangi maddeler temiz, hangisi sorunlu. Sorun varsa önce düzelt, sonra raporla.
 Bu denetimi atlayan rapor geçersiz sayılır.
+
+## 8c. GitHub: ortak çalışma yeri (iki yapay zeka + denetçi aynı depoda)
+**Depo:** https://github.com/zmaxserver/zmaxserver (**AÇIK/herkese görünür**). Yerel kopya `D:\zmaxserver`, uzak `origin`, ana dal `main`. Push yetkisi bu bilgisayarın GitHub oturumuyla gelir; parola/jeton **asla** sohbete, dosyaya, komut satırına yazılmaz.
+1. **Açık depo = gizli bilgi YASAK:** parola, jeton, API anahtarı, özel anahtar (`*.pem`, `*.key`), sertifika özel anahtarı, kişisel veri, sunucu IP/parolası commit edilmez. `.gitignore`'u gevşetme. Şüphe varsa commit etme, denetçiye yaz.
+2. **`main` korunur: yalnız denetçi (Claude) `main`'e birleştirir ve push eder.** Sen `main`'e doğrudan push etme, `--force`/geçmiş yeniden yazma **yasak**, başka ajanın dalına yazma yasak.
+3. **Her kart kendi dalında:** işe başlarken `git fetch origin && git checkout -b kart-<no>-<kısa-ad> origin/main` (güncel `main`'den). Dal adı: `kart-2-gunluk-bayt`.
+4. **Commit:** küçük, anlamlı, kısa Türkçe mesaj, kart ön ekiyle: `[kart-2] günlükte gerçek bayt`. Kart dışı dosyayı commit etme (`git status` ile bak). Derleme çıktıları/`target` zaten `.gitignore`'da.
+5. **Bitirince:** dalı it (`git push -u origin kart-<no>-<ad>`), raporunda **dal adı + son commit SHA** yaz (`BITTI.md`/`bitti/KART-<no>.md`). Denetçi o dalı çekip doğrular; **ONAYLI** ise `main`'e (`--no-ff`) birleştirir. Sonra `git fetch origin && git rebase origin/main` ile dalını güncelle ya da yeni kartta `main`'den yeni dal aç.
+6. **RED'de** aynı dala yeni commit at, `git push` et (aynı dal); yeni bölümü rapora ekle.
+7. Rapor/karar dosyaları (`BITTI.md`, `bitti/`, `DUZELTMELER.md`) `main`'dedir: **`DUZELTMELER.md`'yi yalnız denetçi commit eder**; sen dalında bu dosyayı değiştirme.
+8. Çakışma çıkarsa **çözmeye çalışma, durma**: raporda "çakışma: <dosya>" yaz; denetçi çözer.
 
 ## 8b. Köprü: denetçiyle otomatik bildirim (bil ve ona göre yaz)
 Seninle denetçi (Claude) arasında **otomatik bir köprü çalışır**: `doc/tools/kopru_izle.py` her 5 sn'de `BITTI.md` ve `DUZELTMELER.md`'yi izler; içerik değişince denetçiye anında bildirim gider. Bu yüzden:
