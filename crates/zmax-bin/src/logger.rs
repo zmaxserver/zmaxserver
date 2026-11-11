@@ -619,9 +619,19 @@ fn format_combined_line(entry: &AccessLogEntry) -> String {
     let proto = sanitize_log_token(&entry.protocol, "HTTP/1.1");
     let referer = escape_clf_quoted(&entry.referer, "-");
     let ua = escape_clf_quoted(&entry.user_agent, "-");
+    // NCSA Combined standardı: HEAD, 304, 204 veya 0 bayt gönderilen yanıtlarda '-' yazılır; aksi halde sayı yazılır.
+    let bytes_field = if entry.bytes_sent == 0
+        || entry.status == 304
+        || entry.status == 204
+        || entry.method.eq_ignore_ascii_case("HEAD")
+    {
+        "-".to_string()
+    } else {
+        entry.bytes_sent.to_string()
+    };
     format!(
         "{} - - [{}] \"{} {} {}\" {} {} \"{}\" \"{}\"\n",
-        ip, ts, method, target, proto, entry.status, entry.bytes_sent, referer, ua
+        ip, ts, method, target, proto, entry.status, bytes_field, referer, ua
     )
 }
 
@@ -715,19 +725,63 @@ mod tests {
             also_write_global: true,
             max_size_bytes: 0,
         });
+        mgr.log_access(AccessLogEntry {
+            timestamp: ts,
+            client_ip: "192.0.2.1".to_string(),
+            method: "HEAD".to_string(),
+            target: "/status".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            status: 200,
+            bytes_sent: 0,
+            referer: "-".to_string(),
+            user_agent: "curl/8.0".to_string(),
+            request_id: "zmx-3".to_string(),
+            duration_ms: 0.5,
+            domain: "site.test".to_string(),
+            target_path: None,
+            json_format: false,
+            also_write_global: true,
+            max_size_bytes: 0,
+        });
+        mgr.log_access(AccessLogEntry {
+            timestamp: ts,
+            client_ip: "192.0.2.2".to_string(),
+            method: "GET".to_string(),
+            target: "/resim.png".to_string(),
+            protocol: "HTTP/1.1".to_string(),
+            status: 304,
+            bytes_sent: 0,
+            referer: "-".to_string(),
+            user_agent: "curl/8.0".to_string(),
+            request_id: "zmx-4".to_string(),
+            duration_ms: 0.8,
+            domain: "site.test".to_string(),
+            target_path: None,
+            json_format: false,
+            also_write_global: true,
+            max_size_bytes: 0,
+        });
         mgr.flush().await;
 
         let content = tokio::fs::read_to_string(&access).await.unwrap();
         assert!(!content.contains('\r'), "LF sonu beklenir: {content}");
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 4);
         assert_eq!(
             lines[0],
-            "203.0.113.5 - - [11/Nov/2026:21:00:00 +0000] \"GET /urunler?sayfa=2 HTTP/2.0\" 200 0 \"-\" \"ZMaxAgent/1.0 \\\"test\\\"  line\""
+            "203.0.113.5 - - [11/Nov/2026:21:00:00 +0000] \"GET /urunler?sayfa=2 HTTP/2.0\" 200 - \"-\" \"ZMaxAgent/1.0 \\\"test\\\"  line\""
         );
         assert_eq!(
             lines[1],
             "198.51.100.7 - - [11/Nov/2026:21:00:00 +0000] \"POST /api/submit HTTP/1.1\" 201 4096 \"https://site.test/form\" \"Mozilla/5.0\""
+        );
+        assert_eq!(
+            lines[2],
+            "192.0.2.1 - - [11/Nov/2026:21:00:00 +0000] \"HEAD /status HTTP/1.1\" 200 - \"-\" \"curl/8.0\""
+        );
+        assert_eq!(
+            lines[3],
+            "192.0.2.2 - - [11/Nov/2026:21:00:00 +0000] \"GET /resim.png HTTP/1.1\" 304 - \"-\" \"curl/8.0\""
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
