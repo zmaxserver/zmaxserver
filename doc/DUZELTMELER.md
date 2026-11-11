@@ -25,7 +25,7 @@
 | 4 | `.htaccess` ve yönlendirme | **ONAYLI** (denetçi, 1. denetim; UNIT TESTED düzeyi) | 2026-11-12 |
 | 7 | Go: `RenderZmaxVhost` genişletme (panel) | **ONAYLI** (denetçi, 1. denetim) | 2026-11-12 |
 | 3 | vhost API CRUD (Kart 1 sırasında `api.rs` ön çalışması yapılmıştı; Kart 3'te testle kanıtlandı) | **ONAYLI** (denetçi, 1. denetim; INTEGRATION TESTED in-process) | 2026-11-12 |
-| 5 | Hotlink listesi + IP ACL | RAPOR GELDİ (denetim sürüyor) | — |
+| 5 | Hotlink listesi + IP ACL | **RED (küçük/orta: listeler istek hattına bağlı değil)** | 2026-11-12 |
 | 6, 8–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
 
 ---
@@ -190,3 +190,24 @@ Kart 1'in kararı RED (küçük): 2 madde açık. DUZELTMELER.md'deki "ONAYLI" k
 
 **Bağımsız doğrulananlar (ayrı worktree, `main` üzerine cherry-pick, ayrı `target`):** `cargo test --workspace --offline` **232 geçti / 0 kaldı / 0 atlandı** (228 + 4 yeni test: 3 `zmax-config` birim + 1 `zmax-bin` API entegrasyonu; rapor ile uyumlu) · `8a04448` yalnız `crates/zmax-bin/src/api.rs`, `crates/zmax-config/src/{lib.rs,vhost_json.rs}` (sahip olunan dosyalar; `lib.rs`'e yalnız `pub mod/pub use` = ortak dosya kuralına uygun) · testte `assert_eq!(after_bad_toml, original_toml)` (bozuk gövde 400 + dosya baytı değişmemiş) ve geçersiz IP/traversal 400 var (`api.rs:2178-2185`) · artık dosya yok.
 **Notlar:** (1) Dal tabanı yine onaysız Kart 2 ucu (`718948e`); yalnız `8a04448` alındı. Sonraki kartta `origin/main`'den aç. (2) Rapor "kural v5" okundu diyor (geçerli v6): çalışırken sürümü yeniden kontrol et. (3) `api.rs`'te ~940 satırlık yeniden düzenleme (fonksiyonlar `zmax-config::vhost_json`'a taşındı): testler geçti ama VM/canlı API denenmedi; `live_smoke.py` ve `verify_all_acceptance.py` Kart 12'de yeniden koşulacak. (4) Çalışma klasörü `D:\zmaxserver-ajan03` bir KLON; `origin` GitHub değil yerel `D:\zmaxserver`: dalı GitHub'a itmek için `git remote set-url origin https://github.com/zmaxserver/zmaxserver.git` (denetçi dalı ittirdi).
+
+
+---
+
+## Kart 5 — 1. denetim (2026-11-12 ~03:25) — KARAR: RED (küçük/orta)
+
+**Bağımsız doğrulananlar (DOĞRU):** `main` + Kart 5 commit'leri (çakışma `zmax-config/src/lib.rs` `mod` satırlarında, iki bloğu da koruyarak çözdüm) → `cargo test --workspace --offline` **251 geçti / 0 kaldı** (232 + 19 yeni: `zmax-config` +3, `zmax-security` +13, `integration_kart5` 3; rapor ile uyumlu) · dal doğru tabandan (`856a2a1`) açılmış · yazılan dosyalar sahip olunanlar (`security_ext.rs`, `hotlink.rs`, `acl.rs`, test; `web_engine.rs` yalnız tek çağrı noktası) · artık dosya yok.
+
+**Eksik/yanlış:**
+| # | Bulgu | Kanıt |
+|---|---|---|
+| 1 | **Yeni hotlink listeleri istek hattına BAĞLI DEĞİL.** `web_engine.rs` `zmax_security::is_hotlink_blocked(vhost_ctx.hotlink_protection, &[], &[], …)`: izinli referer listesi ve uzantı listesi **sabit boş dilim**. `HotlinkConfig`/`VhostAclConfig`/`security_ext` `zmax-bin` içinde HİÇ kullanılmıyor (`grep` 0). Kartın asıl işi (izinli referer alanları + uzantı listesi, geriye uyumlu) çalışmıyor; yalnız bool. | `web_engine.rs:971-975`; `grep VhostAcl\|HotlinkConfig\|security_ext crates/zmax-bin/src` boş |
+| 2 | **Rapor etiketi abartılı:** "Hotlink Referer ve uzantı denetimi → INTEGRATION TESTED (curl ile kanıtlandı)". `.jpg` 403 / `.html` 200 yalnız fonksiyonun varsayılan uzantı listesiyle (boş liste) oluşuyor; yapılandırılmış liste hiçbir istekte denenmedi. `integration_kart5.rs` crate düzeyinde (zmax-security), `zmax-bin` istek hattından geçmiyor. | rapor + dosya |
+| 3 | **ACL:** `allow_ips`/`deny_ips` canlı testi MEVCUT `VHostEntry.security.allow_ips/deny_ips` yoluyla çalışıyor (Kart 5'ten önce var). Yeni `VhostAclConfig`/`acl.rs` hatta bağlı değil: kart "vhost başına CIDR'ın istek hattında uygulandığını test et" diyordu; mevcut yol için istek hattı testi yazılmamış (yalnız canlı `curl` çıktısı raporda, dosyada test yok). | `grep`; `web_engine.rs` |
+| 4 | Kural sürümü: rapor v5 okuyor (geçerli v6). | rapor |
+
+**Yapay zekaya (kopyala):**
+```
+Kart 5 RED (küçük/orta). `main`'e Kart 3/4/7 ve çakışma çözümü girdi; `git fetch origin && git rebase origin/main` ile dalını güncelle (zmax-config/src/lib.rs'te mod satırı çakışması beklenir: iki bloğu da koru). YAP: 1) web_engine.rs'te `is_hotlink_blocked(..., &[], &[], ...)` sabit boş dilimleri yerine vhost'un yapılandırmasından (HotlinkConfig.allowed_referers / extensions; yoksa geriye uyumlu varsayılan) gerçek listeleri geçir; VHostEntry'ye bağlı alanı `vhost_ctx`'e taşı (ortak dosyada yalnız tek satır/alan; yeni mantık kendi dosyanda). 2) VhostAclConfig/acl.rs'i istek hattına bağla ya da mevcut `security.allow_ips/deny_ips` yolunun yeni şemayla aynı olduğunu göster ve sadeleştir; HİÇ kullanılmayan kod bırakma. 3) zmax-bin istek hattından geçen GERÇEK istek testleri ekle (main.rs test modülü): özel izinli referer geçer, listedeki uzantı korunur/listede olmayan uzantı korunmaz, boş referer geçer, CIDR deny 403 / allow istisnası 200. 4) Raporda "hotlink listesi/ACL INTEGRATION TESTED" etiketini yalnız bu testlerle ver; kural v6'yı yeniden oku. Yeni bölümü bitti/KART-5.md'ye ekle.
+```
+**Bağımlılık notu:** Bu alanlar Kart 3'ün `vhost_json.rs` API tur testine (JSON↔TOML) ve panelin `RenderZmaxVhost`'una (Kart 7b) henüz yansımadı; Kart 5 ONAYLI olunca ayrı küçük iş olarak eklenecek.
