@@ -7,6 +7,12 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod acl;
+pub mod hotlink;
+
+pub use acl::*;
+pub use hotlink::*;
+
 const DEFAULT_PURGE_THRESHOLD: usize = 4096;
 const RATE_WINDOW_SECS: u64 = 60;
 static REQUEST_ID_SEQ: AtomicU64 = AtomicU64::new(1);
