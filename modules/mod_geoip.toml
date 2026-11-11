@@ -1,0 +1,16 @@
+# ============================================================
+# Modül: mod_geoip - Coğrafi Konum Tespiti ve Ülke Filtresi
+# ============================================================
+[module]
+name = "mod_geoip"
+version = "1.0.0"
+category = "Güvenlik & Filtreleme"
+enabled = true
+
+[settings]
+database_path = "conf/geoip/GeoLite2-Country.mmdb"
+default_country = "TR"
+blocked_countries = []
+allowed_countries = []
+add_headers = true # X-GeoIP-Country, X-GeoIP-City
+

@@ -1,0 +1,18 @@
+# ============================================================
+# Modül: mod_fastcgi - PHP-FPM / LSPHP İkili İletişim Köprüsü
+# ============================================================
+[module]
+name = "mod_fastcgi"
+version = "1.0.0"
+category = "Protokol & Çalışma Zamanı"
+enabled = true
+
+[settings]
+default_upstream = "127.0.0.1:9000"
+connection_timeout_sec = 60
+read_timeout_sec = 300
+keep_alive_pool_size = 64
+max_conns_per_worker = 128
+auto_start_php_fpm = false
+named_pipe_windows = "\\\\.\\pipe\\zmax-php-fpm"
+

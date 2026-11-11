@@ -1,0 +1,22 @@
+text/html                             html htm shtml
+text/css                              css
+text/xml                              xml
+image/gif                             gif
+image/jpeg                            jpeg jpg
+application/javascript                js
+application/atom+xml                  atom
+application/rss+xml                   rss
+image/png                             png
+image/svg+xml                         svg svgz
+image/webp                            webp
+image/avif                            avif
+application/wasm                      wasm
+application/json                      json
+application/pdf                       pdf
+application/zip                       zip
+font/woff                             woff
+font/woff2                            woff2
+font/ttf                              ttf
+video/mp4                             mp4
+video/webm                            webm
+

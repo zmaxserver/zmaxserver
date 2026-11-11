@@ -1,0 +1,39 @@
+# ============================================================
+# Sanal Konak: example.com (Örnek Domain)
+# ============================================================
+
+[vhost]
+name = "example.com"
+aliases = ["www.example.com"]
+document_root = "www/example"
+index_files = ["index.php", "index.html"]
+
+[vhost.cache]
+enabled = true
+expire = 600
+
+[vhost.php]
+enabled = true
+sapi = "fastcgi"
+upstream = "127.0.0.1:9000"
+
+[vhost.ssl]
+certificate = "conf/ssl/example.crt"
+key = "conf/ssl/example.key"
+
+[vhost.tls]
+http2 = true
+
+[vhost.logging]
+enabled = false
+access_log = "logs/example.com.access.log"
+error_log = "logs/example.com.error.log"
+
+[vhost.static]
+precompressed = true
+brotli = true
+gzip = true
+
+[vhost.error_docs]
+enabled = false
+

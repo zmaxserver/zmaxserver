@@ -1,0 +1,17 @@
+# ============================================================
+# Modül: mod_acme - Otomatik Let's Encrypt / ZeroSSL Motoru
+# ============================================================
+[module]
+name = "mod_acme"
+version = "1.0.0"
+category = "Güvenlik"
+enabled = true
+
+[settings]
+ca_provider = "letsencrypt" # letsencrypt veya zerossl
+auto_renew_days_before = 30
+challenge_type = "http-01" # http-01 veya dns-01
+challenge_path = ".well-known/acme-challenge"
+key_type = "ec-256" # Modern eliptik eğri (ECDSA P-256) veya rsa-2048
+notify_panel_on_renew = true
+

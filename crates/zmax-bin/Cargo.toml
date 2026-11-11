@@ -1,0 +1,50 @@
+[package]
+name = "zmax-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zmax"
+path = "src/main.rs"
+
+[dependencies]
+zmax-core = { path = "../zmax-core" }
+zmax-runtime = { path = "../zmax-runtime" }
+zmax-static = { path = "../zmax-static" }
+zmax-fastcgi = { path = "../zmax-fastcgi" }
+zmax-cache = { path = "../zmax-cache" }
+zmax-compress = { path = "../zmax-compress" }
+zmax-proxy = { path = "../zmax-proxy" }
+zmax-redis = { path = "../zmax-redis" }
+zmax-rewrite = { path = "../zmax-rewrite" }
+zmax-config = { path = "../zmax-config" }
+zmax-pool = { path = "../zmax-pool" }
+zmax-security = { path = "../zmax-security" }
+zmax-timeout = { path = "../zmax-timeout" }
+zmax-obfuscate = { path = "../zmax-obfuscate" }
+zmax-httpparser = { path = "../zmax-httpparser" }
+zmax-header = { path = "../zmax-header" }
+zmax-tls = { path = "../zmax-tls" }
+tokio = { version = "1.38", features = ["full"] }
+bytes = "1.6"
+httparse = "1.9"
+h2 = "0.4"
+http = "1.1"
+serde_json = "1.0"
+dashmap = "5.5"
+brotli = "3.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+socket2 = { version = "0.5", features = ["all"] }
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+rcgen = "0.14.10"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }

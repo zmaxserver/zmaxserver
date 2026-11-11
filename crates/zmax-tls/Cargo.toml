@@ -1,0 +1,18 @@
+[package]
+name = "zmax-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1.16.0"
+tokio = { version = "1.38", features = ["net", "io-util"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+tracing = "0.1.44"
+zmax-config = { version = "1.0.1", path = "../zmax-config" }
+
+[dev-dependencies]
+rcgen = "0.14.10"
+tokio = { version = "1.38", features = ["full"] }
+

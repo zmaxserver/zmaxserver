@@ -1,0 +1,10 @@
+# Modül: mod_rewrite
+[module]
+name = "mod_rewrite"
+version = "1.0.0"
+enabled = true
+
+[settings]
+enable_htaccess = true
+try_files_default = "$uri $uri/ /index.php?$args"
+

@@ -1,0 +1,22 @@
+# ============================================================
+# Modül: mod_gzip - Standart GZIP & Deflate Sıkıştırma
+# ============================================================
+[module]
+name = "mod_gzip"
+version = "1.0.0"
+category = "Performans & Optimizasyon"
+enabled = true
+
+[settings]
+compression_level = 6
+min_length = 512
+mime_types = [
+    "text/html",
+    "text/css",
+    "application/javascript",
+    "application/json",
+    "text/plain",
+    "text/xml"
+]
+vary_header = true
+

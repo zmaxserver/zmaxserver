@@ -1,0 +1,102 @@
+ZMax Server — Eksikler (2026-11-11)
+
+Kaynak: VM uçtan uca testi (ZMax test portları 19480/19483, ornekdomain.com), zpanel-tam/docs/zmax-web-sunucusu.md, doc/goentegre.md §7, crate boyutları (cargo test --workspace çıkış kodu 0). Doğrulanmayanlar “bilinmiyor” yazıldı. Bu listeyi koda ben bağımsız doğrulamadım.
+
+1. Mimari ilke
+Rust (ZMax) korur: Gelen HTTP/HTTPS trafiği, TLS, önbellek, WAF/DoS (kapıda keser), ACME dosyalarını sunma, istek yolu, günlük yazma, rewrite.
+Go (panel/ajan) birleştirir: Müşteri/paket/kota yönetimi, vhost TOML yazımı (ZMax salt okunur tüketici), işletim sistemi güvenlik duvarı (nftables/iptables), certbot/SSL zamanlaması, ban olaylarını kalıcı yazma, reload çağrısı (POST http://127.0.0.1:19486/api/v1/reload).
+Sözleşme: Go, /usr/local/zmax/conf/vhosts/<alan>.toml yazar. ZMax okur ve yeniden yüklenince uygular. ZMax hiçbir yönetim kararı vermez.
+2. Crate durumu (satır / #[test] sayısı, ben saydım)
+Crate	Satır	Test	Durum
+zmax-bin	7116	9	Var (ana sunucu, dinleyici, API)
+zmax-config	2037	15	Var (TOML şeması)
+zmax-rewrite	1991	16	Kısmi (try_files; yönlendirme/.htaccess yok)
+zmax-fastcgi	1222	8	Var (PHP-FPM çalıştı)
+zmax-proxy	1095	3	Var (panel/webmail vhost’u için kullanılmıyor)
+zmax-cache	1036	3	Var (L1/L2, purge arayüzü bilinmiyor)
+zmax-security	965	10	Genel WAF, alan adına özel yok
+zmax-httpparser	921	3	Var
+zmax-static	723	6	Var (statik ve ACME çalıştı)
+zmax-tls	447	4	Çalışıyor (TLS 1.3 geçti, h2 yok)
+zmax-pool, compress, header, obfuscate, timeout, redis, runtime, core	25–293	0–4	Küçük/iskelet; timeout, redis, runtime, core testsiz
+3. Test sonucu (VM)
+
+Geçti: statik dosya, PHP (gerçek WordPress sayfası), TLS 1.3 el sıkışma+sertifika, HTTP/1.1, ACME http-01 statik sunum, panel (8026/8036) ve OpenLiteSpeed etkilenmedi.
+Kısmi: .htaccess/WordPress permalink çalışmıyor.
+Geçmedi: Alan adına özel access/error günlüğü yok.
+Yeni: HTTP/2 yok (ALPN yalnız http/1.1).
+
+4. Eksikler: kim yapacak, nasıl
+E1. HTTP/2 (ALPN h2) — Rust, büyük
+Neden: Modern tarayıcılar ve performans. Şu an yalnız HTTP/1.1.
+Rust: zmax-tls ALPN’e h2 ekler, zmax-httpparser/zmax-bin’e HTTP/2 çerçeveleme (h2 kütüphanesi) gerekir.
+Go: Yapacak bir şey yok. İstersen vhost TOML’a http2 = true/false anahtarı yazar.
+Sözleşme: [vhost.tls] http2 = true (bilinmiyor: şemada var mı).
+Kabul: curl --http2 -I https://... → HTTP/2 200.
+E2. .htaccess / rewrite / permalink / yönlendirme — Rust + Go, büyük
+Neden: WordPress güzel bağlantılar, Options, DirectoryIndex, www zorlaması. Bunlar olmadan WordPress siteleri ZMax’te bozulur.
+Rust: zmax-rewrite yalnız try_files biliyor. Yönlendirme kuralları (301/302), RewriteCond/RewriteRule alt kümesi, www↔non-www, DirectoryIndex kural türleri eklenir.
+Go: Panelin .htaccess yönlendirme bloğunu (redirects paketi) vhost TOML’daki kural alanlarına çevirir ve yazar. Çevirisi olmayan direktifleri raporlar.
+Sözleşme: [[vhost.rewrite]] kural listesi (bilinmiyor: mevcut şema alanları, zmax-config’e bakılmalı).
+Kabul: WordPress’te /ornek-yazi/ → 200; www yönlendirme → 301.
+E3. force_https ve hotlink koruması — Rust, küçük
+Durum: Şemada var ([vhost.security] force_https, hotlink_protection), istek yolunda uygulanmıyor, yalnız api.rs okuyor/yazıyor.
+Rust: İstek yolunda uygular (HTTP→HTTPS 301, Referer denetimi).
+Go: Panelin ayarından TOML’a yazar.
+Kabul: force_https=true iken http:// → 301 https://.
+E4. Alan adına özel WAF — Rust + Go, orta
+Durum: zmax-security genel; alan adına özel modsec/domainsec OpenLiteSpeed’e bağlı.
+Rust: Vhost bazlı WAF kural/eşik okur.
+Go: Panel ayarını TOML’a yazar. WAF ban olaylarını (Redis) dinleyip nftables/iptables’a kalıcı yazar (goentegre.md §4).
+Kabul: Kural kapalı alan adında saldırı geçer, açıkta 403.
+E5. Alan adına özel access/error günlüğü — Rust + Go, orta
+Durum: ZMax hiçbir yere istek günlüğü yazmıyor, yalnız journalctl servis mesajı. Panelin logs, Günlükler sayfası, istatistik ve trafik hesabı OpenLiteSpeed günlüklerine (/var/log/zpanel/<alan>/access.log) bağlı.
+Rust: Vhost başına access.log/error.log yazar (OLS ile uyumlu biçim, panel okuyucusu bozulmasın), yeniden açma sinyali (rotasyon sonrası).
+Go: Günlük sayfası, logs klasörü, döndürme (.gz, boyut MB), istatistik ve trafik hesabını ZMax günlüğüne bağlar.
+Kabul: İstek sonrası access.log’a satır düşer; Günlükler sayfası ve trafik rakamı değişir.
+E6. Panel / webmail / Zplus adresleri (80/443) — Rust + Go, orta
+Durum: panelHost → zpanel-staff, webmail.<alan>, Zplus eşlemeleri OpenLiteSpeed dinleyicisindeydi. 80/443 ZMax’e geçerse karşılıksız.
+Rust: zmax-proxy ile ters vekil vhost’ları (panel portlarına, Roundcube’a).
+Go: Bu proxy vhost’larını yazar.
+Kabul: https://webmail.ornek.com ZMax üzerinden açılır.
+E7. Sertifika yönetimi (SNI) ve yenileme — Rust + Go, orta
+Durum: TLS çalışıyor (2 sertifika yüklenmiş). Alan adı başına sertifika yükleme ve yenileme sonrası yeniden yükleme akışı doğrulanmadı.
+Rust: SNI ile alan adı başına sertifika seçer, reload’da sertifikayı yeniden okur.
+Go: certbot yenilemesi sonrası TOML’daki .pem/.key yollarını günceller ve reload çağırır.
+Kabul: Sertifika yenilenince sunucu yeni sertifikayı sunar (bilinmiyor: denenmedi).
+E8. ACME http-01 — Rust (var) + Go, küçük
+Durum: Statik sunum geçti. certbot webroot .well-known/acme-challenge belge kökünde.
+Go: certbot’u zmax webroot ile yönetir. Yenileme zamanlaması Go’da (belgeye göre).
+Kabul: Gerçek certbot yenilemesi ZMax üzerinden geçer (bilinmiyor: gerçek certbot ile denenmedi).
+E9. php-fpm kurulumu — Go, orta
+Durum: PHP çalıştı. config/php-fpm/php-fpm-kur.sh paketli, installer (cekirdek/installer) ZMax/php-fpm kurmuyor.
+Go: Installer’a php-fpm havuzu, soket (/run/zpanel-php/<kimlik>.sock), kiracı hesabı kurulumunu taşır.
+Kabul: Temiz kurulumda PHP sayfası açılır.
+E10. OpenLiteSpeed ücretsiz uzantısı — Go (paketleme), küçük
+Durum: uzantilar/ücretsiz içinde paket yok, kimlik openlitespeed varsayıldı (rpc.OpenLiteSpeedExtensionID).
+Go: Uzantıyı paketler ve kimliği doğrular.
+E11. Disk / trafik ölçümü ve kota — Go (+ Rust günlüğüne bağlı), orta
+Durum: Panel kartları (alan adı listesi, “810 MB / Sınırsız”) ajan ölçümüne dayanır. Trafik E5 günlüğünden hesaplanıyorsa ZMax’te bozulur.
+Kabul: ZMax altında trafik rakamı doğru artar.
+E12. Hata sayfaları (error_docs) — Rust + Go, küçük
+Durum: Panel error_docs HTML’lerini OLS vhost’a bağlıyor.
+Rust: 400/401/403/404/500/502/503 için vhost başına özel sayfa.
+Go: error_docs klasörünü TOML’a yazar.
+E13. Önbellek yönetimi ve telemetri — Rust + Go, bilinmiyor
+zmax-cache L1/L2 var (3 test). Purge API, panel arayüzü, canlı telemetri ve sağlık (goentegre.md §5-6) için panel tarafında ne bağlı: bilinmiyor, koddan bakılmalı.
+E14. Kurulum, güncelleme, geri dönüş — Go, orta
+Durum: zmax-gecis.sh: /etc/zpanel/webserver seçimi (zmax/openlitespeed), kapılı geçiş, ZMax 19480/19483'te, OLS 80/443'te kalır. HTTPS sınanır ama ZMax artık TLS biliyor, bu kapının yeniden değerlendirilmesi gerek.
+Go: OLS’e dönüş her zaman çalışmalı. Paket güncellemesi (ajan-guncelle.sh) ZMax ikilisini (packed\) yerleştirir. RPM yok (rpmbuild yok), yalnız tar.gz ve deb güncel.
+E15. Test eksikliği — Rust, orta
+zmax-timeout, zmax-redis, zmax-runtime, zmax-core testsiz. Çoğu crate’te 3-4 test. Yük, performans, güvenlik (Slowloris, WAF) testleri bilinmiyor. cargo test geçmesi davranışı kanıtlamaz.
+5. Önerilen sıra
+E5 günlük (panelin Günlükler, istatistik, trafiği buna bağlı)
+E2 rewrite/.htaccess (WordPress için şart)
+E3 force_https/hotlink
+E6 panel/webmail proxy
+E7/E8 sertifika ve ACME gerçek denemesi
+E4 WAF
+E1 HTTP/2
+E9/E10/E14 kurulum ve paketleme
+
+80/443'ü ZMax’e çevirmeden önce en az E2, E5, E6 bitmeli. Yoksa WordPress permalink’leri, alan adı günlükleri ve webmail/panel adresleri çalışmaz.

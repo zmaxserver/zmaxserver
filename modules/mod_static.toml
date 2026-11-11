@@ -1,0 +1,19 @@
+# ============================================================
+# Modül: mod_static - Sıfır Kopyalama Statik Dosya Motoru
+# ============================================================
+[module]
+name = "mod_static"
+version = "1.0.0"
+category = "Çekirdek & Dosya Sistemi"
+enabled = true
+
+[settings]
+zero_copy_engine = "auto" # Windows IOCP TransmitFile / Linux epoll sendfile
+etag_enabled = true
+last_modified_header = true
+auto_webp = true # Tarayıcı destekliyorsa .jpg yerine .webp sun
+auto_avif = true # Tarayıcı destekliyorsa .avif sun
+max_file_cache_size_kb = 1024
+index_files = ["index.html", "index.htm", "default.html"]
+directory_browsing = false
+

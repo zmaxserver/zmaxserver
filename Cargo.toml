@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    # 1. Altyapı ve Temel Sistem Çekirdeği
+    "crates/zmax-runtime",
+    "crates/zmax-httpparser",
+    "crates/zmax-header",
+    "crates/zmax-pool",
+    "crates/zmax-tls",
+    "crates/zmax-timeout",
+    
+    # 2. Protokol ve Yönlendirme Motorları
+    "crates/zmax-proxy",
+    "crates/zmax-fastcgi",
+    "crates/zmax-static",
+    
+    # 3. Önbellek, Rewrite, Sıkıştırma ve Güvenlik
+    "crates/zmax-cache",
+    "crates/zmax-compress",
+    "crates/zmax-rewrite",
+    "crates/zmax-security",
+    "crates/zmax-config",
+    "crates/zmax-redis",
+    "crates/zmax-obfuscate",
+    
+    # 4. Ana İkili (Binary)
+    "crates/zmax-bin",
+]
+
+[workspace.package]
+version = "1.0.1"
+edition = "2021"
+authors = ["ZePanel Team <info@zepanel.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/zmaxserver"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

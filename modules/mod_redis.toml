@@ -1,0 +1,36 @@
+# ============================================================
+# Modül: mod_redis - Dağıtık Önbellek, Nesne Önbelleği & Kümeleme
+# ============================================================
+[module]
+name = "mod_redis"
+version = "1.0.0"
+category = "Performans"
+enabled = true
+
+[connection]
+host = "127.0.0.1"
+port = 6379
+password = ""
+database = 0
+timeout_ms = 100
+connection_pool_size = 32
+use_tls = false
+
+[features]
+# 1. WordPress ve Uygulama Nesne Önbellekleme (Object Cache)
+object_cache_bridge = true
+default_ttl_seconds = 3600
+
+# 2. Çoklu Sunucu Önbellek Senkronizasyonu (Pub/Sub)
+cluster_pubsub_sync = true
+pubsub_channel = "zmax:cache:purge"
+
+# 3. Merkezi IP Engelleme ve DoS Kalkanı Senkronizasyonu
+shared_ip_rate_limiting = true
+banned_ip_sync = true
+banned_ip_ttl_seconds = 86400 # 24 saat
+
+# 4. Oturum ve Session Saklama
+session_storage = true
+session_prefix = "zmax:sess:"
+

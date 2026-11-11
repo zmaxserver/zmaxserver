@@ -1,0 +1,10 @@
+[package]
+name = "zmax-header"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+http = "1.1"
+bytes = "1.6"
+

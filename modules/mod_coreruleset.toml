@@ -1,0 +1,22 @@
+# ============================================================
+# Modül: mod_coreruleset - OWASP CRS Derin WAF Denetimi
+# ============================================================
+[module]
+name = "mod_coreruleset"
+version = "1.0.0"
+category = "Güvenlik"
+enabled = true
+
+[settings]
+inspection_engine = "on"
+ruleset_version = "OWASP_CRS_v3.3"
+paranoia_level = 1 # 1 (Standart) - 4 (Maksimum Paranoyak)
+block_sql_injection = true
+block_cross_site_scripting = true
+block_remote_code_execution = true
+block_path_traversal = true
+max_request_body_inspection_kb = 1024
+anomaly_score_threshold = 5
+action = "deny_403"
+notify_zpanel = true # Engellemeleri ZPanel (Go) merkezine bildir
+

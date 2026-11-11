@@ -1,0 +1,18 @@
+# ============================================================
+# Modül: mod_pagespeed - Otomatik HTML/CSS/JS Optimizasyonu
+# ============================================================
+[module]
+name = "mod_pagespeed"
+version = "1.0.0"
+category = "Performans & Optimizasyon"
+enabled = true
+
+[settings]
+minify_html = true
+minify_css = true
+minify_js = true
+remove_comments = true
+collapse_whitespace = true
+lazyload_images = true
+dns_prefetch = true
+

@@ -1,0 +1,17 @@
+# ============================================================
+# Modül: mod_quic - HTTP/3 ve QUIC UDP Taşıma Motoru
+# ============================================================
+[module]
+name = "mod_quic"
+version = "1.0.0"
+category = "Protokol & Çalışma Zamanı"
+enabled = true
+
+[settings]
+udp_port = 19483
+zero_rtt = true # 0-RTT hızlı bağlantı açılışı
+max_idle_timeout_ms = 30000
+congestion_control = "bbr" # Google BBR Tıkanıklık Kontrolü
+initial_max_streams_bidi = 100
+alt_svc_header = 'h3=":19483"; ma=86400'
+

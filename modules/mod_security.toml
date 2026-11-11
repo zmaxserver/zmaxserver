@@ -1,0 +1,13 @@
+# Modül: mod_security
+[module]
+name = "mod_security"
+version = "1.0.0"
+enabled = true
+
+[settings]
+token_bucket_rate_limit = 2000
+slowloris_shield = true
+path_traversal_shield = true
+sql_injection_inspection = false # ZePanel WAF katmanina delege edilir
+block_hidden_files = true
+

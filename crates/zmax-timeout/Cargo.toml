@@ -1,0 +1,12 @@
+[package]
+name = "zmax-timeout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1.38", features = ["time"] }
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["macros", "rt", "time"] }

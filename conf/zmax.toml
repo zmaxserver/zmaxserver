@@ -1,0 +1,101 @@
+# ========================================================================
+# ⚡ ZMax Server - Ana Sunucu Yapılandırma Dosyası (zmax.toml)
+# Evrensel Panel Uyumlu & Çakışmasız Port Mimarisi (19480-19486 Bloğu)
+# ========================================================================
+
+[server]
+server_name = "ZMax/1.0.01"
+# user = ""
+# group = ""
+priority = 0
+cpu_affinity = true
+reuseport_workers = true
+graceful_shutdown_secs = 15
+workers = 0 # 0 = Otomatik (Mevcut tüm CPU çekirdeklerini asenkron kullan)
+
+# Ağ ve Dinleme Portları (Popüler hosting panelleriyle %100 çakışmasız)
+# Üretimde tekil ana web sunucusu moduna geçilirse http=80, https=443 yapılabilir.
+[listeners.http]
+enabled = true
+address = "0.0.0.0"
+port = 19480
+backlog = 4096
+tcp_nodelay = true
+reuse_port = false
+proxy_protocol = false
+
+[listeners.https]
+enabled = false
+address = "0.0.0.0"
+port = 19483
+ssl = true
+alpn = ["h2", "http/1.1"]
+proxy_protocol = false
+strict_sni = false
+
+# Dahili WebAdmin Yönetim Arayüzü (Yerel loopback güvenli varsayılan)
+[listeners.admin]
+enabled = true
+address = "127.0.0.1"
+port = 19485
+document_root = "admin"
+token = ""
+require_token = false
+ssl = false
+tls_cert = ""
+tls_key = ""
+proxy_prefix = ""
+trusted_proxies = []
+
+# Evrensel Kontrol Paneli REST API (/api/v1/*)
+# cPanel, Plesk, DirectAdmin, CyberPanel, Hestia, aaPanel, zPanel ajanları içindir.
+[listeners.api]
+enabled = true
+address = "127.0.0.1"
+port = 19486
+unix_socket = ""
+token = ""
+require_token = false
+cors_allow_origin = "*"
+ssl = false
+tls_cert = ""
+tls_key = ""
+proxy_prefix = ""
+trusted_proxies = []
+
+# L1 & L2 Önbellek Ayarları (LSCache %100 Uyumlu)
+[cache]
+enabled = true
+memory_cache_mb = 256
+disk_cache_dir = "cachedata"
+default_ttl_seconds = 300
+stale_while_revalidate_sec = 30
+purge_key_header = "X-ZMax-Purge-Key"
+
+# Güvenlik ve DoS Kalkanı
+[security]
+slowloris_header_timeout_sec = 10
+slowloris_body_timeout_sec = 30
+keep_alive_timeout_sec = 65
+rate_limit_enabled = true
+rate_limit_per_minute = 2000
+block_path_traversal = true
+max_body_size_mb = 64
+max_header_size_kb = 64
+allow_ips = []
+deny_ips = []
+
+# Günlük (Log) Dosyaları
+[logging]
+access_log = "logs/access.log"
+error_log = "logs/error.log"
+log_level = "info"
+max_log_size_mb = 100
+log_format = '%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"'
+batch_flush_ms = 250
+batch_buffer_kb = 64
+add_request_id = true
+
+# Sanal Konaklar Dizini
+[vhosts_dir]
+path = "conf/vhosts"

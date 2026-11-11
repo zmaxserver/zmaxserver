@@ -1,0 +1,18 @@
+# ============================================================
+# Modül: mod_proxy - Ters Proxy (Reverse Proxy) & WebSocket
+# ============================================================
+[module]
+name = "mod_proxy"
+version = "1.0.0"
+category = "Ağ & Yönlendirme"
+enabled = true
+
+[settings]
+preserve_host = true
+websocket_upgrade = true
+connect_timeout_sec = 10
+buffer_client_body = true
+max_body_size_mb = 128
+http2_backend = true
+headers_forwarded = ["X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP"]
+

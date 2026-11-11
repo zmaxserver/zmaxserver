@@ -1,0 +1,23 @@
+# ============================================================
+# Modül: mod_brotli - Yeni Nesil Akış Sıkıştırma Motoru
+# ============================================================
+[module]
+name = "mod_brotli"
+version = "1.0.0"
+category = "Performans & Optimizasyon"
+enabled = true
+
+[settings]
+compression_level = 6 # 1 (Hızlı) - 11 (Maksimum Sıkıştırma)
+min_length = 256 # Bayt cinsinden alt limit
+mime_types = [
+    "text/html",
+    "text/css",
+    "application/javascript",
+    "application/json",
+    "image/svg+xml",
+    "application/wasm"
+]
+buffer_size_kb = 64
+window_bits = 22
+

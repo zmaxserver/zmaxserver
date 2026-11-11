@@ -1,0 +1,17 @@
+# ============================================================
+# Modül: mod_autoindex - Dizin ve Özel Hata Sayfaları Yöneticisi
+# ============================================================
+[module]
+name = "mod_autoindex"
+version = "1.0.0"
+category = "Çekirdek"
+enabled = true
+
+[settings]
+directory_listing = false # Güvenlik: Varsayılan olarak kapalı
+show_hidden_files = false
+custom_error_pages = true
+error_pages_dir = "www/error_pages"
+errors_supported = [400, 401, 403, 404, 429, 500, 502, 503, 504]
+format = "html"
+

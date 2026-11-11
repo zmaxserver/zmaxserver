@@ -1,0 +1,13 @@
+# Modül: mod_cache
+[module]
+name = "mod_cache"
+version = "1.0.0"
+enabled = true
+
+[settings]
+storage = "memory_and_disk"
+memory_limit_mb = 256
+max_object_size_kb = 4096
+purge_protection = true
+lscache_header_support = true
+

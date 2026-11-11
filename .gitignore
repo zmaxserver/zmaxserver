@@ -1,0 +1,31 @@
+# derleme çıktıları
+/target/
+**/target/
+*.pdb
+*.exe
+*.d
+# üçüncü taraf referans kodlar (Pingora/OpenLiteSpeed; kendi lisansları, ~1 GB)
+/doc/ornekmimariler/
+# sürüm paketleri (GitHub Releases ile dağıtılır, depoya girmez)
+/packed/
+/bin/
+# çalışma zamanı
+/logs/
+/cachedata/
+*.log
+# ajan çalışma kopyaları ve geçici
+/zmaxserver-ajan/
+/.cargo/
+**/node_modules/
+*.bak
+*.orig
+*.tmp
+# sertifika/anahtar (yanlışlıkla eklenmesin)
+*.pem
+*.key
+*.pfx
+*.p12
+.env
+.env.*
+# test artıkları (kabul betiği)
+/www/vhost-*/
