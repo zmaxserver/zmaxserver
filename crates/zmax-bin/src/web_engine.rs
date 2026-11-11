@@ -98,7 +98,13 @@ where
     let mut req_index = 0usize;
 
     loop {
-        let (header_timeout_sec, body_timeout_sec, keep_alive_timeout_sec, max_header_bytes, max_body_bytes) = {
+        let (
+            header_timeout_sec,
+            body_timeout_sec,
+            keep_alive_timeout_sec,
+            max_header_bytes,
+            max_body_bytes,
+        ) = {
             let rt = state.runtime.read().await;
             let sec = &rt.config.security;
             let web_max_mb = sec.max_body_size_mb.max(1);
@@ -227,7 +233,12 @@ where
                     } else {
                         vh.entry.php.upstream.clone()
                     },
-                    php_timeout: vh.entry.php.timeout.max(policies.fastcgi.timeout_sec).max(5),
+                    php_timeout: vh
+                        .entry
+                        .php
+                        .timeout
+                        .max(policies.fastcgi.timeout_sec)
+                        .max(5),
                     cache_enabled: vh.entry.cache.enabled && rt.config.cache.enabled,
                     cache_expire: vh.entry.cache.expire.max(1),
                     cache_stale_sec,
@@ -250,7 +261,8 @@ where
                     } else {
                         vh.entry.proxy.path_prefix.clone()
                     },
-                    proxy_preserve_host: vh.entry.proxy.preserve_host && policies.proxy.preserve_host,
+                    proxy_preserve_host: vh.entry.proxy.preserve_host
+                        && policies.proxy.preserve_host,
                     proxy_websocket: vh.entry.proxy.websocket && policies.proxy.websocket_upgrade,
                     auto_webp: policies.static_policy.auto_webp,
                     auto_avif: policies.static_policy.auto_avif,
@@ -384,7 +396,10 @@ where
     {
         append_error_log_limit(
             &state.base_dir,
-            &format!("[ACL] {} {} {} -> IP Access Denied", real_ip_str, req.method, req.path),
+            &format!(
+                "[ACL] {} {} {} -> IP Access Denied",
+                real_ip_str, req.method, req.path
+            ),
             vhost_ctx.max_log_size_bytes,
         )
         .await;
@@ -465,25 +480,19 @@ where
         waf_enabled: vhost_ctx.waf_enabled,
         exclude_paths: &vhost_ctx.waf_exclude_paths,
     };
-    if let Err(violation) = policies
-        .waf
-        .inspector
-        .inspect_with_policy(
-            &req.method,
-            &req.path,
-            &req.query,
-            &req.headers,
-            &req.body,
-            &vhost_waf_policy,
-        )
-    {
-        let err_line = format!("[WAF] [{}] {} {} {} -> {}", vhost_ctx.vhost_name, real_ip_str, req.method, req.path, violation);
-        append_error_log_limit(
-            &state.base_dir,
-            &err_line,
-            vhost_ctx.max_log_size_bytes,
-        )
-        .await;
+    if let Err(violation) = policies.waf.inspector.inspect_with_policy(
+        &req.method,
+        &req.path,
+        &req.query,
+        &req.headers,
+        &req.body,
+        &vhost_waf_policy,
+    ) {
+        let err_line = format!(
+            "[WAF] [{}] {} {} {} -> {}",
+            vhost_ctx.vhost_name, real_ip_str, req.method, req.path, violation
+        );
+        append_error_log_limit(&state.base_dir, &err_line, vhost_ctx.max_log_size_bytes).await;
         let written_bytes = write_error_response(
             socket,
             403,
@@ -524,7 +533,8 @@ where
         if let Some(redis) = redis_client {
             let ip_s = real_ip_str.clone();
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_millis(200), redis.ban_ip(&ip_s, 900)).await;
+                let _ = tokio::time::timeout(Duration::from_millis(200), redis.ban_ip(&ip_s, 900))
+                    .await;
             });
         }
         let err_body = b"403 Forbidden - Brute Force Protection";
@@ -563,7 +573,9 @@ where
 
     // 4. force_https: HTTP isteğini HTTPS'e yönlendir (ACME HTTP-01 muaf)
     if !is_https && vhost_ctx.force_https && !is_acme_challenge(&req.path) {
-        if let Some(location) = https_redirect_location(&req.host, &req.path, &req.query, https_port) {
+        if let Some(location) =
+            https_redirect_location(&req.host, &req.path, &req.query, https_port)
+        {
             write_http_response(
                 socket,
                 301,
@@ -653,12 +665,14 @@ where
     } else {
         HtAccessResolver::from_htaccess(None)
     };
-    let resolution = RewriteEngine::new().resolve_with_htaccess_info(&route_req, htaccess_resolver.htaccess());
+    let resolution =
+        RewriteEngine::new().resolve_with_htaccess_info(&route_req, htaccess_resolver.htaccess());
     let path_info = resolution.path_info;
     let outcome = resolution.outcome;
 
     let wants_gzip = policies.gzip.enabled
-        && negotiate_encoding(extract_header(&req.headers, "accept-encoding")) == ContentEncoding::Gzip;
+        && negotiate_encoding(extract_header(&req.headers, "accept-encoding"))
+            == ContentEncoding::Gzip;
     let has_range = extract_header(&req.headers, "range").is_some();
     let has_if_none_match = extract_header(&req.headers, "if-none-match").is_some();
 
@@ -783,11 +797,12 @@ where
                     CacheLookup::Fresh(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
                         // [kart-2] Cache HIT yanitinda HEAD/304/204 ise govde bayti 0; aksi halde onbellekteki govde boyutu
-                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
-                            0
-                        } else {
-                            cached.body.len()
-                        };
+                        let cached_bytes =
+                            if is_head || cached.status == 204 || cached.status == 304 {
+                                0
+                            } else {
+                                cached.body.len()
+                            };
                         write_cached_php_response(
                             socket,
                             &cached,
@@ -819,12 +834,15 @@ where
                     }
                     CacheLookup::Stale(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
-                            0
-                        } else {
-                            cached.body.len()
-                        };
-                        if let StampedeSlot::Leader(guard) = state.cache.try_acquire_fill(&cache_key) {
+                        let cached_bytes =
+                            if is_head || cached.status == 204 || cached.status == 304 {
+                                0
+                            } else {
+                                cached.body.len()
+                            };
+                        if let StampedeSlot::Leader(guard) =
+                            state.cache.try_acquire_fill(&cache_key)
+                        {
                             let st_bg = Arc::clone(state);
                             let req_bg = req.clone();
                             let ctx_bg = vhost_ctx.clone();
@@ -897,11 +915,12 @@ where
                                 state.cache.get_with_stale(&cache_key).await
                             {
                                 state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                                let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
-                                    0
-                                } else {
-                                    cached.body.len()
-                                };
+                                let cached_bytes =
+                                    if is_head || cached.status == 204 || cached.status == 304 {
+                                        0
+                                    } else {
+                                        cached.body.len()
+                                    };
                                 write_cached_php_response(
                                     socket,
                                     &cached,
@@ -1054,11 +1073,12 @@ where
                     CacheLookup::Fresh(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
                         // [kart-2] Cache HIT yanitinda HEAD/304/204 ise govde bayti 0; aksi halde onbellekteki govde boyutu
-                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
-                            0
-                        } else {
-                            cached.body.len()
-                        };
+                        let cached_bytes =
+                            if is_head || cached.status == 204 || cached.status == 304 {
+                                0
+                            } else {
+                                cached.body.len()
+                            };
                         write_cached_static_response(
                             socket,
                             &cached,
@@ -1090,12 +1110,15 @@ where
                     }
                     CacheLookup::Stale(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
-                            0
-                        } else {
-                            cached.body.len()
-                        };
-                        if let StampedeSlot::Leader(guard) = state.cache.try_acquire_fill(&cache_key) {
+                        let cached_bytes =
+                            if is_head || cached.status == 204 || cached.status == 304 {
+                                0
+                            } else {
+                                cached.body.len()
+                            };
+                        if let StampedeSlot::Leader(guard) =
+                            state.cache.try_acquire_fill(&cache_key)
+                        {
                             let st_bg = Arc::clone(state);
                             let ctx_bg = vhost_ctx.clone();
                             let spath_bg = static_path.clone();
@@ -1152,16 +1175,18 @@ where
                             stampede_guard = Some(guard);
                         }
                         StampedeSlot::Follower(notify) => {
-                            let _ = tokio::time::timeout(Duration::from_secs(5), notify.notified()).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                                .await;
                             if let CacheLookup::Fresh(cached) | CacheLookup::Stale(cached) =
                                 state.cache.get_with_stale(&cache_key).await
                             {
                                 state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                                let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
-                                    0
-                                } else {
-                                    cached.body.len()
-                                };
+                                let cached_bytes =
+                                    if is_head || cached.status == 204 || cached.status == 304 {
+                                        0
+                                    } else {
+                                        cached.body.len()
+                                    };
                                 write_cached_static_response(
                                     socket,
                                     &cached,
@@ -1965,7 +1990,11 @@ where
                 keep_alive,
                 keep_alive_timeout_sec,
                 sec_ref,
-                if php_cacheable_req { Some("MISS") } else { Some("BYPASS") },
+                if php_cacheable_req {
+                    Some("MISS")
+                } else {
+                    Some("BYPASS")
+                },
             )
             .await?;
             Ok((status, body_len))
@@ -1986,7 +2015,10 @@ where
         Err(err) => {
             append_error_log_limit(
                 &state.base_dir,
-                &format!("[FastCGI Hata] upstream={} err={}", vhost_ctx.php_upstream, err),
+                &format!(
+                    "[FastCGI Hata] upstream={} err={}",
+                    vhost_ctx.php_upstream, err
+                ),
                 vhost_ctx.max_log_size_bytes,
             )
             .await;
@@ -2031,7 +2063,12 @@ where
     } else {
         format!("{}?{}", req.path, req.query)
     };
-    let mut raw_head = format!("{} {} HTTP/1.{}\r\n", req.method, raw_target, req.version.min(1));
+    let mut raw_head = format!(
+        "{} {} HTTP/1.{}\r\n",
+        req.method,
+        raw_target,
+        req.version.min(1)
+    );
     for (k, v) in &req.headers {
         raw_head.push_str(&format!("{}: {}\r\n", k, v));
     }
@@ -2077,34 +2114,32 @@ where
             return Ok((400, false, sent_err_bytes));
         };
 
-        let mut upstream = match tokio::time::timeout(
-            conn_dur,
-            TcpStream::connect(&vhost_ctx.proxy_upstream),
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            _ => {
-                let err_body = b"502 Bad Gateway - Upstream Unavailable";
-                write_http_response(
-                    socket,
-                    502,
-                    "Bad Gateway",
-                    &[("Content-Type".into(), "text/plain".into())],
-                    err_body,
-                    None,
-                    is_head,
-                    is_https,
-                    false,
-                    0,
-                    vhost_ctx.headers_policy.as_ref(),
-                    None,
-                )
-                .await?;
-                let sent_err_bytes = if is_head { 0 } else { err_body.len() };
-                return Ok((502, false, sent_err_bytes));
-            }
-        };
+        let mut upstream =
+            match tokio::time::timeout(conn_dur, TcpStream::connect(&vhost_ctx.proxy_upstream))
+                .await
+            {
+                Ok(Ok(s)) => s,
+                _ => {
+                    let err_body = b"502 Bad Gateway - Upstream Unavailable";
+                    write_http_response(
+                        socket,
+                        502,
+                        "Bad Gateway",
+                        &[("Content-Type".into(), "text/plain".into())],
+                        err_body,
+                        None,
+                        is_head,
+                        is_https,
+                        false,
+                        0,
+                        vhost_ctx.headers_policy.as_ref(),
+                        None,
+                    )
+                    .await?;
+                    let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+                    return Ok((502, false, sent_err_bytes));
+                }
+            };
         let _ = upstream.set_nodelay(true);
         upstream.write_all(&rewritten_head).await?;
         if !req.body.is_empty() {
@@ -2174,8 +2209,7 @@ where
             };
             socket.write_all(&resp_bytes).await?;
             let _ = socket.flush().await;
-            let client_keep =
-                keep_alive && reusable && !response_has_connection_close(&resp_bytes);
+            let client_keep = keep_alive && reusable && !response_has_connection_close(&resp_bytes);
             if !client_keep {
                 let _ = socket.shutdown().await;
             }
@@ -2759,13 +2793,17 @@ async fn record_and_log(
     http_version: &str,
     req_id: &str,
 ) {
-    let max_log_size_bytes = vhost_ctx.map(|v| v.max_log_size_bytes).unwrap_or(DEFAULT_LOG_MAX_BYTES);
+    let max_log_size_bytes = vhost_ctx
+        .map(|v| v.max_log_size_bytes)
+        .unwrap_or(DEFAULT_LOG_MAX_BYTES);
     // [kart-2] NCSA standardi: HEAD, 304, 204 veya 0 bayt gonderilen yanitlarda '-' yazilir; aksi halde gercek bayt.
-    let is_zero_body = bytes_sent == 0
-        || status == 304
-        || status == 204
-        || method.eq_ignore_ascii_case("HEAD");
-    let bytes_str = if is_zero_body { "-".to_string() } else { bytes_sent.to_string() };
+    let is_zero_body =
+        bytes_sent == 0 || status == 304 || status == 204 || method.eq_ignore_ascii_case("HEAD");
+    let bytes_str = if is_zero_body {
+        "-".to_string()
+    } else {
+        bytes_sent.to_string()
+    };
     let actual_bytes = if is_zero_body { 0 } else { bytes_sent };
     state.record_access_log_detailed(
         ip,
@@ -2777,7 +2815,10 @@ async fn record_and_log(
         referer.unwrap_or(""),
         user_agent.unwrap_or(""),
     );
-    let line = format!("{} - - \"{} {} {}\" {} {}\r\n", ip, method, path, http_version, status, bytes_str);
+    let line = format!(
+        "{} - - \"{} {} {}\" {} {}\r\n",
+        ip, method, path, http_version, status, bytes_str
+    );
     append_access_log_limit(&state.base_dir, &line, max_log_size_bytes).await;
 
     record_and_log_vhost(
@@ -2796,7 +2837,6 @@ async fn record_and_log(
     )
     .await;
 }
-
 
 // =========================================================================
 // 8-MADDE KABUL STANDARDI: HATA SAYFALARI, ASENKRON LOG VE HTTP/2 MOTORU
@@ -2948,7 +2988,10 @@ pub async fn handle_h2_dispatched_request(
     listen_port: u16,
     tls_sni: Option<&str>,
     req_id: &str,
-) -> Result<(u16, Vec<(String, String)>, bytes::Bytes, LogMeta), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (u16, Vec<(String, String)>, bytes::Bytes, LogMeta),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     state.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
     // 1. VHost Cozumleme
@@ -2984,7 +3027,12 @@ pub async fn handle_h2_dispatched_request(
                 },
                 php_upstreams: vh.entry.php.upstreams.clone(),
                 php_lb_policy: vh.entry.php.lb_policy.clone(),
-                php_timeout: vh.entry.php.timeout.max(policies.fastcgi.timeout_sec).max(5),
+                php_timeout: vh
+                    .entry
+                    .php
+                    .timeout
+                    .max(policies.fastcgi.timeout_sec)
+                    .max(5),
                 cache_enabled: vh.entry.cache.enabled && rt.config.cache.enabled,
                 cache_expire: vh.entry.cache.expire.max(1),
                 cache_stale_sec: rt.config.cache.stale_while_revalidate_sec,
@@ -3066,7 +3114,9 @@ pub async fn handle_h2_dispatched_request(
 
     let log_meta = LogMeta {
         domain: Some(vhost_ctx.vhost_name.clone()),
-        custom_log_path: if vhost_ctx.logging.enabled && !vhost_ctx.logging.access_log.trim().is_empty() {
+        custom_log_path: if vhost_ctx.logging.enabled
+            && !vhost_ctx.logging.access_log.trim().is_empty()
+        {
             Some(PathBuf::from(&vhost_ctx.logging.access_log))
         } else {
             None
@@ -3078,7 +3128,9 @@ pub async fn handle_h2_dispatched_request(
 
     // 2. HTTP/2 Kapali vHost Denetimi
     if is_https && !vhost_ctx.tls_http2 {
-        let resp_body = bytes::Bytes::from_static(b"421 Misdirected Request - HTTP/2 is disabled for this domain\n");
+        let resp_body = bytes::Bytes::from_static(
+            b"421 Misdirected Request - HTTP/2 is disabled for this domain\n",
+        );
         let headers = vec![
             ("content-type".into(), "text/plain; charset=utf-8".into()),
             ("x-request-id".into(), req_id.to_string()),
@@ -3095,7 +3147,8 @@ pub async fn handle_h2_dispatched_request(
     if !vhost_ctx.global_acl.is_allowed(real_ip) || !vhost_ctx.vhost_acl.is_allowed(real_ip) {
         let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
         let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
-            handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+            handler
+                .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                 .unwrap_or_else(|_| b"403 Forbidden - IP Access Denied\n".to_vec())
         } else {
             b"403 Forbidden - IP Access Denied\n".to_vec()
@@ -3122,7 +3175,8 @@ pub async fn handle_h2_dispatched_request(
     ) {
         let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
         let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
-            handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+            handler
+                .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                 .unwrap_or_else(|_| b"403 Forbidden - WAF Blocked\n".to_vec())
         } else {
             b"403 Forbidden - WAF Blocked\n".to_vec()
@@ -3165,26 +3219,43 @@ pub async fn handle_h2_dispatched_request(
         RouteOutcome::Forbidden => {
             let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
             let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
-                handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                handler
+                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                     .unwrap_or_else(|_| b"403 Forbidden\n".to_vec())
             } else {
                 b"403 Forbidden\n".to_vec()
             };
-            return Ok((403, vec![("content-type".into(), "text/html; charset=utf-8".into())], bytes::Bytes::from(body), log_meta));
+            return Ok((
+                403,
+                vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                bytes::Bytes::from(body),
+                log_meta,
+            ));
         }
         RouteOutcome::Gone => {
             let body = b"410 Gone\n".to_vec();
-            return Ok((410, vec![("content-type".into(), "text/plain".into())], bytes::Bytes::from(body), log_meta));
+            return Ok((
+                410,
+                vec![("content-type".into(), "text/plain".into())],
+                bytes::Bytes::from(body),
+                log_meta,
+            ));
         }
         RouteOutcome::NotFound => {
             let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
             let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&404) {
-                handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                handler
+                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                     .unwrap_or_else(|_| b"404 Not Found\n".to_vec())
             } else {
                 b"404 Not Found\n".to_vec()
             };
-            return Ok((404, vec![("content-type".into(), "text/html; charset=utf-8".into())], bytes::Bytes::from(body), log_meta));
+            return Ok((
+                404,
+                vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                bytes::Bytes::from(body),
+                log_meta,
+            ));
         }
     };
 
@@ -3215,17 +3286,28 @@ pub async fn handle_h2_dispatched_request(
             Ok(Some(prep)) => {
                 let mut resp_headers = prep.headers;
                 resp_headers.push(("x-request-id".into(), req_id.to_string()));
-                return Ok((prep.status, resp_headers, bytes::Bytes::from(prep.body), log_meta));
+                return Ok((
+                    prep.status,
+                    resp_headers,
+                    bytes::Bytes::from(prep.body),
+                    log_meta,
+                ));
             }
             _ => {
                 let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
                 let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&502) {
-                    handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                    handler
+                        .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                         .unwrap_or_else(|_| b"502 Bad Gateway - PHP-FPM Error\n".to_vec())
                 } else {
                     b"502 Bad Gateway - PHP-FPM Error\n".to_vec()
                 };
-                return Ok((502, vec![("content-type".into(), "text/html; charset=utf-8".into())], bytes::Bytes::from(body), log_meta));
+                return Ok((
+                    502,
+                    vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                    bytes::Bytes::from(body),
+                    log_meta,
+                ));
             }
         }
     }
@@ -3257,18 +3339,25 @@ pub async fn handle_h2_dispatched_request(
                 }
                 Err(_) => {
                     let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&500) {
-                        static_handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                        static_handler
+                            .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                             .unwrap_or_else(|_| b"500 Internal Server Error\n".to_vec())
                     } else {
                         b"500 Internal Server Error\n".to_vec()
                     };
-                    Ok((500, vec![("content-type".into(), "text/html; charset=utf-8".into())], bytes::Bytes::from(body), log_meta))
+                    Ok((
+                        500,
+                        vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                        bytes::Bytes::from(body),
+                        log_meta,
+                    ))
                 }
             }
         }
         None => {
             let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&404) {
-                static_handler.resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                static_handler
+                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                     .unwrap_or_else(|_| b"404 Not Found - ZMax Server\n".to_vec())
             } else {
                 b"404 Not Found - ZMax Server\n".to_vec()

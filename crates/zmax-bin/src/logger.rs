@@ -797,17 +797,97 @@ mod tests {
 
         // [kart-2] Tum yanit tipleri icin formatlama ve '-' kontrolu
         let entries = vec![
-            ("127.0.0.1", "GET", "/index.html", "HTTP/1.1", 200, 512, "200 512"),
-            ("127.0.0.1", "HEAD", "/index.html", "HTTP/1.1", 200, 0, "200 -"),
-            ("127.0.0.1", "GET", "/not-modified.html", "HTTP/1.1", 304, 0, "304 -"),
-            ("127.0.0.1", "POST", "/no-content", "HTTP/1.1", 204, 0, "204 -"),
-            ("127.0.0.1", "GET", "/range.mp4", "HTTP/1.1", 206, 1024, "206 1024"),
-            ("127.0.0.1", "HEAD", "/range.mp4", "HTTP/1.1", 206, 0, "206 -"),
-            ("127.0.0.1", "GET", "/app.php", "HTTP/1.1", 200, 128, "200 128"),
-            ("127.0.0.1", "GET", "/proxy-api", "HTTP/1.1", 200, 256, "200 256"),
+            (
+                "127.0.0.1",
+                "GET",
+                "/index.html",
+                "HTTP/1.1",
+                200,
+                512,
+                "200 512",
+            ),
+            (
+                "127.0.0.1",
+                "HEAD",
+                "/index.html",
+                "HTTP/1.1",
+                200,
+                0,
+                "200 -",
+            ),
+            (
+                "127.0.0.1",
+                "GET",
+                "/not-modified.html",
+                "HTTP/1.1",
+                304,
+                0,
+                "304 -",
+            ),
+            (
+                "127.0.0.1",
+                "POST",
+                "/no-content",
+                "HTTP/1.1",
+                204,
+                0,
+                "204 -",
+            ),
+            (
+                "127.0.0.1",
+                "GET",
+                "/range.mp4",
+                "HTTP/1.1",
+                206,
+                1024,
+                "206 1024",
+            ),
+            (
+                "127.0.0.1",
+                "HEAD",
+                "/range.mp4",
+                "HTTP/1.1",
+                206,
+                0,
+                "206 -",
+            ),
+            (
+                "127.0.0.1",
+                "GET",
+                "/app.php",
+                "HTTP/1.1",
+                200,
+                128,
+                "200 128",
+            ),
+            (
+                "127.0.0.1",
+                "GET",
+                "/proxy-api",
+                "HTTP/1.1",
+                200,
+                256,
+                "200 256",
+            ),
             ("127.0.0.1", "GET", "/cached", "HTTP/1.1", 200, 64, "200 64"),
-            ("127.0.0.1", "GET", "/yok.html", "HTTP/1.1", 404, 32, "404 32"),
-            ("127.0.0.1", "HEAD", "/yok.html", "HTTP/1.1", 404, 0, "404 -"),
+            (
+                "127.0.0.1",
+                "GET",
+                "/yok.html",
+                "HTTP/1.1",
+                404,
+                32,
+                "404 32",
+            ),
+            (
+                "127.0.0.1",
+                "HEAD",
+                "/yok.html",
+                "HTTP/1.1",
+                404,
+                0,
+                "404 -",
+            ),
             ("127.0.0.1", "GET", "/yasak", "HTTP/1.1", 403, 30, "403 30"),
             ("127.0.0.1", "GET", "/hata", "HTTP/1.1", 500, 28, "500 28"),
             ("127.0.0.1", "GET", "/h2", "HTTP/2.0", 200, 50, "200 50"),
@@ -843,10 +923,19 @@ mod tests {
 
         for (i, (_, _, _, _, _, _, expected_sb)) in entries.iter().enumerate() {
             let line = lines[i];
-            assert!(line.contains(&format!("\" {} \"", expected_sb)), "Satir '{line}' beklenen '{expected_sb}' icermelidir");
+            assert!(
+                line.contains(&format!("\" {} \"", expected_sb)),
+                "Satir '{line}' beklenen '{expected_sb}' icermelidir"
+            );
             // Go logs.ParseAccess formati: ^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) (\d+|-)
-            assert!(line.starts_with("127.0.0.1 - - [11/Nov/2026:21:00:00 +0000] \""), "Biçim hatası: {line}");
-            assert!(line.ends_with("\"-\" \"curl/8.0\""), "Referer/UA hatası: {line}");
+            assert!(
+                line.starts_with("127.0.0.1 - - [11/Nov/2026:21:00:00 +0000] \""),
+                "Biçim hatası: {line}"
+            );
+            assert!(
+                line.ends_with("\"-\" \"curl/8.0\""),
+                "Referer/UA hatası: {line}"
+            );
         }
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -944,7 +1033,9 @@ mod tests {
 
         // Açık dosya tanıtıcılarını bırak, eski dosyayı taşı, sonra reopen_all sonrası yeni dosyaya yaz
         mgr.reopen_all().await;
-        tokio::fs::rename(&vhost_abs, &rotated_archive).await.unwrap();
+        tokio::fs::rename(&vhost_abs, &rotated_archive)
+            .await
+            .unwrap();
 
         mgr.log_access(AccessLogEntry {
             timestamp: ts,
@@ -991,7 +1082,10 @@ mod tests {
         let err_abs = dir.join(&err_override);
         let err_dot_one = dir.join("logs/vhosts/site.error.log.1");
         assert!(err_dot_one.is_file());
-        assert_eq!(tokio::fs::read_to_string(&err_abs).await.unwrap(), "ikinci-hata\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&err_abs).await.unwrap(),
+            "ikinci-hata\n"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

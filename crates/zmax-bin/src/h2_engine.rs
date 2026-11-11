@@ -122,7 +122,11 @@ async fn process_h2_stream(
         headers_vec.push((key, val));
     }
 
-    if !headers_vec.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) && !authority_host.is_empty() {
+    if !headers_vec
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("host"))
+        && !authority_host.is_empty()
+    {
         headers_vec.push(("host".to_string(), authority_host.clone()));
     }
 
@@ -153,10 +157,9 @@ async fn process_h2_stream(
         true
     };
 
-    let body_read_ok = match tokio::time::timeout(DEFAULT_H2_BODY_TIMEOUT, read_body_future).await {
-        Ok(ok) => ok,
-        Err(_) => false,
-    };
+    let body_read_ok = tokio::time::timeout(DEFAULT_H2_BODY_TIMEOUT, read_body_future)
+        .await
+        .unwrap_or(false);
 
     let req_id = if state.runtime.read().await.config.logging.add_request_id {
         zmax_security::generate_request_id()
@@ -330,7 +333,10 @@ async fn process_h2_stream(
         0
     };
 
-    let domain_str = log_meta.domain.clone().unwrap_or_else(|| "default".to_string());
+    let domain_str = log_meta
+        .domain
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
 
     state.record_access_log_detailed(
         &peer_addr.ip().to_string(),
