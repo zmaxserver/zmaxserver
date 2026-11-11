@@ -57,6 +57,13 @@ struct RedirectDir {
     target: String,
 }
 
+/// `<FilesMatch>` veya `<Files>` bloğundan üretilen erişim denetim kuralı.
+#[derive(Debug, Clone)]
+pub struct FilesMatchRule {
+    pub pattern: Regex,
+    pub denied: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct HtAccess {
     engine_on: bool,
@@ -68,6 +75,7 @@ pub struct HtAccess {
     pub directory_index: Vec<String>,
     pub disable_indexes: Option<bool>,
     pub error_documents: BTreeMap<u16, String>,
+    pub files_matches: Vec<FilesMatchRule>,
     /// Ayrıştırılamayan satırlar (günlüğe yazılabilsin diye).
     pub warnings: Vec<String>,
 }
@@ -99,8 +107,14 @@ pub enum Outcome {
     /// Değişiklik yok.
     None,
     /// İç yeniden yazma: yeni yol (`/` ile başlar, çözülmüş) ve sorgu.
-    Rewritten { path: String, query: String },
-    Redirect { status: u16, location: String },
+    Rewritten {
+        path: String,
+        query: String,
+    },
+    Redirect {
+        status: u16,
+        location: String,
+    },
     Forbidden,
     Gone,
 }
@@ -149,8 +163,68 @@ fn tokenize(line: &str) -> Vec<String> {
     out
 }
 
+const MAX_REGEX_LEN: usize = 2048;
+const REGEX_SIZE_LIMIT: usize = 1024 * 1024; // 1 MB
+const REGEX_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024; // 2 MB
+
 fn build_regex(pat: &str, nocase: bool) -> Result<Regex, regex::Error> {
-    RegexBuilder::new(pat).case_insensitive(nocase).build()
+    if pat.len() > MAX_REGEX_LEN {
+        return Err(regex::Error::Syntax(format!(
+            "Regex deseni azami uzunluk sınırını aşıyor ({MAX_REGEX_LEN} karakter)"
+        )));
+    }
+    RegexBuilder::new(pat)
+        .case_insensitive(nocase)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .build()
+}
+
+fn glob_to_regex(glob: &str) -> String {
+    let mut out = String::from("^");
+    for c in glob.chars() {
+        match c {
+            '*' => out.push_str(".*"),
+            '?' => out.push('.'),
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('$');
+    out
+}
+
+fn parse_files_open(line: &str) -> Option<(bool, String)> {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("<filesmatch") {
+        let rest = &trimmed[11..];
+        if rest.starts_with(|c: char| c.is_whitespace() || c == '>') {
+            let body = rest.trim_end_matches('>').trim();
+            let pat = body.trim_matches('"').trim_matches('\'').trim();
+            if !pat.is_empty() {
+                return Some((true, pat.to_string()));
+            }
+        }
+    } else if lower.starts_with("<files") {
+        let rest = &trimmed[6..];
+        if rest.starts_with(|c: char| c.is_whitespace() || c == '>') {
+            let body = rest.trim_end_matches('>').trim();
+            let pat = body.trim_matches('"').trim_matches('\'').trim();
+            if !pat.is_empty() {
+                return Some((false, pat.to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn is_files_close(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower.starts_with("</filesmatch") || lower.starts_with("</files")
 }
 
 fn parse_flags(raw: Option<&str>) -> (Flags, bool, bool) {
@@ -292,7 +366,10 @@ fn status_word(w: &str) -> Option<u16> {
         "temp" => Some(302),
         "seeother" => Some(303),
         "gone" => Some(410),
-        n => n.parse::<u16>().ok().filter(|c| (300..400).contains(c) || *c == 410),
+        n => n
+            .parse::<u16>()
+            .ok()
+            .filter(|c| (300..400).contains(c) || *c == 410),
     }
 }
 
@@ -306,6 +383,7 @@ impl HtAccess {
         let joined = text.replace("\r\n", "\n").replace("\\\n", " ");
         let mut pending: Vec<Cond> = Vec::new();
         let mut ifmodule_stack: Vec<bool> = Vec::new();
+        let mut current_files_ctx: Option<(Regex, bool)> = None;
         for raw in joined.lines() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -324,14 +402,65 @@ impl HtAccess {
             if ifmodule_stack.iter().any(|&active| !active) {
                 continue;
             }
+
+            if let Some((is_match, pat)) = parse_files_open(line) {
+                pending.clear();
+                let re_res = if is_match {
+                    build_regex(&pat, true)
+                } else {
+                    build_regex(&glob_to_regex(&pat), true)
+                };
+                match re_res {
+                    Ok(r) => current_files_ctx = Some((r, true)),
+                    Err(e) => {
+                        h.warnings
+                            .push(format!("FilesMatch regex hatası ({e}): {line}"));
+                        current_files_ctx = None;
+                    }
+                }
+                continue;
+            }
+            if is_files_close(line) {
+                pending.clear();
+                if let Some((pattern, denied)) = current_files_ctx.take() {
+                    h.files_matches.push(FilesMatchRule { pattern, denied });
+                }
+                continue;
+            }
+            if let Some((_, ref mut denied)) = current_files_ctx {
+                let lower_line = line.to_ascii_lowercase();
+                if lower_line.contains("deny from all")
+                    || lower_line.contains("require all denied")
+                    || lower_line.starts_with("deny")
+                {
+                    *denied = true;
+                    continue;
+                } else if lower_line.contains("allow from all")
+                    || lower_line.contains("require all granted")
+                    || lower_line.starts_with("allow")
+                {
+                    *denied = false;
+                    continue;
+                }
+                if lower_line.starts_with("order") {
+                    continue;
+                }
+            }
+
             let toks = tokenize(line);
             if toks.is_empty() {
                 continue;
             }
             match toks[0].to_ascii_lowercase().as_str() {
                 "rewriteengine" => {
-                    let is_on = toks.get(1).map(|v| v.eq_ignore_ascii_case("on")).unwrap_or(false);
-                    let is_off = toks.get(1).map(|v| v.eq_ignore_ascii_case("off")).unwrap_or(false);
+                    let is_on = toks
+                        .get(1)
+                        .map(|v| v.eq_ignore_ascii_case("on"))
+                        .unwrap_or(false);
+                    let is_off = toks
+                        .get(1)
+                        .map(|v| v.eq_ignore_ascii_case("off"))
+                        .unwrap_or(false);
                     h.engine_on = is_on;
                     h.engine_explicit_off = is_off;
                 }
@@ -353,7 +482,10 @@ impl HtAccess {
                         h.warnings.push(format!("RewriteCond eksik: {line}"));
                         continue;
                     }
-                    let flags = toks.get(3).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+                    let flags = toks
+                        .get(3)
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_default();
                     let nc = flags.contains("nc") || flags.contains("nocase");
                     let or = flags.contains("or") && !flags.contains("nor");
                     let mut pat = toks[2].as_str();
@@ -372,7 +504,8 @@ impl HtAccess {
                         p => match build_regex(p, nc) {
                             Ok(r) => Some(CondTest::Regex(r)),
                             Err(e) => {
-                                h.warnings.push(format!("RewriteCond regex hatası ({e}): {line}"));
+                                h.warnings
+                                    .push(format!("RewriteCond regex hatası ({e}): {line}"));
                                 None
                             }
                         },
@@ -429,7 +562,8 @@ impl HtAccess {
                             conds: std::mem::take(&mut pending),
                         }),
                         Err(e) => {
-                            h.warnings.push(format!("RewriteRule regex hatası ({e}): {line}"));
+                            h.warnings
+                                .push(format!("RewriteRule regex hatası ({e}): {line}"));
                             pending.clear();
                         }
                     }
@@ -454,7 +588,11 @@ impl HtAccess {
                             h.redirects.push(RedirectDir {
                                 status,
                                 prefix: if is_match { None } else { Some((*p).clone()) },
-                                regex: if is_match { build_regex(p, false).ok() } else { None },
+                                regex: if is_match {
+                                    build_regex(p, false).ok()
+                                } else {
+                                    None
+                                },
                                 target: String::new(),
                             });
                         }
@@ -472,7 +610,9 @@ impl HtAccess {
                                 regex: Some(r),
                                 target: args[1].clone(),
                             }),
-                            Err(e) => h.warnings.push(format!("RedirectMatch regex hatası ({e}): {line}")),
+                            Err(e) => h
+                                .warnings
+                                .push(format!("RedirectMatch regex hatası ({e}): {line}")),
                         }
                     } else {
                         h.redirects.push(RedirectDir {
@@ -505,7 +645,8 @@ impl HtAccess {
                                 h.error_documents.insert(code, target);
                             }
                         } else {
-                            h.warnings.push(format!("ErrorDocument geçersiz kod: {line}"));
+                            h.warnings
+                                .push(format!("ErrorDocument geçersiz kod: {line}"));
                         }
                     } else {
                         h.warnings.push(format!("ErrorDocument eksik: {line}"));
@@ -523,6 +664,7 @@ impl HtAccess {
             && self.directory_index.is_empty()
             && self.disable_indexes.is_none()
             && self.error_documents.is_empty()
+            && self.files_matches.is_empty()
     }
 
     pub fn evaluate(&self, ctx: &RequestCtx) -> Outcome {
@@ -533,6 +675,21 @@ impl HtAccess {
     /// değerlendirir ve `Outcome` ile birlikte `[E=KEY:VAL]` değişkenlerini döndürür.
     pub fn evaluate_in_dir(&self, ctx: &RequestCtx, dir_prefix: &str) -> EvalResult {
         let mut env_vars: Vec<(String, String)> = Vec::new();
+
+        // <FilesMatch> ve <Files> erişim denetimi
+        let filename = ctx.path.rsplit('/').next().unwrap_or("");
+        if !filename.is_empty() {
+            for rule in &self.files_matches {
+                if rule.pattern.is_match(filename) && rule.denied {
+                    return EvalResult {
+                        outcome: Outcome::Forbidden,
+                        env_vars,
+                        matched_last: true,
+                        engine_explicit_off: self.engine_explicit_off,
+                    };
+                }
+            }
+        }
 
         // mod_alias: Redirect / RedirectMatch
         for r in &self.redirects {
@@ -594,7 +751,11 @@ impl HtAccess {
             };
         }
 
-        let norm_dir = if dir_prefix.is_empty() { "/" } else { dir_prefix };
+        let norm_dir = if dir_prefix.is_empty() {
+            "/"
+        } else {
+            dir_prefix
+        };
         let match_base = if self.has_explicit_base {
             self.base.as_str()
         } else {
@@ -610,8 +771,10 @@ impl HtAccess {
         let mut query = ctx.query.to_string();
         let mut changed = false;
         let mut matched_last = false;
+        let mut history: Vec<(String, String)> = Vec::with_capacity(MAX_PASSES + 1);
+        history.push((path.clone(), query.clone()));
 
-        for _ in 0..MAX_PASSES {
+        for pass in 0..MAX_PASSES {
             let mut pass_changed = false;
             let mut i = 0usize;
             while i < self.rules.len() {
@@ -698,6 +861,20 @@ impl HtAccess {
                             loc.push('?');
                             loc.push_str(&q);
                         }
+                        let current_abs = absolutize(ctx.path, ctx);
+                        let current_with_q = if query.is_empty() {
+                            current_abs.clone()
+                        } else {
+                            format!("{current_abs}?{query}")
+                        };
+                        if loc == current_abs || loc == current_with_q {
+                            return EvalResult {
+                                outcome: Outcome::None,
+                                env_vars,
+                                matched_last: true,
+                                engine_explicit_off: self.engine_explicit_off,
+                            };
+                        }
                         return EvalResult {
                             outcome: Outcome::Redirect {
                                 status: rule.flags.redirect.unwrap_or(302),
@@ -727,10 +904,25 @@ impl HtAccess {
                         loc.push('?');
                         loc.push_str(&new_query);
                     }
+                    let abs_loc = absolutize(&loc, ctx);
+                    let current_abs = absolutize(ctx.path, ctx);
+                    let current_with_q = if ctx.query.is_empty() {
+                        current_abs.clone()
+                    } else {
+                        format!("{current_abs}?{}", ctx.query)
+                    };
+                    if abs_loc == current_abs || abs_loc == current_with_q {
+                        return EvalResult {
+                            outcome: Outcome::None,
+                            env_vars,
+                            matched_last: true,
+                            engine_explicit_off: self.engine_explicit_off,
+                        };
+                    }
                     return EvalResult {
                         outcome: Outcome::Redirect {
                             status: code,
-                            location: absolutize(&loc, ctx),
+                            location: abs_loc,
                         },
                         env_vars,
                         matched_last: true,
@@ -739,6 +931,19 @@ impl HtAccess {
                 }
 
                 if new_path != path || new_query != query {
+                    // Yönlendirme döngüsü (Rewrite Loop) tespiti ve DoS koruması
+                    if history
+                        .iter()
+                        .any(|(p, q)| p == &new_path && q == &new_query)
+                    {
+                        return EvalResult {
+                            outcome: Outcome::Forbidden,
+                            env_vars,
+                            matched_last: true,
+                            engine_explicit_off: self.engine_explicit_off,
+                        };
+                    }
+                    history.push((new_path.clone(), new_query.clone()));
                     path = new_path;
                     query = new_query;
                     changed = true;
@@ -766,6 +971,15 @@ impl HtAccess {
             if !pass_changed {
                 break;
             }
+            if pass == MAX_PASSES - 1 && pass_changed {
+                // Azami geçiş sınırı (MAX_PASSES) aşıldı -> Sonsuz döngü DoS engeli
+                return EvalResult {
+                    outcome: Outcome::Forbidden,
+                    env_vars,
+                    matched_last: true,
+                    engine_explicit_off: self.engine_explicit_off,
+                };
+            }
         }
 
         let outcome = if changed {
@@ -792,20 +1006,41 @@ impl HtAccess {
         let mut cond_caps: Option<Vec<String>> = None;
         let mut group = false;
         for c in &rule.conds {
-            let ts = expand(&c.test_string, Some(rule_caps), cond_caps.as_ref(), ctx, path, query);
+            let ts = expand(
+                &c.test_string,
+                Some(rule_caps),
+                cond_caps.as_ref(),
+                ctx,
+                path,
+                query,
+            );
             let ts = ts.replace("%{QUERY_STRING}", query);
             let (mut r, caps) = match &c.test {
                 CondTest::Regex(re) => match re.captures(&ts) {
                     Some(m) => (
                         true,
-                        Some(m.iter().map(|x| x.map(|x| x.as_str().to_string()).unwrap_or_default()).collect::<Vec<_>>()),
+                        Some(
+                            m.iter()
+                                .map(|x| x.map(|x| x.as_str().to_string()).unwrap_or_default())
+                                .collect::<Vec<_>>(),
+                        ),
                     ),
                     None => (false, None),
                 },
                 CondTest::File => (Path::new(&ts).is_file(), None),
                 CondTest::Dir => (Path::new(&ts).is_dir(), None),
-                CondTest::NonEmpty => (std::fs::metadata(&ts).map(|m| m.is_file() && m.len() > 0).unwrap_or(false), None),
-                CondTest::Link => (std::fs::symlink_metadata(&ts).map(|m| m.file_type().is_symlink()).unwrap_or(false), None),
+                CondTest::NonEmpty => (
+                    std::fs::metadata(&ts)
+                        .map(|m| m.is_file() && m.len() > 0)
+                        .unwrap_or(false),
+                    None,
+                ),
+                CondTest::Link => (
+                    std::fs::symlink_metadata(&ts)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false),
+                    None,
+                ),
                 CondTest::Eq(v) => (&ts == v, None),
                 CondTest::Lt(v) => (ts.as_str() < v.as_str(), None),
                 CondTest::Gt(v) => (ts.as_str() > v.as_str(), None),
@@ -836,7 +1071,11 @@ fn absolutize(loc: &str, ctx: &RequestCtx) -> String {
         return loc.to_string();
     }
     let scheme = if ctx.https { "https" } else { "http" };
-    let path = if loc.starts_with('/') { loc.to_string() } else { format!("/{loc}") };
+    let path = if loc.starts_with('/') {
+        loc.to_string()
+    } else {
+        format!("/{loc}")
+    };
     format!("{scheme}://{}{}", ctx.host, path)
 }
 
@@ -849,17 +1088,29 @@ fn var_value(name: &str, ctx: &RequestCtx, path: &str, query: &str) -> String {
         "HTTP_HOST" => ctx.host.to_string(),
         // Apache mod_rewrite standardında REQUEST_URI yalnızca yol bileşenidir (sorgu QUERY_STRING içindedir).
         "REQUEST_URI" => path.to_string(),
-        "REQUEST_FILENAME" | "SCRIPT_FILENAME" => {
-            resolve_request_filename(ctx.doc_root, path).to_string_lossy().into_owned()
-        }
+        "REQUEST_FILENAME" | "SCRIPT_FILENAME" => resolve_request_filename(ctx.doc_root, path)
+            .to_string_lossy()
+            .into_owned(),
         "DOCUMENT_ROOT" => ctx.doc_root.to_string_lossy().into_owned(),
         "QUERY_STRING" => query.to_string(),
-        "HTTPS" => if ctx.https { "on".into() } else { "off".into() },
+        "HTTPS" => {
+            if ctx.https {
+                "on".into()
+            } else {
+                "off".into()
+            }
+        }
         "REQUEST_METHOD" => ctx.method.to_string(),
         "REMOTE_ADDR" => ctx.remote_addr.to_string(),
         "SERVER_PORT" => ctx.server_port.to_string(),
         "SERVER_NAME" => ctx.host.split(':').next().unwrap_or("").to_string(),
-        "REQUEST_SCHEME" => if ctx.https { "https".into() } else { "http".into() },
+        "REQUEST_SCHEME" => {
+            if ctx.https {
+                "https".into()
+            } else {
+                "http".into()
+            }
+        }
         "HTTP_AUTHORIZATION" => header(ctx, "authorization"),
         "HTTP_X_FORWARDED_PROTO" => header(ctx, "x-forwarded-proto"),
         "HTTP_X_FORWARDED_FOR" => header(ctx, "x-forwarded-for"),
@@ -981,7 +1232,12 @@ fn expand(
 mod tests {
     use super::*;
 
-    fn ctx<'a>(root: &'a Path, path: &'a str, query: &'a str, headers: &'a [(String, String)]) -> RequestCtx<'a> {
+    fn ctx<'a>(
+        root: &'a Path,
+        path: &'a str,
+        query: &'a str,
+        headers: &'a [(String, String)],
+    ) -> RequestCtx<'a> {
         RequestCtx {
             path,
             query,
@@ -1015,11 +1271,20 @@ mod tests {
         let none: Vec<(String, String)> = vec![];
         assert_eq!(
             h.evaluate(&ctx(&root, "/ornek-yazi/", "p=1", &none)),
-            Outcome::Rewritten { path: "/index.php".into(), query: "p=1".into() }
+            Outcome::Rewritten {
+                path: "/index.php".into(),
+                query: "p=1".into()
+            }
         );
-        assert_eq!(h.evaluate(&ctx(&root, "/style.css", "", &none)), Outcome::None);
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/style.css", "", &none)),
+            Outcome::None
+        );
         assert_eq!(h.evaluate(&ctx(&root, "/klasor", "", &none)), Outcome::None);
-        assert_eq!(h.evaluate(&ctx(&root, "/index.php", "", &none)), Outcome::None);
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/index.php", "", &none)),
+            Outcome::None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1032,13 +1297,19 @@ mod tests {
         let none: Vec<(String, String)> = vec![];
         assert_eq!(
             h.evaluate(&ctx(&root, "/a/b", "x=1", &none)),
-            Outcome::Redirect { status: 301, location: "https://site.test/a/b?x=1".into() }
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/a/b?x=1".into()
+            }
         );
         let mut c = ctx(&root, "/eski/sayfa", "", &none);
         c.https = true;
         assert_eq!(
             h.evaluate(&c),
-            Outcome::Redirect { status: 301, location: "https://site.test/yeni/sayfa".into() }
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/yeni/sayfa".into()
+            }
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1054,10 +1325,16 @@ mod tests {
         let ref_ = vec![("Referer".to_string(), "http://spam.com/".to_string())];
         assert_eq!(h.evaluate(&ctx(&root, "/x", "", &ref_)), Outcome::Forbidden);
         let none: Vec<(String, String)> = vec![];
-        assert_eq!(h.evaluate(&ctx(&root, "/kaldirildi", "", &none)), Outcome::Gone);
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/kaldirildi", "", &none)),
+            Outcome::Gone
+        );
         assert_eq!(
             h.evaluate(&ctx(&root, "/p/42", "a=1", &none)),
-            Outcome::Rewritten { path: "/sayfa.php".into(), query: "id=42&a=1".into() }
+            Outcome::Rewritten {
+                path: "/sayfa.php".into(),
+                query: "id=42&a=1".into()
+            }
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1072,33 +1349,51 @@ mod tests {
         let none: Vec<(String, String)> = vec![];
         assert_eq!(
             h.evaluate(&ctx(&root, "/eski/alt", "", &none)),
-            Outcome::Redirect { status: 301, location: "https://yeni.test/y/alt".into() }
+            Outcome::Redirect {
+                status: 301,
+                location: "https://yeni.test/y/alt".into()
+            }
         );
         assert_eq!(
             h.evaluate(&ctx(&root, "/kat/7", "", &none)),
-            Outcome::Redirect { status: 302, location: "http://site.test/kategori.php?id=7".into() }
+            Outcome::Redirect {
+                status: 302,
+                location: "http://site.test/kategori.php?id=7".into()
+            }
         );
-        assert_eq!(h.evaluate(&ctx(&root, "/silindi", "", &none)), Outcome::Gone);
-        assert_eq!(h.evaluate(&ctx(&root, "/eskiden", "", &none)), Outcome::None);
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/silindi", "", &none)),
+            Outcome::Gone
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/eskiden", "", &none)),
+            Outcome::None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn bad_regex_is_reported_not_fatal() {
-        let h = HtAccess::parse("RewriteEngine On\nRewriteRule ^(?=a)b$ /x [L]\nRewriteRule ^ok$ /y [L]\n");
+        let h = HtAccess::parse(
+            "RewriteEngine On\nRewriteRule ^(?=a)b$ /x [L]\nRewriteRule ^ok$ /y [L]\n",
+        );
         assert_eq!(h.warnings.len(), 1);
         let root = std::env::temp_dir();
         let none: Vec<(String, String)> = vec![];
         assert_eq!(
             h.evaluate(&ctx(&root, "/ok", "", &none)),
-            Outcome::Rewritten { path: "/y".into(), query: String::new() }
+            Outcome::Rewritten {
+                path: "/y".into(),
+                query: String::new()
+            }
         );
     }
 
     #[test]
     fn rewrite_loop_is_bounded() {
         let root = std::env::temp_dir();
-        let h = HtAccess::parse("RewriteEngine On\nRewriteRule ^a$ /b [L]\nRewriteRule ^b$ /a [L]\n");
+        let h =
+            HtAccess::parse("RewriteEngine On\nRewriteRule ^a$ /b [L]\nRewriteRule ^b$ /a [L]\n");
         let none: Vec<(String, String)> = vec![];
         // sonsuz döngüye girmeden döner
         let _ = h.evaluate(&ctx(&root, "/a", "", &none));
@@ -1140,8 +1435,295 @@ mod tests {
         );
         assert_eq!(
             h.evaluate(&ctx(&root, "/olmayan.php/urun/42", "renk=mavi", &none)),
-            Outcome::Rewritten { path: "/index.php".into(), query: "renk=mavi".into() }
+            Outcome::Rewritten {
+                path: "/index.php".into(),
+                query: "renk=mavi".into()
+            }
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zpanel_redirects_block_https_www_and_nowww_with_backrefs() {
+        let root = tmp("zpanel_redirs");
+        let none: Vec<(String, String)> = vec![];
+
+        // 1. Force HTTPS + Enforce non-WWW (%1 geri başvurusu)
+        let ht_non_www = concat!(
+            "# BEGIN zPanel Redirects\n",
+            "<IfModule mod_rewrite.c>\n",
+            "RewriteEngine On\n\n",
+            "# Force HTTPS\n",
+            "RewriteCond %{HTTPS} off\n",
+            "RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n\n",
+            "# Enforce non-WWW\n",
+            "RewriteCond %{HTTP_HOST} ^www\\.(.+)$ [NC]\n",
+            "RewriteRule ^(.*)$ https://%1%{REQUEST_URI} [L,R=301]\n",
+            "</IfModule>\n",
+        );
+        let h1 = HtAccess::parse(ht_non_www);
+        assert!(h1.warnings.is_empty(), "{:?}", h1.warnings);
+
+        // HTTP iken HTTPS'e yönlenmeli
+        let mut c_http = ctx(&root, "/blog/yazi-1", "sayfa=2", &none);
+        c_http.host = "site.test";
+        c_http.https = false;
+        assert_eq!(
+            h1.evaluate(&c_http),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/blog/yazi-1?sayfa=2".into(),
+            }
+        );
+
+        // HTTPS ve www.site.test iken %1 ile site.test'e yönlenmeli
+        let mut c_www = ctx(&root, "/hakkimizda", "ref=google", &none);
+        c_www.host = "www.site.test";
+        c_www.https = true;
+        assert_eq!(
+            h1.evaluate(&c_www),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/hakkimizda?ref=google".into(),
+            }
+        );
+
+        // Zaten HTTPS ve non-www iken döngüye girmemeli (Outcome::None)
+        let mut c_ok = ctx(&root, "/iletisim", "", &none);
+        c_ok.host = "site.test";
+        c_ok.https = true;
+        assert_eq!(h1.evaluate(&c_ok), Outcome::None);
+
+        // 2. Enforce WWW (RewriteCond %{HTTP_HOST} !^www\. [NC])
+        let ht_www = concat!(
+            "# BEGIN zPanel Redirects\n",
+            "<IfModule mod_rewrite.c>\n",
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP_HOST} !^www\\. [NC]\n",
+            "RewriteRule ^(.*)$ https://www.%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+            "</IfModule>\n",
+        );
+        let h2 = HtAccess::parse(ht_www);
+        let mut c_nowww = ctx(&root, "/urunler", "kategori=1", &none);
+        c_nowww.host = "site.test";
+        c_nowww.https = true;
+        assert_eq!(
+            h2.evaluate(&c_nowww),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://www.site.test/urunler?kategori=1".into(),
+            }
+        );
+
+        // 3. Host bazlı alan adı yönlendirmesi
+        let ht_host = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP_HOST} ^eski-alan\\.test$ [NC]\n",
+            "RewriteRule ^(.*)$ https://yeni-alan.test/$1 [R=301,L]\n",
+        );
+        let h3 = HtAccess::parse(ht_host);
+        let mut c_old_host = ctx(&root, "/sayfa/detay", "id=9", &none);
+        c_old_host.host = "eski-alan.test";
+        assert_eq!(
+            h3.evaluate(&c_old_host),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://yeni-alan.test/sayfa/detay?id=9".into(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn files_match_deny_and_require_all_denied() {
+        let root = tmp("fm_test");
+        let none: Vec<(String, String)> = vec![];
+
+        let ht = concat!(
+            "<FilesMatch \"^\\.ht\">\n",
+            "    Require all denied\n",
+            "</FilesMatch>\n",
+            "<FilesMatch \"\\.(env|log|sql|ini|bak)$\">\n",
+            "    Order allow,deny\n",
+            "    Deny from all\n",
+            "</FilesMatch>\n",
+            "<FilesMatch \"^(wp-config\\.php|readme\\.html)$\">\n",
+            "    Deny from all\n",
+            "</FilesMatch>\n",
+        );
+        let h = HtAccess::parse(ht);
+        assert_eq!(h.files_matches.len(), 3);
+
+        // Yasaklı dosyalar -> Outcome::Forbidden
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/.htaccess", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/.htpasswd", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/app.env", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/database.sql", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/errors.log", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/config.ini", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/yedek.bak", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/wp-config.php", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/readme.html", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/sub/klasor/secret.sql", "", &none)),
+            Outcome::Forbidden
+        );
+
+        // İzinli normal dosyalar -> Outcome::None (rewrite rule yok)
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/index.php", "", &none)),
+            Outcome::None
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/style.css", "", &none)),
+            Outcome::None
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/resim.jpg", "", &none)),
+            Outcome::None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn files_wildcard_glob_denial() {
+        let root = tmp("files_glob");
+        let none: Vec<(String, String)> = vec![];
+
+        let ht = concat!(
+            "<Files \"*.private\">\n",
+            "    Require all denied\n",
+            "</Files>\n",
+            "<Files \"gizli.txt\">\n",
+            "    Deny from all\n",
+            "</Files>\n",
+        );
+        let h = HtAccess::parse(ht);
+        assert_eq!(h.files_matches.len(), 2);
+
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/anahtar.private", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/dizin/anahtar.private", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/gizli.txt", "", &none)),
+            Outcome::Forbidden
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/dizin/gizli.txt", "", &none)),
+            Outcome::Forbidden
+        );
+
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/acik.txt", "", &none)),
+            Outcome::None
+        );
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/anahtar.pub", "", &none)),
+            Outcome::None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rewrite_loop_detection_and_self_redirect_safety() {
+        let root = tmp("loop_safety");
+        let none: Vec<(String, String)> = vec![];
+
+        // 1. İki kural arasında ping-pong sonsuz döngüsü (/a -> /b -> /a)
+        let ht_pingpong = "RewriteEngine On\nRewriteRule ^a$ /b [L]\nRewriteRule ^b$ /a [L]\n";
+        let h_loop = HtAccess::parse(ht_pingpong);
+        // Döngü tespit edildiğinde DoS koruması gereği Outcome::Forbidden döner
+        assert_eq!(
+            h_loop.evaluate(&ctx(&root, "/a", "", &none)),
+            Outcome::Forbidden
+        );
+
+        // 2. Kendine yönlendirme (Self-redirect 301/302)
+        let ht_self = "RewriteEngine On\nRewriteRule ^kendisi$ /kendisi [R=301,L]\n";
+        let h_self = HtAccess::parse(ht_self);
+        assert_eq!(
+            h_self.evaluate(&ctx(&root, "/kendisi", "", &none)),
+            Outcome::None
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regex_max_length_dos_protection() {
+        let huge_pattern = "a".repeat(2500);
+        let ht_bad = format!("RewriteEngine On\nRewriteRule {huge_pattern} /hedef [L]\n");
+        let h = HtAccess::parse(&ht_bad);
+        // Desenin uzunluğu 2048 karakterden büyük olduğu için warnings'e yazılmalı ve sunucu çökmemeli
+        assert_eq!(h.warnings.len(), 1);
+        assert!(h.warnings[0].contains("azami uzunluk"));
+    }
+
+    #[test]
+    fn unknown_host_and_custom_port_behavior() {
+        let root = tmp("unk_host");
+        let none: Vec<(String, String)> = vec![];
+
+        let ht = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP_HOST} ^$\n",
+            "RewriteRule ^ - [F]\n",
+            "RewriteCond %{SERVER_NAME} ^site\\.test$\n",
+            "RewriteRule ^bilgi$ /bilgi.php [L]\n",
+        );
+        let h = HtAccess::parse(ht);
+
+        // Boş / tanımsız host -> Forbidden
+        let mut c_empty = ctx(&root, "/sayfa", "", &none);
+        c_empty.host = "";
+        assert_eq!(h.evaluate(&c_empty), Outcome::Forbidden);
+
+        // Port içeren host (site.test:19480) -> SERVER_NAME portsüz 'site.test' olarak eşleşmeli
+        let mut c_port = ctx(&root, "/bilgi", "", &none);
+        c_port.host = "site.test:19480";
+        assert_eq!(
+            h.evaluate(&c_port),
+            Outcome::Rewritten {
+                path: "/bilgi.php".into(),
+                query: String::new()
+            }
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

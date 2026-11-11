@@ -4,9 +4,7 @@
 pub mod htaccess;
 
 use dashmap::DashMap;
-use htaccess::{
-    absolutize_location, expand_request_vars, HtAccess, Outcome, RequestCtx,
-};
+use htaccess::{absolutize_location, expand_request_vars, HtAccess, Outcome, RequestCtx};
 use regex::RegexBuilder;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -69,10 +67,7 @@ pub fn sanitize_and_decode_route_path(raw_path: &str) -> Option<String> {
         return None;
     }
     let dec_lower = decoded.to_ascii_lowercase();
-    if dec_lower.contains("%00")
-        || dec_lower.contains("%5c")
-        || dec_lower.contains("%2e%2e")
-    {
+    if dec_lower.contains("%00") || dec_lower.contains("%5c") || dec_lower.contains("%2e%2e") {
         return None;
     }
 
@@ -612,6 +607,22 @@ fn resolve_chain_with_info(
         headers: req.headers,
     };
 
+    // <FilesMatch> ve <Files> kuralları (RewriteEngine Off olsa dahi hiyerarşik uygulanır)
+    let filename = decoded_path.rsplit('/').next().unwrap_or("");
+    if !filename.is_empty() {
+        for (ht, _) in chain {
+            for rule in &ht.files_matches {
+                if rule.pattern.is_match(filename) && rule.denied {
+                    return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                        collected_env,
+                        disable_indexes,
+                        error_documents,
+                    );
+                }
+            }
+        }
+    }
+
     // 2. En derin alt dizinden köke doğru `.htaccess` kurallarını değerlendir (alt dizin baskınlığı)
     for (ht, dir_prefix) in chain.iter().rev() {
         let eval = ht.evaluate_in_dir(&ctx, dir_prefix);
@@ -622,17 +633,26 @@ fn resolve_chain_with_info(
                     .with_metadata(collected_env, disable_indexes, error_documents);
             }
             Outcome::Forbidden => {
-                return RouteResolution::from_outcome(RouteOutcome::Forbidden)
-                    .with_metadata(collected_env, disable_indexes, error_documents);
+                return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                    collected_env,
+                    disable_indexes,
+                    error_documents,
+                );
             }
             Outcome::Gone => {
-                return RouteResolution::from_outcome(RouteOutcome::Gone)
-                    .with_metadata(collected_env, disable_indexes, error_documents);
+                return RouteResolution::from_outcome(RouteOutcome::Gone).with_metadata(
+                    collected_env,
+                    disable_indexes,
+                    error_documents,
+                );
             }
             Outcome::Rewritten { path, query } => {
                 let Some(safe_rewritten) = sanitize_and_decode_route_path(&path) else {
-                    return RouteResolution::from_outcome(RouteOutcome::Forbidden)
-                        .with_metadata(collected_env, disable_indexes, error_documents);
+                    return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                        collected_env,
+                        disable_indexes,
+                        error_documents,
+                    );
                 };
                 if let Some(found) = resolve_filesystem_target_with_info(
                     req.doc_root,
@@ -644,8 +664,11 @@ fn resolve_chain_with_info(
                 ) {
                     return found.with_metadata(collected_env, disable_indexes, error_documents);
                 }
-                return RouteResolution::from_outcome(RouteOutcome::NotFound)
-                    .with_metadata(collected_env, disable_indexes, error_documents);
+                return RouteResolution::from_outcome(RouteOutcome::NotFound).with_metadata(
+                    collected_env,
+                    disable_indexes,
+                    error_documents,
+                );
             }
             Outcome::None => {
                 if eval.matched_last || eval.engine_explicit_off {
@@ -681,8 +704,11 @@ fn resolve_chain_with_info(
         }
     }
 
-    RouteResolution::from_outcome(RouteOutcome::NotFound)
-        .with_metadata(collected_env, disable_indexes, error_documents)
+    RouteResolution::from_outcome(RouteOutcome::NotFound).with_metadata(
+        collected_env,
+        disable_indexes,
+        error_documents,
+    )
 }
 
 fn resolve_hierarchical_with_cache(
@@ -796,7 +822,10 @@ pub fn evaluate_declarative_rules(
             }
         }
 
-        let Ok(re) = RegexBuilder::new(&rule.pattern).case_insensitive(nc).build() else {
+        let Ok(re) = RegexBuilder::new(&rule.pattern)
+            .case_insensitive(nc)
+            .build()
+        else {
             continue;
         };
 
@@ -829,8 +858,7 @@ pub fn evaluate_declarative_rules(
         };
 
         for (ek, ev) in &rule_envs {
-            let expanded_val =
-                expand_request_vars(ev, Some(&rule_caps), None, &ctx, &path, &query);
+            let expanded_val = expand_request_vars(ev, Some(&rule_caps), None, &ctx, &path, &query);
             if let Some((_, existing)) = env_vars.iter_mut().find(|(k, _)| *k == *ek) {
                 *existing = expanded_val;
             } else {
@@ -840,14 +868,20 @@ pub fn evaluate_declarative_rules(
 
         if rule.status == 403 || flag_forbidden {
             return Some(
-                RouteResolution::from_outcome(RouteOutcome::Forbidden)
-                    .with_metadata(env_vars, None, BTreeMap::new()),
+                RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                    env_vars,
+                    None,
+                    BTreeMap::new(),
+                ),
             );
         }
         if rule.status == 410 || flag_gone {
             return Some(
-                RouteResolution::from_outcome(RouteOutcome::Gone)
-                    .with_metadata(env_vars, None, BTreeMap::new()),
+                RouteResolution::from_outcome(RouteOutcome::Gone).with_metadata(
+                    env_vars,
+                    None,
+                    BTreeMap::new(),
+                ),
             );
         }
 
@@ -934,15 +968,21 @@ pub fn evaluate_declarative_rules(
 
     let Some(safe_path) = sanitize_and_decode_route_path(&path) else {
         return Some(
-            RouteResolution::from_outcome(RouteOutcome::Forbidden)
-                .with_metadata(env_vars, None, BTreeMap::new()),
+            RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                env_vars,
+                None,
+                BTreeMap::new(),
+            ),
         );
     };
 
     let Ok(canonical_root) = std::fs::canonicalize(req.doc_root) else {
         return Some(
-            RouteResolution::from_outcome(RouteOutcome::NotFound)
-                .with_metadata(env_vars, None, BTreeMap::new()),
+            RouteResolution::from_outcome(RouteOutcome::NotFound).with_metadata(
+                env_vars,
+                None,
+                BTreeMap::new(),
+            ),
         );
     };
     let custom_indexes: Vec<&str> = if !req.index_files.is_empty() {
@@ -963,8 +1003,11 @@ pub fn evaluate_declarative_rules(
     }
 
     Some(
-        RouteResolution::from_outcome(RouteOutcome::NotFound)
-            .with_metadata(env_vars, None, BTreeMap::new()),
+        RouteResolution::from_outcome(RouteOutcome::NotFound).with_metadata(
+            env_vars,
+            None,
+            BTreeMap::new(),
+        ),
     )
 }
 
@@ -1314,10 +1357,7 @@ RewriteRule . /index.php [L]
         // try_files kapalıyken olmayan yol -> NotFound
         let mut req_no_try = RouteRequest::new(&root, "/olmayan-sayfa");
         req_no_try.try_files_enabled = false;
-        assert_eq!(
-            engine.resolve_request(&req_no_try),
-            RouteOutcome::NotFound
-        );
+        assert_eq!(engine.resolve_request(&req_no_try), RouteOutcome::NotFound);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1628,10 +1668,7 @@ RewriteRule . /index.php [L]
 
         std::fs::write(
             deep.join(".htaccess"),
-            concat!(
-                "RewriteEngine On\n",
-                "RewriteRule ^yasak$ - [F]\n",
-            ),
+            concat!("RewriteEngine On\n", "RewriteRule ^yasak$ - [F]\n",),
         )
         .unwrap();
 
@@ -1721,7 +1758,10 @@ RewriteRule . /index.php [L]
             "RewriteEngine On\nRewriteRule ^go$ /b.php?from=updated [L]\n",
         )
         .unwrap();
-        let f = std::fs::OpenOptions::new().write(true).open(&ht_path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&ht_path)
+            .unwrap();
         let _ = f.set_modified(SystemTime::now() + std::time::Duration::from_secs(2));
         drop(f);
 
@@ -1769,7 +1809,10 @@ RewriteRule . /index.php [L]
         .unwrap();
 
         let headers = vec![
-            ("Authorization".to_string(), "Bearer gizli-token".to_string()),
+            (
+                "Authorization".to_string(),
+                "Bearer gizli-token".to_string(),
+            ),
             ("X-Forwarded-Proto".to_string(), "https".to_string()),
         ];
         let mut req = RouteRequest::new(&root, "/api/profil");
@@ -1788,9 +1831,7 @@ RewriteRule . /index.php [L]
         assert!(res
             .env_vars
             .contains(&("HTTP_AUTHORIZATION".into(), "Bearer gizli-token".into())));
-        assert!(res
-            .env_vars
-            .contains(&("PROXY_HTTPS".into(), "on".into())));
+        assert!(res.env_vars.contains(&("PROXY_HTTPS".into(), "on".into())));
         assert!(res.env_vars.contains(&("REQ_TLS".into(), "off".into())));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1995,8 +2036,7 @@ RewriteRule . /index.php [L]
         // 3. İç PHP yönlendirmesi + [NC, QSA, E=...]
         let mut req_int = RouteRequest::new(&root, "/urun/55");
         req_int.query = "kur=TRY";
-        let res_int =
-            evaluate_declarative_rules(&req_int, &rules).expect("ic rewrite eslesmeli");
+        let res_int = evaluate_declarative_rules(&req_int, &rules).expect("ic rewrite eslesmeli");
         assert_eq!(
             res_int.outcome,
             RouteOutcome::PhpScript {
@@ -2035,6 +2075,130 @@ RewriteRule . /index.php [L]
         let mut req = RouteRequest::new(&root, "/raw/missing");
         req.try_files_enabled = false;
         assert_eq!(resolver.resolve(&req), RouteOutcome::NotFound);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_hierarchical_files_match_protection() {
+        let root = temp_site("hier_fm");
+        let sub = root.join("yedekler");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("index.php"), "<?php").unwrap();
+        std::fs::write(sub.join("dump.sql"), "SQL DATA").unwrap();
+        std::fs::write(sub.join("rapor.pdf"), "PDF DATA").unwrap();
+
+        std::fs::write(
+            root.join(".htaccess"),
+            concat!(
+                "<FilesMatch \"\\.(env|sql|bak|ini)$\">\n",
+                "    Require all denied\n",
+                "</FilesMatch>\n",
+                "RewriteEngine On\n",
+                "RewriteCond %{REQUEST_FILENAME} !-f\n",
+                "RewriteCond %{REQUEST_FILENAME} !-d\n",
+                "RewriteRule . /index.php [L]\n",
+            ),
+        )
+        .unwrap();
+
+        let resolver = HtAccessResolver::new();
+
+        // Kök seviyesindeki .env engellenmeli
+        assert_eq!(
+            resolver.resolve(&RouteRequest::new(&root, "/.env")),
+            RouteOutcome::Forbidden
+        );
+
+        // Alt dizindeki dump.sql kök <FilesMatch> kuralı nedeniyle engellenmeli
+        assert_eq!(
+            resolver.resolve(&RouteRequest::new(&root, "/yedekler/dump.sql")),
+            RouteOutcome::Forbidden
+        );
+
+        // Alt dizindeki rapor.pdf statik dosya olarak başarıyla sunulmalı
+        assert_eq!(
+            resolver.resolve(&RouteRequest::new(&root, "/yedekler/rapor.pdf")),
+            RouteOutcome::StaticFile {
+                path: "/yedekler/rapor.pdf".into(),
+                query: String::new(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_zpanel_redirects_full_route_resolution() {
+        let root = temp_site("zpanel_route");
+        std::fs::write(root.join("index.php"), "<?php // WP").unwrap();
+        std::fs::write(
+            root.join(".htaccess"),
+            concat!(
+                "# BEGIN zPanel Redirects\n",
+                "<IfModule mod_rewrite.c>\n",
+                "RewriteEngine On\n\n",
+                "# Force HTTPS\n",
+                "RewriteCond %{HTTPS} off\n",
+                "RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n\n",
+                "# Enforce non-WWW\n",
+                "RewriteCond %{HTTP_HOST} ^www\\.(.+)$ [NC]\n",
+                "RewriteRule ^(.*)$ https://%1%{REQUEST_URI} [L,R=301]\n",
+                "</IfModule>\n",
+                "# BEGIN WordPress\n",
+                "<IfModule mod_rewrite.c>\n",
+                "RewriteEngine On\n",
+                "RewriteBase /\n",
+                "RewriteRule ^index\\.php$ - [L]\n",
+                "RewriteCond %{REQUEST_FILENAME} !-f\n",
+                "RewriteCond %{REQUEST_FILENAME} !-d\n",
+                "RewriteRule . /index.php [L]\n",
+                "</IfModule>\n",
+                "# END WordPress\n",
+            ),
+        )
+        .unwrap();
+
+        let resolver = HtAccessResolver::from_doc_root(&root);
+
+        // 1. HTTP isteği -> HTTPS'e 301 yönlenmeli
+        let mut req_http = RouteRequest::new(&root, "/ornek-yazi/");
+        req_http.host = "site.test";
+        req_http.https = false;
+        req_http.query = "sayfa=1";
+        assert_eq!(
+            resolver.resolve(&req_http),
+            RouteOutcome::Redirect {
+                status: 301,
+                location: "https://site.test/ornek-yazi/?sayfa=1".into(),
+            }
+        );
+
+        // 2. HTTPS www isteği -> non-WWW (%1) 301 yönlenmeli
+        let mut req_www = RouteRequest::new(&root, "/ornek-yazi/");
+        req_www.host = "www.site.test";
+        req_www.https = true;
+        req_www.query = "sayfa=1";
+        assert_eq!(
+            resolver.resolve(&req_www),
+            RouteOutcome::Redirect {
+                status: 301,
+                location: "https://site.test/ornek-yazi/?sayfa=1".into(),
+            }
+        );
+
+        // 3. Normal HTTPS isteği -> WordPress permalink /index.php'ye çözülmeli
+        let mut req_https = RouteRequest::new(&root, "/ornek-yazi/");
+        req_https.host = "site.test";
+        req_https.https = true;
+        req_https.query = "sayfa=1";
+        assert_eq!(
+            resolver.resolve(&req_https),
+            RouteOutcome::PhpScript {
+                path: "/index.php".into(),
+                query: "sayfa=1".into(),
+            }
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
