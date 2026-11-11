@@ -165,12 +165,58 @@ async fn process_h2_stream(
     };
 
     if !body_read_ok {
+        let is_head = method.eq_ignore_ascii_case("HEAD");
         let resp = http::Response::builder()
             .status(413)
             .header("content-type", "text/plain; charset=utf-8")
             .body(())?;
-        let mut send_stream = respond.send_response(resp, false)?;
-        send_stream.send_data(Bytes::from_static(b"413 Payload Too Large (HTTP/2)\n"), true)?;
+        let mut send_stream = respond.send_response(resp, is_head)?;
+        let err_body = Bytes::from_static(b"413 Payload Too Large (HTTP/2)\n");
+        let bytes_sent = if is_head {
+            0
+        } else {
+            let len = err_body.len();
+            send_stream.send_data(err_body, true)?;
+            len
+        };
+
+        let client_ip_str = peer_addr.ip().to_string();
+        let target_str = if query.is_empty() {
+            path.clone()
+        } else {
+            format!("{}?{}", path, query)
+        };
+
+        state.record_access_log_detailed(
+            &client_ip_str,
+            &method,
+            &path,
+            413,
+            started.elapsed(),
+            bytes_sent,
+            &referer,
+            &user_agent,
+        );
+
+        state.log_manager.log_access(AccessLogEntry {
+            timestamp: SystemTime::now(),
+            client_ip: client_ip_str,
+            method: method.clone(),
+            target: target_str,
+            protocol: "HTTP/2.0".to_string(),
+            status: 413,
+            bytes_sent,
+            referer,
+            user_agent,
+            request_id: req_id,
+            duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+            domain: "default".to_string(),
+            target_path: None,
+            json_format: false,
+            also_write_global: true,
+            max_size_bytes: 0,
+        });
+
         return Ok(());
     }
 
@@ -203,9 +249,54 @@ async fn process_h2_stream(
             let err_body = Bytes::from_static(b"500 Internal Server Error\n");
             let mut builder = http::Response::builder().status(500);
             builder = builder.header("content-type", "text/plain; charset=utf-8");
+            let is_head = method.eq_ignore_ascii_case("HEAD");
             let resp = builder.body(())?;
-            let mut send_stream = respond.send_response(resp, false)?;
-            send_stream.send_data(err_body, true)?;
+            let mut send_stream = respond.send_response(resp, is_head)?;
+            let bytes_sent = if is_head {
+                0
+            } else {
+                let len = err_body.len();
+                send_stream.send_data(err_body, true)?;
+                len
+            };
+
+            let client_ip_str = peer_addr.ip().to_string();
+            let target_str = if query.is_empty() {
+                path.clone()
+            } else {
+                format!("{}?{}", path, query)
+            };
+
+            state.record_access_log_detailed(
+                &client_ip_str,
+                &method,
+                &path,
+                500,
+                started.elapsed(),
+                bytes_sent,
+                &referer,
+                &user_agent,
+            );
+
+            state.log_manager.log_access(AccessLogEntry {
+                timestamp: SystemTime::now(),
+                client_ip: client_ip_str,
+                method: method.clone(),
+                target: target_str,
+                protocol: "HTTP/2.0".to_string(),
+                status: 500,
+                bytes_sent,
+                referer,
+                user_agent,
+                request_id: req_id,
+                duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+                domain: "default".to_string(),
+                target_path: None,
+                json_format: false,
+                also_write_global: true,
+                max_size_bytes: 0,
+            });
+
             return Ok(());
         }
     };
@@ -224,7 +315,9 @@ async fn process_h2_stream(
     }
 
     let is_head = method.eq_ignore_ascii_case("HEAD");
-    let has_body = !is_head && !body_bytes.is_empty();
+    // [kart-2] HTTP/2: HEAD, 204 veya 304 durumunda govde gonderilmez; gonderilen bayt 0
+    let is_no_body = is_head || status_code == 204 || status_code == 304;
+    let has_body = !is_no_body && !body_bytes.is_empty();
 
     let resp = response_builder.body(())?;
     let mut send_stream = respond.send_response(resp, !has_body)?;

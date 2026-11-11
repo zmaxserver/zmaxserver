@@ -788,6 +788,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ncsa_combined_matches_panel_parse_access_specification() {
+        let dir = make_temp_dir("panel_compat");
+        let access = dir.join("logs").join("access.log");
+        let error = dir.join("logs").join("error.log");
+        let mgr = AsyncLogManager::new(dir.clone(), access.clone(), error, 50, 64);
+        let ts = UNIX_EPOCH + Duration::from_secs(1_794_430_800);
+
+        // [kart-2] Tum yanit tipleri icin formatlama ve '-' kontrolu
+        let entries = vec![
+            ("127.0.0.1", "GET", "/index.html", "HTTP/1.1", 200, 512, "200 512"),
+            ("127.0.0.1", "HEAD", "/index.html", "HTTP/1.1", 200, 0, "200 -"),
+            ("127.0.0.1", "GET", "/not-modified.html", "HTTP/1.1", 304, 0, "304 -"),
+            ("127.0.0.1", "POST", "/no-content", "HTTP/1.1", 204, 0, "204 -"),
+            ("127.0.0.1", "GET", "/range.mp4", "HTTP/1.1", 206, 1024, "206 1024"),
+            ("127.0.0.1", "HEAD", "/range.mp4", "HTTP/1.1", 206, 0, "206 -"),
+            ("127.0.0.1", "GET", "/app.php", "HTTP/1.1", 200, 128, "200 128"),
+            ("127.0.0.1", "GET", "/proxy-api", "HTTP/1.1", 200, 256, "200 256"),
+            ("127.0.0.1", "GET", "/cached", "HTTP/1.1", 200, 64, "200 64"),
+            ("127.0.0.1", "GET", "/yok.html", "HTTP/1.1", 404, 32, "404 32"),
+            ("127.0.0.1", "HEAD", "/yok.html", "HTTP/1.1", 404, 0, "404 -"),
+            ("127.0.0.1", "GET", "/yasak", "HTTP/1.1", 403, 30, "403 30"),
+            ("127.0.0.1", "GET", "/hata", "HTTP/1.1", 500, 28, "500 28"),
+            ("127.0.0.1", "GET", "/h2", "HTTP/2.0", 200, 50, "200 50"),
+            ("127.0.0.1", "HEAD", "/h2", "HTTP/2.0", 200, 0, "200 -"),
+            ("127.0.0.1", "GET", "/h2-304", "HTTP/2.0", 304, 0, "304 -"),
+        ];
+
+        for (ip, method, target, proto, status, bytes, _) in &entries {
+            mgr.log_access(AccessLogEntry {
+                timestamp: ts,
+                client_ip: ip.to_string(),
+                method: method.to_string(),
+                target: target.to_string(),
+                protocol: proto.to_string(),
+                status: *status,
+                bytes_sent: *bytes,
+                referer: "-".to_string(),
+                user_agent: "curl/8.0".to_string(),
+                request_id: "req-1".to_string(),
+                duration_ms: 0.5,
+                domain: "panel.test".to_string(),
+                target_path: None,
+                json_format: false,
+                also_write_global: true,
+                max_size_bytes: 0,
+            });
+        }
+        mgr.flush().await;
+
+        let content = tokio::fs::read_to_string(&access).await.unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), entries.len());
+
+        for (i, (_, _, _, _, _, _, expected_sb)) in entries.iter().enumerate() {
+            let line = lines[i];
+            assert!(line.contains(&format!("\" {} \"", expected_sb)), "Satir '{line}' beklenen '{expected_sb}' icermelidir");
+            // Go logs.ParseAccess formati: ^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) (\d+|-)
+            assert!(line.starts_with("127.0.0.1 - - [11/Nov/2026:21:00:00 +0000] \""), "Biçim hatası: {line}");
+            assert!(line.ends_with("\"-\" \"curl/8.0\""), "Referer/UA hatası: {line}");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
     async fn json_format_writes_valid_single_line_json_and_tails() {
         let dir = make_temp_dir("json");
         let access = dir.join("logs").join("access.log");

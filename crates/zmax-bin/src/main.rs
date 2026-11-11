@@ -2126,4 +2126,373 @@ mod tests {
         let _ = h2_srv;
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
+
+    #[tokio::test]
+    async fn kart2_real_bytes_all_response_types_and_panel_compatibility() {
+        // 1. Mock proxy backend
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            // Req 1: GET
+            let (mut sock, _) = proxy_listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nPROXY_DATA")
+                .await
+                .unwrap();
+            let _ = sock.shutdown().await;
+
+            // Req 2: HEAD
+            let (mut sock2, _) = proxy_listener.accept().await.unwrap();
+            let mut buf2 = [0u8; 1024];
+            let _ = sock2.read(&mut buf2).await.unwrap();
+            sock2.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = sock2.shutdown().await;
+        });
+
+        // 2. Mock FastCGI backend
+        let fcgi_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fcgi_addr = fcgi_listener.local_addr().unwrap().to_string();
+        let fcgi_task = tokio::spawn(async move {
+            // Req 1: GET
+            {
+                let (mut sock, _) = fcgi_listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await.unwrap();
+                let body = "Status: 200 OK\r\nContent-Type: text/plain\r\n\r\nFASTCGI_OUTPUT"; // 14 bayt
+                let mut resp = build_fcgi_record(6, 1, body.as_bytes());
+                resp.extend_from_slice(&build_fcgi_record(6, 1, &[]));
+                resp.extend_from_slice(&build_fcgi_record(3, 1, &[0, 0, 0, 0, 0, 0, 0, 0]));
+                sock.write_all(&resp).await.unwrap();
+                let _ = sock.shutdown().await;
+            }
+            // Req 2: HEAD
+            {
+                let (mut sock, _) = fcgi_listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await.unwrap();
+                let body = "Status: 200 OK\r\nContent-Type: text/plain\r\n\r\nFASTCGI_OUTPUT";
+                let mut resp = build_fcgi_record(6, 1, body.as_bytes());
+                resp.extend_from_slice(&build_fcgi_record(6, 1, &[]));
+                resp.extend_from_slice(&build_fcgi_record(3, 1, &[0, 0, 0, 0, 0, 0, 0, 0]));
+                sock.write_all(&resp).await.unwrap();
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // 3. Test State olusturma
+        let base = std::env::temp_dir().join(format!("zmax_bin_kart2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("www").join("vhost-k2");
+        let err_dir = root.join("err");
+        std::fs::create_dir_all(&err_dir).unwrap();
+        std::fs::create_dir_all(base.join("modules")).unwrap();
+        std::fs::create_dir_all(base.join("admin")).unwrap();
+        std::fs::create_dir_all(base.join("logs")).unwrap();
+
+        std::fs::write(root.join("index.html"), "VHOST_K2_BODY_STATIC_12345").unwrap(); // 26 bayt
+        std::fs::write(root.join("cached.html"), "CACHED_BODY_HIT_67890").unwrap(); // 21 bayt
+        std::fs::write(root.join("test.php"), "<?php // test").unwrap();
+        std::fs::write(err_dir.join("404.html"), "CUSTOM_404_PAGE_FOR_K2_TEST").unwrap(); // 27 bayt
+
+        std::fs::write(
+            base.join("modules").join("mod_security.toml"),
+            "[module]\nname = \"mod_security\"\nenabled = true\n\n[settings]\nsql_injection_inspection = true\npath_traversal_shield = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("modules").join("mod_coreruleset.toml"),
+            "[module]\nname = \"mod_coreruleset\"\nenabled = true\n\n[settings]\nblock_sql_injection = true\n",
+        )
+        .unwrap();
+
+        let mut entry = zmax_config::VHostEntry {
+            name: "k2.test".into(),
+            aliases: vec!["www.k2.test".into()],
+            document_root: "www/vhost-k2".into(),
+            ..Default::default()
+        };
+        entry.logging.enabled = true;
+        entry.logging.access_log = "logs/k2.access.log".into();
+        entry.logging.error_log = "logs/k2.error.log".into();
+        entry.security.waf_enabled = Some(true);
+        entry.security.waf_exclude_paths = vec!["/muaf-waf".into()];
+        entry.error_docs.dir = "err".into();
+        entry.error_docs.pages.insert(404, "404.html".into());
+        entry.cache.enabled = true;
+        entry.cache.expire = 60;
+        entry.proxy.enabled = true;
+        entry.proxy.upstream = proxy_addr.to_string();
+        entry.proxy.path_prefix = "/proxy".to_string();
+        entry.php.enabled = true;
+        entry.php.upstream = fcgi_addr;
+
+        let vh = zmax_config::LoadedVHost {
+            resolved_doc_root: resolve_path(&base, &entry.document_root),
+            entry,
+            file_name: "k2.test.toml".into(),
+        };
+
+        let mut cfg = ZMaxConfig::parse_toml("").unwrap();
+        cfg.cache.enabled = true;
+        let modules = LoadedModules::load_from_dir(&base.join("modules")).unwrap();
+        let mut policies = compile_policies(&cfg, &modules);
+        policies.fastcgi.enabled = true;
+        policies.proxy.enabled = true;
+        let auth = compute_effective_auth(&cfg);
+
+        let state = Arc::new(ServerState {
+            base_dir: base.clone(),
+            cache: zmax_cache::ZMaxCache::with_disk_dir(
+                16 * 1024 * 1024,
+                60,
+                base.join("cachedata"),
+            ),
+            limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
+            ban_manager: Arc::new(zmax_security::IpBanManager::new()),
+            wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
+            upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
+            runtime: RwLock::new(RuntimeState {
+                config: cfg,
+                vhosts: vec![vh],
+                modules,
+                policies,
+                redis_client: None,
+                auth,
+                conf_path: base.join("zmax.toml"),
+                vhosts_dir: base.join("vhosts"),
+                modules_dir: base.join("modules"),
+            }),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(base.join("admin"))),
+            tls: Arc::new(zmax_tls::SniResolver::new()),
+            admin_tls: Arc::new(zmax_tls::SniResolver::new()),
+            api_tls: Arc::new(zmax_tls::SniResolver::new()),
+            log_manager: Arc::new(logger::AsyncLogManager::new(
+                base.clone(),
+                PathBuf::from("logs/access.log"),
+                PathBuf::from("logs/error.log"),
+                10,
+                16,
+            )),
+            htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
+            shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            access_logs: Mutex::new(VecDeque::with_capacity(64)),
+            stats: ServerStats {
+                start_time: Instant::now(),
+                total_requests: std::sync::atomic::AtomicU64::new(0),
+                cache_hits: std::sync::atomic::AtomicU64::new(0),
+                cache_misses: std::sync::atomic::AtomicU64::new(0),
+            },
+        });
+
+        // 4. Istekleri gonder:
+        // 1. Statik GET
+        let r_static_get = run_request(&state, false, "GET /index.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_static_get.starts_with("HTTP/1.1 200 OK") && r_static_get.contains("VHOST_K2_BODY_STATIC_12345"), "{r_static_get}");
+        let etag = r_static_get.lines().find(|l| l.to_ascii_lowercase().starts_with("etag:")).map(|l| l.split(':').nth(1).unwrap().trim()).unwrap_or("");
+
+        // 2. Statik HEAD
+        let r_static_head = run_request(&state, false, "HEAD /index.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_static_head.starts_with("HTTP/1.1 200 OK") && !r_static_head.contains("VHOST_K2_BODY_STATIC_12345"), "{r_static_head}");
+
+        // 3. 304 Not Modified
+        let r_304 = run_request(&state, false, &format!("GET /index.html HTTP/1.1\r\nHost: k2.test\r\nIf-None-Match: {}\r\nConnection: close\r\n\r\n", etag)).await;
+        assert!(r_304.starts_with("HTTP/1.1 304 Not Modified"), "{r_304}");
+
+        // 4. Range Request GET (206)
+        let r_range_get = run_request(&state, false, "GET /index.html HTTP/1.1\r\nHost: k2.test\r\nRange: bytes=0-4\r\nConnection: close\r\n\r\n").await;
+        assert!(r_range_get.starts_with("HTTP/1.1 206 Partial Content") && r_range_get.contains("VHOST"), "{r_range_get}");
+
+        // 5. Range Request HEAD (206)
+        let r_range_head = run_request(&state, false, "HEAD /index.html HTTP/1.1\r\nHost: k2.test\r\nRange: bytes=0-4\r\nConnection: close\r\n\r\n").await;
+        assert!(r_range_head.starts_with("HTTP/1.1 206 Partial Content") && !r_range_head.contains("VHOST"), "{r_range_head}");
+
+        // 6. ErrorDoc 404 GET
+        let r_404_get = run_request(&state, false, "GET /yok-sayfa.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_404_get.starts_with("HTTP/1.1 404 Not Found") && r_404_get.contains("CUSTOM_404_PAGE_FOR_K2_TEST"), "{r_404_get}");
+
+        // 7. ErrorDoc 404 HEAD
+        let r_404_head = run_request(&state, false, "HEAD /yok-sayfa.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_404_head.starts_with("HTTP/1.1 404 Not Found") && !r_404_head.contains("CUSTOM_404_PAGE_FOR_K2_TEST"), "{r_404_head}");
+
+        // 8. ErrorDoc 403 GET (WAF engeli)
+        let r_403_get = run_request(&state, false, "GET /?q=union+select+1 HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_403_get.starts_with("HTTP/1.1 403 Forbidden"), "{r_403_get}");
+
+        // 9. ErrorDoc 403 HEAD (WAF engeli)
+        let r_403_head = run_request(&state, false, "HEAD /?q=union+select+1 HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_403_head.starts_with("HTTP/1.1 403 Forbidden"), "{r_403_head}");
+
+        // 10. Cache Warmup (MISS)
+        let r_c_miss = run_request(&state, false, "GET /cached.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_c_miss.starts_with("HTTP/1.1 200 OK") && r_c_miss.contains("CACHED_BODY_HIT_67890"), "{r_c_miss}");
+
+        // 11. Cache HIT GET
+        let r_c_hit = run_request(&state, false, "GET /cached.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_c_hit.starts_with("HTTP/1.1 200 OK") && r_c_hit.contains("CACHED_BODY_HIT_67890"), "{r_c_hit}");
+
+        // 12. Cache HIT HEAD
+        let r_c_head = run_request(&state, false, "HEAD /cached.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_c_head.starts_with("HTTP/1.1 200 OK") && !r_c_head.contains("CACHED_BODY_HIT_67890"), "{r_c_head}");
+
+        // 13. Reverse Proxy GET
+        let r_proxy_get = run_request(&state, false, "GET /proxy/hello HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_proxy_get.starts_with("HTTP/1.1 200 OK") && r_proxy_get.contains("PROXY_DATA"), "{r_proxy_get}");
+
+        // 14. Reverse Proxy HEAD
+        let r_proxy_head = run_request(&state, false, "HEAD /proxy/hello HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_proxy_head.starts_with("HTTP/1.1 200 OK") && !r_proxy_head.contains("PROXY_DATA"), "{r_proxy_head}");
+
+        // 15. FastCGI PHP GET
+        let r_fcgi_get = run_request(&state, false, "GET /test.php HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_fcgi_get.starts_with("HTTP/1.1 200 OK") && r_fcgi_get.contains("FASTCGI_OUTPUT"), "{r_fcgi_get}");
+
+        // 16. FastCGI PHP HEAD
+        let r_fcgi_head = run_request(&state, false, "HEAD /test.php HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n").await;
+        assert!(r_fcgi_head.starts_with("HTTP/1.1 200 OK") && !r_fcgi_head.contains("FASTCGI_OUTPUT"), "{r_fcgi_head}");
+
+        let _ = proxy_task.await;
+        let _ = fcgi_task.await;
+
+        // 17, 18, 19: HTTP/2 İstekleri (h2 client)
+        let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+        let st_h2 = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:51234".parse().unwrap();
+        let h2_srv = tokio::spawn(async move {
+            let _ = h2_engine::handle_h2_connection(server_io, peer, st_h2, false, 80, None).await;
+        });
+        let (mut client, h2_conn) = h2::client::handshake(client_io).await.expect("h2 client handshake");
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        // H2 GET
+        {
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("http://k2.test/index.html")
+                .header("host", "k2.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK);
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf.len(), 26);
+        }
+
+        // H2 HEAD
+        {
+            let req = http::Request::builder()
+                .method("HEAD")
+                .uri("http://k2.test/index.html")
+                .header("host", "k2.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK);
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf.len(), 0);
+        }
+
+        // H2 304
+        {
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("http://k2.test/index.html")
+                .header("host", "k2.test")
+                .header("if-none-match", etag)
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::NOT_MODIFIED);
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf.len(), 0);
+        }
+
+        drop(client);
+        let _ = h2_srv;
+
+        // 5. Günlük dosyasını bekle ve flush et
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        state.log_manager.flush().await;
+
+        let log_path = state.base_dir.join("logs").join("k2.access.log");
+        assert!(log_path.is_file(), "k2.access.log oluşturulmalı");
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        assert_eq!(lines.len(), 19, "Toplam 19 istek günlüğe kaydedilmeli: {content}");
+
+        // Beklenen (durum, bayt_str) tablosu:
+        let expected_records: Vec<(u16, &str)> = vec![
+            (200, "26"),   // 1. Statik GET
+            (200, "-"),    // 2. Statik HEAD -> NCSA '-' kurali
+            (304, "-"),    // 3. 304 Not Modified -> NCSA '-' kurali
+            (206, "5"),    // 4. Range GET (0-4 = 5 bayt)
+            (206, "-"),    // 5. Range HEAD -> '-'
+            (404, "27"),   // 6. 404 GET (custom 404 sayfası 27 bayt)
+            (404, "-"),    // 7. 404 HEAD -> '-'
+            (403, "CHECK_POS"), // 8. 403 GET (WAF engeli)
+            (403, "-"),    // 9. 403 HEAD -> '-'
+            (200, "21"),   // 10. Cache MISS
+            (200, "21"),   // 11. Cache HIT GET (21 bayt)
+            (200, "-"),    // 12. Cache HIT HEAD -> '-'
+            (200, "10"),   // 13. Proxy GET (10 bayt, baslik haric gercek govde!)
+            (200, "-"),    // 14. Proxy HEAD -> '-'
+            (200, "14"),   // 15. FastCGI GET (14 bayt)
+            (200, "-"),    // 16. FastCGI HEAD -> '-'
+            (200, "26"),   // 17. HTTP/2 GET (26 bayt)
+            (200, "-"),    // 18. HTTP/2 HEAD -> '-'
+            (304, "-"),    // 19. HTTP/2 304 -> '-'
+        ];
+
+        for (i, (exp_status, exp_bytes)) in expected_records.iter().enumerate() {
+            let line = lines[i];
+            // Format dogrulama: %h %l %u [%t] "%r" %>s %b "%{Referer}i" "%{User-Agent}i"
+            assert!(line.contains("[") && line.contains(" +0000] \""), "Zaman damgasi hatali: {line}");
+            assert!(line.starts_with("127.0.0.1 - - ["), "IP/ident baslangici hatali: {line}");
+
+            let parts: Vec<&str> = line.split('"').collect();
+            assert!(parts.len() >= 3, "Quoted kisimlar bulunamadi: {line}");
+            let status_bytes_str = parts[2].trim();
+            let tokens: Vec<&str> = status_bytes_str.split_whitespace().collect();
+            assert!(tokens.len() >= 2, "Status ve bytes ayrilamadi: {line}");
+            let status: u16 = tokens[0].parse().unwrap();
+            let bytes_val = tokens[1];
+
+            assert_eq!(status, *exp_status, "Satir {i} status kodu uyusmuyor: {line}");
+            if *exp_bytes == "CHECK_POS" {
+                let parsed_b: usize = bytes_val.parse().expect("Pozitif sayisal bayt degeri olmali");
+                assert!(parsed_b > 0, "403 yanitinda govde bayti pozitif olmali: {line}");
+            } else {
+                assert_eq!(bytes_val, *exp_bytes, "Satir {i} ({line}) beklenen bayt '{exp_bytes}' vermedi");
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
 }

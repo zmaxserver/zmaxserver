@@ -782,7 +782,12 @@ where
                 match state.cache.get_with_stale(&cache_key).await {
                     CacheLookup::Fresh(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        let cached_bytes = cached.body.len();
+                        // [kart-2] Cache HIT yanitinda HEAD/304/204 ise govde bayti 0; aksi halde onbellekteki govde boyutu
+                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
+                            0
+                        } else {
+                            cached.body.len()
+                        };
                         write_cached_php_response(
                             socket,
                             &cached,
@@ -814,7 +819,11 @@ where
                     }
                     CacheLookup::Stale(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        let cached_bytes = cached.body.len();
+                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
+                            0
+                        } else {
+                            cached.body.len()
+                        };
                         if let StampedeSlot::Leader(guard) = state.cache.try_acquire_fill(&cache_key) {
                             let st_bg = Arc::clone(state);
                             let req_bg = req.clone();
@@ -888,7 +897,11 @@ where
                                 state.cache.get_with_stale(&cache_key).await
                             {
                                 state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                                let cached_bytes = cached.body.len();
+                                let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
+                                    0
+                                } else {
+                                    cached.body.len()
+                                };
                                 write_cached_php_response(
                                     socket,
                                     &cached,
@@ -1040,7 +1053,12 @@ where
                 match state.cache.get_with_stale(&cache_key).await {
                     CacheLookup::Fresh(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        let cached_bytes = cached.body.len();
+                        // [kart-2] Cache HIT yanitinda HEAD/304/204 ise govde bayti 0; aksi halde onbellekteki govde boyutu
+                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
+                            0
+                        } else {
+                            cached.body.len()
+                        };
                         write_cached_static_response(
                             socket,
                             &cached,
@@ -1072,7 +1090,11 @@ where
                     }
                     CacheLookup::Stale(cached) => {
                         state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        let cached_bytes = cached.body.len();
+                        let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
+                            0
+                        } else {
+                            cached.body.len()
+                        };
                         if let StampedeSlot::Leader(guard) = state.cache.try_acquire_fill(&cache_key) {
                             let st_bg = Arc::clone(state);
                             let ctx_bg = vhost_ctx.clone();
@@ -1135,7 +1157,11 @@ where
                                 state.cache.get_with_stale(&cache_key).await
                             {
                                 state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                                let cached_bytes = cached.body.len();
+                                let cached_bytes = if is_head || cached.status == 204 || cached.status == 304 {
+                                    0
+                                } else {
+                                    cached.body.len()
+                                };
                                 write_cached_static_response(
                                     socket,
                                     &cached,
@@ -1427,7 +1453,8 @@ where
                         None,
                     )
                     .await?;
-                    return Ok((206, slice_len));
+                    // [kart-2] HEAD yanitlarinda govde gonderilmez; gercek bayt 0
+                    return Ok((206, 0));
                 }
 
                 let mut file = tokio::fs::File::open(&info.path).await?;
@@ -1529,7 +1556,8 @@ where
             Some("MISS"),
         )
         .await?;
-        return Ok((200, info.size as usize));
+        // [kart-2] HEAD yanitinda Content-Length gonderilir ancak gercek gonderilen govde bayti 0'dir
+        return Ok((200, 0));
     }
 
     let can_try_gzip = wants_gzip
@@ -1919,14 +1947,19 @@ where
     {
         Ok(Some(prep)) => {
             let status = prep.status;
-            let body_len = prep.body.len();
+            // [kart-2] FastCGI yanitinda HEAD, 204 veya 304 durumunda govde bayti 0 iletilir
+            let body_len = if is_head || status == 204 || status == 304 {
+                0
+            } else {
+                prep.body.len()
+            };
             write_http_response(
                 socket,
                 status,
                 &prep.reason,
                 &prep.headers,
                 &prep.body,
-                Some(body_len),
+                Some(prep.body.len()),
                 is_head,
                 is_https,
                 keep_alive,
@@ -1973,7 +2006,8 @@ where
                 None,
             )
             .await?;
-            Ok((502, err_msg.len()))
+            let sent_err_bytes = if is_head { 0 } else { err_msg.len() };
+            Ok((502, sent_err_bytes))
         }
     }
 }
@@ -2019,6 +2053,7 @@ where
                 Some(vhost_ctx.proxy_upstream.as_str())
             },
         };
+        let is_head = req.method.eq_ignore_ascii_case("HEAD");
         let Some(rewritten_head) =
             rewrite_request_head_with_options(raw_head.as_bytes(), real_ip, is_https, &opts)
         else {
@@ -2030,7 +2065,7 @@ where
                 &[("Content-Type".into(), "text/plain".into())],
                 err_body,
                 None,
-                false,
+                is_head,
                 is_https,
                 false,
                 0,
@@ -2038,7 +2073,8 @@ where
                 None,
             )
             .await?;
-            return Ok((400, false, err_body.len()));
+            let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+            return Ok((400, false, sent_err_bytes));
         };
 
         let mut upstream = match tokio::time::timeout(
@@ -2057,7 +2093,7 @@ where
                     &[("Content-Type".into(), "text/plain".into())],
                     err_body,
                     None,
-                    false,
+                    is_head,
                     is_https,
                     false,
                     0,
@@ -2065,7 +2101,8 @@ where
                     None,
                 )
                 .await?;
-                return Ok((502, false, err_body.len()));
+                let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+                return Ok((502, false, sent_err_bytes));
             }
         };
         let _ = upstream.set_nodelay(true);
@@ -2085,6 +2122,7 @@ where
         .with_preserve_host(vhost_ctx.proxy_preserve_host)
         .with_https(is_https);
 
+    let is_head = req.method.eq_ignore_ascii_case("HEAD");
     let mut upstream_stream = match state
         .upstream_pool
         .acquire(&vhost_ctx.proxy_upstream, conn_dur)
@@ -2100,7 +2138,7 @@ where
                 &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
                 err_body,
                 Some(err_body.len()),
-                req.method.eq_ignore_ascii_case("HEAD"),
+                is_head,
                 is_https,
                 false,
                 0,
@@ -2108,7 +2146,8 @@ where
                 None,
             )
             .await?;
-            return Ok((502, false, err_body.len()));
+            let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+            return Ok((502, false, sent_err_bytes));
         }
     };
 
@@ -2123,7 +2162,16 @@ where
                     .release(&vhost_ctx.proxy_upstream, upstream_stream);
             }
             let status = parse_response_status(&resp_bytes).unwrap_or(200);
-            let sent_len = resp_bytes.len();
+            // [kart-2] Ters vekil yanitinda HTTP basliklari haric gercek gonderilen govde bayti hesaplanir
+            let body_len = if is_head || status == 204 || status == 304 {
+                0
+            } else if let Some(pos) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                resp_bytes.len().saturating_sub(pos + 4)
+            } else if let Some(pos) = resp_bytes.windows(2).position(|w| w == b"\n\n") {
+                resp_bytes.len().saturating_sub(pos + 2)
+            } else {
+                0
+            };
             socket.write_all(&resp_bytes).await?;
             let _ = socket.flush().await;
             let client_keep =
@@ -2131,7 +2179,7 @@ where
             if !client_keep {
                 let _ = socket.shutdown().await;
             }
-            Ok((status, client_keep, sent_len))
+            Ok((status, client_keep, body_len))
         }
         Err(_) => {
             let err_body = b"502 Bad Gateway - Proxy Upstream Unavailable";
@@ -2142,7 +2190,7 @@ where
                 &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
                 err_body,
                 Some(err_body.len()),
-                req.method.eq_ignore_ascii_case("HEAD"),
+                is_head,
                 is_https,
                 false,
                 0,
@@ -2150,7 +2198,8 @@ where
                 None,
             )
             .await?;
-            Ok((502, false, err_body.len()))
+            let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+            Ok((502, false, sent_err_bytes))
         }
     }
 }
@@ -2711,14 +2760,20 @@ async fn record_and_log(
     req_id: &str,
 ) {
     let max_log_size_bytes = vhost_ctx.map(|v| v.max_log_size_bytes).unwrap_or(DEFAULT_LOG_MAX_BYTES);
-    let bytes_str = if bytes_sent == 0 { "-".to_string() } else { bytes_sent.to_string() };
+    // [kart-2] NCSA standardi: HEAD, 304, 204 veya 0 bayt gonderilen yanitlarda '-' yazilir; aksi halde gercek bayt.
+    let is_zero_body = bytes_sent == 0
+        || status == 304
+        || status == 204
+        || method.eq_ignore_ascii_case("HEAD");
+    let bytes_str = if is_zero_body { "-".to_string() } else { bytes_sent.to_string() };
+    let actual_bytes = if is_zero_body { 0 } else { bytes_sent };
     state.record_access_log_detailed(
         ip,
         method,
         path,
         status,
         started.elapsed(),
-        bytes_sent,
+        actual_bytes,
         referer.unwrap_or(""),
         user_agent.unwrap_or(""),
     );
@@ -2732,7 +2787,7 @@ async fn record_and_log(
         path,
         status,
         started,
-        bytes_sent,
+        actual_bytes,
         referer,
         user_agent,
         http_version,
@@ -2787,7 +2842,12 @@ where
         "text/plain; charset=utf-8"
     };
 
-    let written = body_bytes.len();
+    // [kart-2] HEAD, 204 veya 304 isteklerinde govde yazilmaz; gercek bayt 0 olarak raporlanir
+    let written = if is_head || status == 204 || status == 304 {
+        0
+    } else {
+        body_bytes.len()
+    };
     write_http_response(
         socket,
         status,
@@ -3175,6 +3235,15 @@ pub async fn handle_h2_dispatched_request(
     let resolved = static_handler.resolve_with_index(&effective_path, &vhost_ctx.index_files);
     match resolved {
         Some(info) => {
+            // [kart-2] HTTP/2 If-None-Match kontrolu -> 304 Not Modified
+            if vhost_ctx.etag_enabled && check_if_none_match(&req.headers, &info.etag) {
+                let mut headers = vec![
+                    ("etag".into(), info.etag.clone()),
+                    ("x-request-id".into(), req_id.to_string()),
+                ];
+                headers.push(("last-modified".into(), info.last_modified_secs.to_string()));
+                return Ok((304, headers, bytes::Bytes::new(), log_meta));
+            }
             match tokio::fs::read(&info.path).await {
                 Ok(content) => {
                     let etag_val = format!("\"{}\"", info.etag);
