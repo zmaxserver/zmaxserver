@@ -24,7 +24,7 @@
 | 2 | Günlükte gerçek bayt, panel/fail2ban uyumu | BEKLİYOR (başlanabilir) | — |
 | 4 | `.htaccess` ve yönlendirme | **ONAYLI** (denetçi, 1. denetim; UNIT TESTED düzeyi) | 2026-11-12 |
 | 7 | Go: `RenderZmaxVhost` genişletme (panel) | **ONAYLI** (denetçi, 1. denetim) | 2026-11-12 |
-| 3 | vhost API CRUD — **ONAYLI** (denetçi, 1. denetim; INTEGRATION TESTED in-process) (**not:** `api.rs` `merge_vhost_json_patch` ön çalışması Kart 1 sırasında yapıldı; Kart 3'te PUT↔GET turu, geri alma ve testle KANITLANACAK) | BEKLİYOR | — |
+| 3 | vhost API CRUD (Kart 1 sırasında `api.rs` ön çalışması yapılmıştı; Kart 3'te testle kanıtlandı) | **ONAYLI** (denetçi, 1. denetim; INTEGRATION TESTED in-process) | 2026-11-12 |
 | 5 | Hotlink listesi + IP ACL | RAPOR GELDİ (denetim sürüyor) | — |
 | 6, 8–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
 
