@@ -162,6 +162,10 @@ struct Env {
     https: u16,
     /// Tek doğrulamanın bu makinedeki süresi (ms)
     hash_ms: u128,
+    /// `conf/auth/site.htpasswd` dosyasının yolu
+    htpasswd: PathBuf,
+    /// vHost belge kökü
+    root: PathBuf,
 }
 
 const APR1_PASS: &str = "SifreApr1!";
@@ -285,6 +289,7 @@ htpasswd_path = "conf/auth/site.htpasswd"
     )
     .expect("vhost");
 
+    let htpasswd = auth_dir.join("site.htpasswd");
     let child = spawn_zmax_and_wait_ready(&base, &conf_path);
     Env {
         _guard: ChildGuard {
@@ -294,6 +299,8 @@ htpasswd_path = "conf/auth/site.htpasswd"
         http,
         https,
         hash_ms,
+        htpasswd,
+        root,
     }
 }
 
@@ -745,4 +752,288 @@ async fn k9h_dos_32_parallel_wrong_passwords_do_not_slow_static_requests() {
         max_auth < bound,
         "kimlik dogrulama kuyrugu sinirsiz: en yavas {max_auth:?} >= {bound:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R9b: bağımsız denetimden çıkan P1 bulgular
+// ---------------------------------------------------------------------------
+
+/// Bulgu 1: doğru parolalı tarayıcı (HTTP/1.1, 6 paralel bağlantı) hiçbir istekte 429 almamalı.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_correct_password_parallel_http1_all_200() {
+    let env = start_env(
+        "r9b_h1",
+        "",
+        "max_failed_attempts = 1000\nqueue_timeout_ms = 5000\nfail_min_ms = 100",
+    );
+    let tok = basic_token("argonuser", ARGON_PASS);
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let tok = tok.clone();
+        let port = env.http;
+        tasks.push(tokio::spawn(async move {
+            http1(port, "/gizli/index.html", Some(&tok)).await
+        }));
+    }
+    let mut statuses = Vec::new();
+    for t in tasks {
+        let r = t.await.expect("gorev");
+        statuses.push(r.status);
+    }
+    assert!(
+        statuses.iter().all(|s| *s == 200),
+        "6 paralel dogru parolali istegin hepsi 200 olmali: {statuses:?}"
+    );
+}
+
+/// Bulgu 1: HTTP/2 tek bağlantıda 8 eşzamanlı akış, doğru parola: hepsi 200.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_correct_password_parallel_http2_all_200() {
+    let env = start_env(
+        "r9b_h2",
+        "",
+        "max_failed_attempts = 1000\nqueue_timeout_ms = 5000\nfail_min_ms = 100",
+    );
+    let tok = basic_token("argonuser", ARGON_PASS);
+    let client = h2_client(env.https).await;
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let tok = tok.clone();
+        let mut c = client.clone();
+        tasks.push(tokio::spawn(async move {
+            h2_get(&mut c, "/gizli/index.html", Some(&tok)).await
+        }));
+    }
+    let mut statuses = Vec::new();
+    for t in tasks {
+        statuses.push(t.await.expect("gorev"));
+    }
+    assert!(
+        statuses.iter().all(|s| *s == 200),
+        "8 eszamanli h2 akisinin hepsi 200 olmali: {statuses:?}"
+    );
+}
+
+/// Bulgu 1: başarılı (kullanıcı, parola, özet) doğrulaması kısa süre önbellekten sunulur;
+/// ısınmış istek Argon2'yi yeniden hesaplamaz (süre tek doğrulamanın altında kalır).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_successful_verification_is_cached_for_warm_requests() {
+    let env = start_env(
+        "r9b_cache",
+        "",
+        "max_failed_attempts = 1000\nqueue_timeout_ms = 5000\nfail_min_ms = 100",
+    );
+    let tok = basic_token("argonuser", ARGON_PASS);
+    let first = http1(env.http, "/gizli/index.html", Some(&tok)).await;
+    assert_eq!(first.status, 200, "ilk istek: {}", first.head);
+    let mut warm = Vec::new();
+    for _ in 0..7 {
+        let r = http1(env.http, "/gizli/index.html", Some(&tok)).await;
+        assert_eq!(r.status, 200, "isinmis istek: {}", r.head);
+        warm.push(r.elapsed);
+    }
+    warm.sort();
+    let median = warm[warm.len() / 2];
+    assert!(
+        median.as_millis() < env.hash_ms / 2,
+        "onbellekli istek Argon2'yi tekrar hesaplamamali: medyan {median:?}, hash {} ms",
+        env.hash_ms
+    );
+}
+
+/// Bulgu 1: yanlış parola ASLA önbelleğe girmez/önbellekten geçmez; başarılı girişten sonra da 401.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_wrong_password_is_never_served_from_cache() {
+    let env = start_env(
+        "r9b_wrong",
+        "",
+        "max_failed_attempts = 1000\nqueue_timeout_ms = 5000\nfail_min_ms = 100",
+    );
+    let good = basic_token("argonuser", ARGON_PASS);
+    assert_eq!(
+        http1(env.http, "/gizli/index.html", Some(&good))
+            .await
+            .status,
+        200
+    );
+    for (u, p) in [
+        ("argonuser", "Yanlis1"),
+        ("argonuser", ""),
+        ("apruser", ARGON_PASS),
+        ("argonuser", APR1_PASS),
+    ] {
+        let tok = basic_token(u, p);
+        for _ in 0..2 {
+            let r = http1(env.http, "/gizli/index.html", Some(&tok)).await;
+            assert_eq!(r.status, 401, "{u}:{p} 401 olmali: {}", r.head);
+            assert!(!r.head.contains("GIZLI_200"));
+        }
+    }
+    assert_eq!(
+        http1(env.http, "/gizli/index.html", Some(&good))
+            .await
+            .status,
+        200,
+        "dogru parola yanlis denemelerden sonra da calismali"
+    );
+}
+
+/// Bulgu 1: htpasswd'de özet değişince önbellekteki başarı geçersiz olur (eski parola 401).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_cache_is_invalidated_when_stored_hash_changes() {
+    let env = start_env(
+        "r9b_inval",
+        "",
+        "max_failed_attempts = 1000\nqueue_timeout_ms = 5000\nfail_min_ms = 100",
+    );
+    let tok = basic_token("apruser", APR1_PASS);
+    assert_eq!(
+        http1(env.http, "/gizli/index.html", Some(&tok))
+            .await
+            .status,
+        200
+    );
+    let new_hash = zmax_security::apr1_hash("YeniParola!", "k9salt99");
+    std::fs::write(&env.htpasswd, format!("apruser:{new_hash}\n")).expect("htpasswd yaz");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let r = http1(env.http, "/gizli/index.html", Some(&tok)).await;
+        if r.status == 401 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ozet degisince eski parola 10 sn icinde 401 olmali (son durum {})",
+            r.status
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let tok_new = basic_token("apruser", "YeniParola!");
+    assert_eq!(
+        http1(env.http, "/gizli/index.html", Some(&tok_new))
+            .await
+            .status,
+        200
+    );
+}
+
+/// Sahte upstream: her isteğe `UPSTREAM_SECRET` döner ve istek hedeflerini kaydeder
+/// (gerçek bir upstream `..` yollarını kendisi çözüp korumalı içeriği sunabilir).
+fn spawn_fake_upstream() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("upstream portu");
+    let port = listener.local_addr().expect("adres").port();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen_t = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for conn in listener.incoming() {
+            let Ok(mut c) = conn else { continue };
+            let seen_c = Arc::clone(&seen_t);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let n = c.read(&mut buf).unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let target = text
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                if let Ok(mut g) = seen_c.lock() {
+                    g.push(target);
+                }
+                let body = "UPSTREAM_SECRET";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = c.write_all(resp.as_bytes());
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// Bulgu 2: ACME muafiyeti `..` / `%2e%2e` ile korumalı yola kimlik doğrulamasız erişim sağlamaz
+/// (ters vekil açık vhost: ham yol upstream'e gitseydi korumalı içerik sızardı).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_acme_exemption_cannot_bypass_auth_with_dot_dot() {
+    let (up_port, seen) = spawn_fake_upstream();
+    let env = start_env(
+        "r9b_acme",
+        "",
+        &format!(
+            "\n[vhost.security]\nwaf_enabled = false\n\n[vhost.proxy]\nenabled = true\nupstream = \"127.0.0.1:{up_port}\"\npath_prefix = \"/\"\n"
+        ),
+    );
+
+    // Negatif kontrol: gerçek ACME belirteci kimlik doğrulamasız sunulmaya devam eder.
+    let ok = http1(env.http, "/.well-known/acme-challenge/tok123", None).await;
+    assert_eq!(ok.status, 200, "ACME muafiyeti korunmali: {}", ok.head);
+    seen.lock().expect("kilit").clear();
+
+    let bad = [
+        "/.well-known/acme-challenge/../../gizli/index.html",
+        "/.well-known/acme-challenge/%2e%2e/%2e%2e/gizli/index.html",
+        "/.well-known/acme-challenge/%2E%2E/%2E%2E/gizli/index.html",
+        "/.well-known/acme-challenge/..%2f..%2fgizli/index.html",
+        "/.well-known/acme-challenge/..\\..\\gizli\\index.html",
+        "/.well-known/acme-challenge/./../../gizli/index.html",
+    ];
+    for p in bad {
+        let r = http1(env.http, p, None).await;
+        assert!(
+            r.status == 401 || r.status == 403,
+            "{p}: 401/403 beklenir, gelen {} ({})",
+            r.status,
+            r.head.lines().next().unwrap_or("")
+        );
+        assert!(
+            !r.head.contains("UPSTREAM_SECRET") && !r.head.contains("GIZLI_200"),
+            "{p}: korumali icerik sizdi"
+        );
+    }
+    let mut c = h2_client(env.https).await;
+    for p in &bad[..2] {
+        let st = h2_get(&mut c, p, None).await;
+        assert!(st == 401 || st == 403, "h2 {p}: {st}");
+    }
+    let leaked = seen.lock().expect("kilit").clone();
+    assert!(
+        leaked.is_empty(),
+        "kimlik dogrulamasiz `..` istekleri upstream'e ulasmamali: {leaked:?}"
+    );
+    assert_eq!(
+        h2_get(&mut c, "/.well-known/acme-challenge/tok123", None).await,
+        200,
+        "h2 ACME muafiyeti korunmali"
+    );
+}
+
+/// Bulgu 3 (Windows kaynaklı): sondaki nokta/boşluk ve 8.3 kısa ad korumayı atlatmaz.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn k9r_windows_trailing_dot_space_and_short_name_require_auth() {
+    let env = start_env("r9b_win", "", "");
+    for p in [
+        "/gizli./index.html",
+        "/gizli../index.html",
+        "/gizli%2e/index.html",
+        "/gizli%20/index.html",
+        "/gizli./",
+        "/GIZLI./index.html",
+        "/GIZLI~1/index.html",
+        "/gizli~1/index.html",
+    ] {
+        let r = http1(env.http, p, None).await;
+        assert_eq!(r.status, 401, "{p}: 401 beklenir ({})", r.head);
+        assert!(!r.head.contains("GIZLI_200"), "{p}: icerik sizdi");
+    }
+    let mut c = h2_client(env.https).await;
+    for p in ["/gizli./index.html", "/GIZLI~1/index.html"] {
+        assert_eq!(h2_get(&mut c, p, None).await, 401, "h2 {p}");
+    }
+    // Negatif kontrol: korumasız yollar etkilenmez.
+    assert_eq!(http1(env.http, "/acik.html", None).await.status, 200);
+    let other = http1(env.http, "/gizlix/index.html", None).await;
+    assert_ne!(other.status, 401, "yakin adli korumasiz yol 401 olmamali");
 }
