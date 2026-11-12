@@ -121,13 +121,13 @@ fn append_domain_and_uri_cache_tags(tags: &mut Vec<String>, domain: &str, req_pa
     }
 }
 
+/// FastCGI bağlantı zaman aşımı (ms): vhost değeri verilmişse (ve 0 değilse) o; yoksa `mod_fastcgi`
+/// politika değeri (en az 1 ms). vhost varsayılanı `None` olduğundan politika gerçekten kullanılır.
 #[inline]
-fn resolve_php_dial_timeout_ms(vhost_dial_ms: u64, policy_dial_ms: u64) -> u64 {
-    // [kart-8] vhost değeri 0 ise mod_fastcgi varsayılanına (en az 1 ms) düş
-    if vhost_dial_ms > 0 {
-        vhost_dial_ms
-    } else {
-        policy_dial_ms.max(1)
+fn resolve_php_dial_timeout_ms(vhost_dial_ms: Option<u64>, policy_dial_ms: u64) -> u64 {
+    match vhost_dial_ms {
+        Some(ms) if ms > 0 => ms,
+        _ => policy_dial_ms.max(1),
     }
 }
 
@@ -395,7 +395,7 @@ where
                 tls_http2: true,
                 acme_root: None,
                 php_dial_timeout_ms: resolve_php_dial_timeout_ms(
-                    0,
+                    None,
                     policies.fastcgi.dial_timeout_ms,
                 ),
             },
@@ -3882,7 +3882,7 @@ pub async fn handle_h2_dispatched_request(
                 tls_http2: true,
                 acme_root: None,
                 php_dial_timeout_ms: resolve_php_dial_timeout_ms(
-                    0,
+                    None,
                     policies.fastcgi.dial_timeout_ms,
                 ),
             },
@@ -4548,9 +4548,10 @@ mod kart8_tests {
 
     #[tokio::test]
     async fn php_dial_timeout_ms_resolved_from_config_and_vhost() {
-        assert_eq!(resolve_php_dial_timeout_ms(0, 420), 420);
-        assert_eq!(resolve_php_dial_timeout_ms(1234, 420), 1234);
-        assert_eq!(resolve_php_dial_timeout_ms(0, 0), 1);
+        assert_eq!(resolve_php_dial_timeout_ms(None, 420), 420);
+        assert_eq!(resolve_php_dial_timeout_ms(Some(0), 420), 420);
+        assert_eq!(resolve_php_dial_timeout_ms(Some(1234), 420), 1234);
+        assert_eq!(resolve_php_dial_timeout_ms(None, 0), 1);
 
         let mod_toml = "[module]\nname = \"mod_fastcgi\"\nenabled = true\n\n[settings]\ndial_timeout_ms = 420\n";
         let state = build_kart8_test_state("dial_timeout", Some(mod_toml));
@@ -4582,7 +4583,7 @@ mod kart8_tests {
             assert_eq!(rt.policies.fastcgi.dial_timeout_ms, 420);
             rt.vhosts[0].entry.php.enabled = true;
             rt.vhosts[0].entry.php.upstream = fcgi_addr.clone();
-            rt.vhosts[0].entry.php.dial_timeout_ms = 1234;
+            rt.vhosts[0].entry.php.dial_timeout_ms = Some(1234);
         }
 
         // 1. handle_web_connection üzerinden gerçek TCP PHP isteği
@@ -4606,11 +4607,126 @@ mod kart8_tests {
         // 2. Doğrudan vhost_ctx.php_dial_timeout_ms ayarının mod_fastcgi ile uyumlu çözülüşü
         let ctx_zero_vhost = {
             let rt = state.runtime.read().await;
-            resolve_php_dial_timeout_ms(0, rt.policies.fastcgi.dial_timeout_ms)
+            resolve_php_dial_timeout_ms(None, rt.policies.fastcgi.dial_timeout_ms)
         };
         assert_eq!(ctx_zero_vhost, 420);
 
         fcgi_srv.abort();
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
+
+    /// Kabul kuyruğunu dolduran, `accept` etmeyen bir dinleyici: sonraki `connect` çağrıları (Linux ve
+    /// Windows'ta) SYN kuyruğunda takılır; bağlantı zaman aşımının GERÇEKTEN uygulandığını ölçmek için.
+    /// Dönen değerler düşürülene kadar (test sonuna dek) kuyruk dolu kalır.
+    fn blackhole_listener() -> (SocketAddr, Vec<std::net::TcpStream>, socket2::Socket) {
+        use socket2::{Domain, Socket, Type};
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        sock.bind(&bind.into()).unwrap();
+        sock.listen(1).unwrap();
+        let addr = sock.local_addr().unwrap().as_socket().unwrap();
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+                Ok(c) => held.push(c),
+                Err(_) => return (addr, held, sock),
+            }
+        }
+        panic!("kabul kuyruğu dolmadı; bağlantı zaman aşımı testi güvenilmez");
+    }
+
+    /// `mod_fastcgi.dial_timeout_ms` (politika) vhost `dial_timeout_ms` vermediğinde GERÇEKTEN kullanılır:
+    /// bağlantı kurulamayan arka uçta yanıt, politika süresine (~400 ms) yakın gelir; 3 sn / 5 sn
+    /// varsayılanına DEĞİL.
+    #[tokio::test]
+    async fn php_dial_timeout_policy_applies_when_vhost_unset_slow_upstream() {
+        let mod_toml = "[module]\nname = \"mod_fastcgi\"\nenabled = true\n\n[settings]\ndial_timeout_ms = 400\n";
+        let state = build_kart8_test_state("dial_slow_policy", Some(mod_toml));
+        let (bh_addr, _held, _listener) = blackhole_listener();
+        std::fs::write(
+            state.base_dir.join("www").join("html").join("info.php"),
+            b"<?php echo 'ok'; ?>",
+        )
+        .unwrap();
+        {
+            let mut rt = state.runtime.write().await;
+            assert_eq!(rt.policies.fastcgi.dial_timeout_ms, 400);
+            rt.vhosts[0].entry.php.enabled = true;
+            rt.vhosts[0].entry.php.upstream = bh_addr.to_string();
+        }
+
+        let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let web_addr = web_listener.local_addr().unwrap();
+        let st_srv = Arc::clone(&state);
+        let web_task = tokio::spawn(async move {
+            let (socket, peer) = web_listener.accept().await.unwrap();
+            let _ = handle_web_connection(socket, peer, st_srv, false, web_addr.port()).await;
+        });
+        let started = std::time::Instant::now();
+        let (head, _body) = send_plain_tcp_http_request(
+            web_addr,
+            b"GET /info.php HTTP/1.1\r\nHost: kart8.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let _ = web_task.await;
+        assert!(head.starts_with("HTTP/1.1 502"), "502 beklenirdi: {head}");
+        assert!(
+            elapsed >= Duration::from_millis(350),
+            "politika süresinden önce kesildi: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "politika dial_timeout_ms=400 uygulanmadı (vhost varsayılanı kazandı): {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+
+    /// vhost `php.dial_timeout_ms = Some(900)` verildiğinde politika (400 ms) DEĞİL vhost değeri, bağlantı
+    /// kurulamayan arka uçta gerçekten uygulanır (yanıt ~900 ms'de gelir).
+    #[tokio::test]
+    async fn php_dial_timeout_vhost_value_applies_slow_upstream() {
+        let mod_toml = "[module]\nname = \"mod_fastcgi\"\nenabled = true\n\n[settings]\ndial_timeout_ms = 400\n";
+        let state = build_kart8_test_state("dial_slow_vhost", Some(mod_toml));
+        let (bh_addr, _held, _listener) = blackhole_listener();
+        std::fs::write(
+            state.base_dir.join("www").join("html").join("info.php"),
+            b"<?php echo 'ok'; ?>",
+        )
+        .unwrap();
+        {
+            let mut rt = state.runtime.write().await;
+            rt.vhosts[0].entry.php.enabled = true;
+            rt.vhosts[0].entry.php.upstream = bh_addr.to_string();
+            rt.vhosts[0].entry.php.dial_timeout_ms = Some(900);
+        }
+
+        let web_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let web_addr = web_listener.local_addr().unwrap();
+        let st_srv = Arc::clone(&state);
+        let web_task = tokio::spawn(async move {
+            let (socket, peer) = web_listener.accept().await.unwrap();
+            let _ = handle_web_connection(socket, peer, st_srv, false, web_addr.port()).await;
+        });
+        let started = std::time::Instant::now();
+        let (head, _body) = send_plain_tcp_http_request(
+            web_addr,
+            b"GET /info.php HTTP/1.1\r\nHost: kart8.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let _ = web_task.await;
+        assert!(head.starts_with("HTTP/1.1 502"), "502 beklenirdi: {head}");
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "vhost değeri (900 ms) uygulanmadı, politika kazandı: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1800),
+            "vhost zaman aşımı çok geç: {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
 }

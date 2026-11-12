@@ -68,10 +68,6 @@ fn default_php_lb_policy() -> String {
     "round_robin".to_string()
 }
 
-fn default_php_dial_timeout_ms() -> u64 {
-    3000
-}
-
 fn default_php_io_timeout_secs() -> u64 {
     60
 }
@@ -88,6 +84,10 @@ pub struct ServerGlobalConfig {
     pub user: String,
     #[serde(default)]
     pub group: String,
+    /// Geçici dosya dizini. Boşsa `<kök>/tmp`; göreli yol kök dizine göre çözülür. Yetki düşürmeden önce
+    /// 0700 ve doğrulanmış sahiple hazırlanır (`/tmp/zmax` gibi tahmin edilebilir ortak yol KULLANILMAZ).
+    #[serde(default)]
+    pub tmp_dir: String,
     pub priority: i32,
     #[serde(default = "default_true")]
     pub cpu_affinity: bool,
@@ -108,6 +108,7 @@ impl Default for ServerGlobalConfig {
             server_name: "ZMax/1.0.01".to_string(),
             user: "nobody".to_string(),
             group: "nobody".to_string(),
+            tmp_dir: String::new(),
             priority: 0,
             cpu_affinity: true,
             workers: 0,
@@ -640,8 +641,10 @@ pub struct VHostPhpSection {
     pub upstreams: Vec<String>,
     #[serde(default = "default_php_lb_policy")]
     pub lb_policy: String,
-    #[serde(default = "default_php_dial_timeout_ms")]
-    pub dial_timeout_ms: u64,
+    /// FastCGI bağlantı zaman aşımı (ms). `None` = vhost bir değer vermedi; `mod_fastcgi` politika
+    /// değeri (`settings.dial_timeout_ms`) kullanılır. `Some(0)` da politikaya düşer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dial_timeout_ms: Option<u64>,
     #[serde(default = "default_php_io_timeout_secs")]
     pub io_timeout_secs: u64,
     #[serde(default = "default_true")]
@@ -665,7 +668,7 @@ impl Default for VHostPhpSection {
             timeout: 60,
             upstreams: Vec::new(),
             lb_policy: default_php_lb_policy(),
-            dial_timeout_ms: default_php_dial_timeout_ms(),
+            dial_timeout_ms: None,
             io_timeout_secs: default_php_io_timeout_secs(),
             keep_conn: true,
             max_idle_conns: default_php_max_idle_conns(),
@@ -2724,7 +2727,7 @@ add_request_id = false
         assert!(minimal_vhost.security.waf_exclude_paths.is_empty());
         assert!(minimal_vhost.rewrite.rules.is_empty());
         assert_eq!(minimal_vhost.php.lb_policy, "round_robin");
-        assert_eq!(minimal_vhost.php.dial_timeout_ms, 3000);
+        assert_eq!(minimal_vhost.php.dial_timeout_ms, None);
         assert_eq!(minimal_vhost.php.io_timeout_secs, 60);
         assert!(minimal_vhost.php.keep_conn);
         assert_eq!(minimal_vhost.php.max_idle_conns, 16);
@@ -2815,6 +2818,9 @@ x_accel_prefix = "/protected/"
         assert!(json_roundtrip.rewrite.rules[0].last);
         assert_eq!(json_roundtrip.php.upstreams, vec!["127.0.0.1:9001", "127.0.0.1:9002"]);
         assert_eq!(json_roundtrip.php.lb_policy, "least_conn");
+        assert_eq!(parsed.vhost.php.dial_timeout_ms, Some(1500));
+        assert_eq!(toml_roundtrip.vhost.php.dial_timeout_ms, Some(1500));
+        assert_eq!(json_roundtrip.php.dial_timeout_ms, Some(1500));
         assert_eq!(json_roundtrip.php.max_idle_conns, 32);
         assert_eq!(json_roundtrip.php.x_accel_prefix, "/protected/");
     }
@@ -3002,4 +3008,38 @@ x_accel_prefix = "/protected/"
             .unwrap();
         assert!(bad.validate().is_err(), "geçersiz CIDR reddedilmeli");
     }
+
+    #[test]
+    fn k8_vhost_php_dial_timeout_default_none_and_json_null_roundtrip() {
+        let doc: VHostFileDocument = toml::from_str(
+            "[vhost]\nname = \"a.test\"\ndocument_root = \"www/a\"\n",
+        )
+        .expect("asgari vHost ayrıştırılmalı");
+        assert_eq!(doc.vhost.php.dial_timeout_ms, None);
+        // None değeri TOML'a yazılmaz (vhost değer vermiyor)
+        let toml_out = serialize_vhost_toml(&doc.vhost).unwrap();
+        assert!(!toml_out.contains("dial_timeout_ms"), "{toml_out}");
+        // JSON: None -> null -> None
+        let json_str = serialize_vhost_json(&doc.vhost).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(v["dial_timeout_ms"].is_null() || v.get("php").map(|p| p["dial_timeout_ms"].is_null()).unwrap_or(false), "{json_str}");
+        let back = deserialize_vhost_json(&json_str).unwrap();
+        assert_eq!(back.php.dial_timeout_ms, None);
+        // Açık değer korunur
+        let mut with = doc.vhost.clone();
+        with.php.dial_timeout_ms = Some(2500);
+        let back2 = deserialize_vhost_json(&serialize_vhost_json(&with).unwrap()).unwrap();
+        assert_eq!(back2.php.dial_timeout_ms, Some(2500));
+    }
+
+    #[test]
+    fn k8_server_user_group_tmp_dir_default_to_empty_when_absent() {
+        let cfg = ZMaxConfig::parse_toml("[server]\nserver_name = \"x\"\n").unwrap();
+        assert_eq!(cfg.server.user, "");
+        assert_eq!(cfg.server.group, "");
+        assert_eq!(cfg.server.tmp_dir, "");
+        let cfg2 = ZMaxConfig::parse_toml("[server]\ntmp_dir = \"run/tmp\"\n").unwrap();
+        assert_eq!(cfg2.server.tmp_dir, "run/tmp");
+    }
+
 }

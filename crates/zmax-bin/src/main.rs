@@ -38,6 +38,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 struct CliOptions {
     show_version: bool,
     check_only: bool,
+    fix_tls_perms: bool,
     config_override: Option<PathBuf>,
 }
 
@@ -45,6 +46,7 @@ fn parse_cli_args() -> CliOptions {
     let mut opts = CliOptions {
         show_version: false,
         check_only: false,
+        fix_tls_perms: false,
         config_override: None,
     };
     let mut args = std::env::args().skip(1);
@@ -52,6 +54,7 @@ fn parse_cli_args() -> CliOptions {
         match arg.as_str() {
             "-v" | "--version" => opts.show_version = true,
             "-t" | "--check" | "--test" => opts.check_only = true,
+            "--fix-tls-perms" => opts.fix_tls_perms = true,
             "-c" | "--config" => {
                 if let Some(p) = args.next() {
                     opts.config_override = Some(PathBuf::from(p));
@@ -153,6 +156,70 @@ fn create_reuse_listener(
     TcpListener::from_std(std_listener)
 }
 
+/// Yapılandırmadaki TLS sertifika/anahtar dosya yollarını (vhost + admin/api dinleyicileri) toplar.
+fn collect_tls_key_paths(
+    base_dir: &Path,
+    config: &ZMaxConfig,
+    vhosts: &[zmax_config::LoadedVHost],
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for raw in [
+        &config.listeners.admin.tls_key,
+        &config.listeners.admin.tls_cert,
+        &config.listeners.api.tls_key,
+        &config.listeners.api.tls_cert,
+    ] {
+        if !raw.trim().is_empty() {
+            paths.push(resolve_path(base_dir, raw));
+        }
+    }
+    for vh in vhosts {
+        for raw in [&vh.entry.ssl.key, &vh.entry.ssl.certificate] {
+            if !raw.trim().is_empty() {
+                paths.push(resolve_path(base_dir, raw));
+            }
+        }
+    }
+    paths
+}
+
+/// `zmax --fix-tls-perms`: certbot/panel yenilemesinden sonra (root olarak, ör. `--deploy-hook`)
+/// TLS anahtar/sertifika dosyalarını servis grubunun okuyabileceği hâle getirir (root:grup, grup okuma biti).
+/// Çalışan sunucu düşürme sonrası root olmadığından bu işi kendisi yapamaz.
+fn run_fix_tls_perms(
+    base_dir: &Path,
+    config: &ZMaxConfig,
+    vhosts: &[zmax_config::LoadedVHost],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let paths = collect_tls_key_paths(base_dir, config, vhosts);
+    if !zmax_core::is_running_as_root() {
+        println!(
+            "[Bilgi] --fix-tls-perms root gerektirir; root olmadığından {} TLS yolu için işlem yapılmadı.",
+            paths.len()
+        );
+        return Ok(());
+    }
+    if config.server.group.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "server.group boş: TLS anahtarlarının hangi gruba okutulacağı belirsiz",
+        )
+        .into());
+    }
+    match zmax_core::ensure_tls_keys_readable_by_group(&config.server.group, &paths) {
+        Ok(changed) => {
+            println!(
+                "[OK] TLS izinleri uygulandı: {} yoldan {} dosya değişti (grup='{}').",
+                paths.len(),
+                changed,
+                config.server.group
+            );
+            Ok(())
+        }
+        Err(err) => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, err).into()),
+    }
+}
+
 fn parse_bind_addr(ip: &str, port: u16) -> Result<SocketAddr, String> {
     let formatted = if ip.contains(':') && !ip.starts_with('[') {
         format!("[{}]:{}", ip, port)
@@ -205,6 +272,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     acme_runtime::apply_global_acme_root(&config, &base_dir);
+
+    if cli.fix_tls_perms {
+        return run_fix_tls_perms(&base_dir, &config, &vhosts);
+    }
 
     if cli.check_only {
         for w in &validation_warnings {
@@ -613,66 +684,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // [kart-8] drop_privileges bağlama: dinleyiciler bağlandıktan sonra kök yetkilerini yapılandırılan kullanıcıya düşür
-    {
-        let (priv_user, priv_group, access_log_cfg, error_log_cfg, disk_cache_cfg, tls_paths) = {
+    'yetki_dusurme: {
+        let (
+            priv_user,
+            priv_group,
+            access_log_cfg,
+            error_log_cfg,
+            disk_cache_cfg,
+            tmp_dir_cfg,
+            tls_paths,
+        ) = {
             let rt = state.runtime.read().await;
-            let mut paths = Vec::new();
-            if !rt.config.listeners.admin.tls_key.trim().is_empty() {
-                paths.push(resolve_path(
-                    &state.base_dir,
-                    &rt.config.listeners.admin.tls_key,
-                ));
-            }
-            if !rt.config.listeners.admin.tls_cert.trim().is_empty() {
-                paths.push(resolve_path(
-                    &state.base_dir,
-                    &rt.config.listeners.admin.tls_cert,
-                ));
-            }
-            if !rt.config.listeners.api.tls_key.trim().is_empty() {
-                paths.push(resolve_path(
-                    &state.base_dir,
-                    &rt.config.listeners.api.tls_key,
-                ));
-            }
-            if !rt.config.listeners.api.tls_cert.trim().is_empty() {
-                paths.push(resolve_path(
-                    &state.base_dir,
-                    &rt.config.listeners.api.tls_cert,
-                ));
-            }
-            for vh in &rt.vhosts {
-                if !vh.entry.ssl.key.trim().is_empty() {
-                    paths.push(resolve_path(&state.base_dir, &vh.entry.ssl.key));
-                }
-                if !vh.entry.ssl.certificate.trim().is_empty() {
-                    paths.push(resolve_path(&state.base_dir, &vh.entry.ssl.certificate));
-                }
-            }
             (
                 rt.config.server.user.clone(),
                 rt.config.server.group.clone(),
                 rt.config.logging.access_log.clone(),
                 rt.config.logging.error_log.clone(),
                 rt.config.cache.disk_cache_dir.clone(),
-                paths,
+                rt.config.server.tmp_dir.clone(),
+                collect_tls_key_paths(&state.base_dir, &rt.config, &rt.vhosts),
             )
         };
+
+        // Boş user/group: root değilse atla (gönderilen conf/zmax.toml böyledir); root'ta fail-closed.
+        match zmax_core::plan_privilege_drop(
+            &priv_user,
+            &priv_group,
+            zmax_core::is_running_as_root(),
+        ) {
+            Err(err) => {
+                eprintln!("[KRİTİK GÜVENLİK HATASI] Yetki düşürme başarısız: {}", err);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Yetki düşürme başarısız (fail-closed): {}", err),
+                )
+                .into());
+            }
+            Ok(zmax_core::PrivilegeDropPlan::Skip) => {
+                println!(
+                    "[Bilgi] server.user/server.group boş ve süreç root değil: yetki düşürme atlandı."
+                );
+                break 'yetki_dusurme;
+            }
+            Ok(zmax_core::PrivilegeDropPlan::Drop) => {}
+        }
+
         let log_path = state.base_dir.join("logs");
         let vhost_logs_path = log_path.join("vhosts");
         let cache_path = state.base_dir.join("cache");
         let disk_cache_path = resolve_path(&state.base_dir, &disk_cache_cfg);
         let access_log_path = resolve_path(&state.base_dir, &access_log_cfg);
         let error_log_path = resolve_path(&state.base_dir, &error_log_cfg);
-        let tmp_path = std::env::temp_dir().join("zmax");
+        // Tahmin edilebilir ortak /tmp/zmax yerine yapılandırılabilir (server.tmp_dir), varsayılan <kök>/tmp.
+        let tmp_path = if tmp_dir_cfg.trim().is_empty() {
+            state.base_dir.join("tmp")
+        } else {
+            resolve_path(&state.base_dir, tmp_dir_cfg.trim())
+        };
 
-        for dir in [
-            &log_path,
-            &vhost_logs_path,
-            &cache_path,
-            &disk_cache_path,
-            &tmp_path,
-        ] {
+        for dir in [&log_path, &vhost_logs_path, &cache_path, &disk_cache_path] {
             if let Err(err) = tokio::fs::create_dir_all(dir).await {
                 return Err(std::io::Error::new(
                     err.kind(),
@@ -684,6 +754,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
+        }
+        if let Err(err) = zmax_core::prepare_private_tmp_dir(&tmp_path, &priv_user) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "[KRİTİK GÜVENLİK HATASI] Geçici dizin güvenli hazırlanamadı: {}",
+                    err
+                ),
+            )
+            .into());
         }
         for log_file in [&access_log_path, &error_log_path] {
             if let Some(parent) = log_file.parent() {
@@ -705,8 +785,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let acme_path = state.base_dir.join("acme");
         let ssl_path = state.base_dir.join("ssl");
-        let _ = tokio::fs::create_dir_all(&acme_path).await;
-        let _ = tokio::fs::create_dir_all(&ssl_path).await;
+        for dir in [&acme_path, &ssl_path] {
+            if let Err(err) = tokio::fs::create_dir_all(dir).await {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "[KRİTİK GÜVENLİK HATASI] Yetki düşürme öncesi dizin oluşturulamadı ('{}'): {}",
+                        dir.display(),
+                        err
+                    ),
+                )
+                .into());
+            }
+        }
 
         let base_ownership_paths = vec![
             log_path,
@@ -749,6 +840,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("Yetki düşürme başarısız (fail-closed): {}", err),
             )
             .into());
+        }
+
+        // Düşürme sonrası: TLS anahtar/sertifika yolları yeni kimlikle okunabiliyor mu? (kapanış doğrulaması)
+        for (path, err) in zmax_core::unreadable_paths(&tls_paths) {
+            let line = format!(
+                "[TLS] Yetki düşürme sonrası okunamıyor ('{}'): {}. Anahtarı hizmet grubunun okuyabileceği şekilde \
+                 (root:{} 0640) ayarlayın; yenilemeden sonra 'zmax --fix-tls-perms' çalıştırın.",
+                path.display(),
+                err,
+                priv_group
+            );
+            eprintln!("{}", line);
+            append_error_log(&state.base_dir, &line).await;
         }
     }
 
@@ -3490,4 +3594,39 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
+
+    #[test]
+    fn k8_collect_tls_key_paths_resolves_listener_and_vhost_files_and_skips_empty() {
+        let base = std::env::temp_dir().join("zmax_k8_collect_tls");
+        let cfg = ZMaxConfig::parse_toml(
+            "[listeners.admin]\ntls_key = \"certs/admin.key\"\ntls_cert = \"\"\n\n[listeners.api]\ntls_cert = \"certs/api.pem\"\n",
+        )
+        .unwrap();
+        let entry = zmax_config::VHostEntry {
+            name: "a.test".into(),
+            document_root: "www/a".into(),
+            ssl: zmax_config::VHostSslSection {
+                certificate: "certs/a.pem".into(),
+                key: "certs/a.key".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vh = zmax_config::LoadedVHost {
+            resolved_doc_root: base.join("www/a"),
+            entry,
+            file_name: "a.test.toml".into(),
+        };
+        let got = collect_tls_key_paths(&base, &cfg, &[vh]);
+        assert_eq!(
+            got,
+            vec![
+                resolve_path(&base, "certs/admin.key"),
+                resolve_path(&base, "certs/api.pem"),
+                resolve_path(&base, "certs/a.key"),
+                resolve_path(&base, "certs/a.pem"),
+            ]
+        );
+    }
+
 }
