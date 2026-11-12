@@ -71,6 +71,13 @@ disk_cache_dir = "cachedata"
 default_ttl_seconds = 300
 stale_while_revalidate_sec = 30
 purge_key_header = "X-ZMax-Purge-Key"
+# HTTP PURGE metodu / X-LiteSpeed-Purge istek başlığı: varsayılan KAPALI. Açmak için purge_enabled = true ve
+# purge_key (başlıkta gönderilecek gizli anahtar) ve/veya purge_allow_ips (IP/CIDR listesi) tanımlayın.
+# purge_enabled = false
+# purge_key = ""
+# purge_allow_ips = []
+# İstek Cache-Control/Pragma başlıklarının önbelleği atlamasına izin verir (varsayılan KAPALI; OLS gibi).
+# respect_request_cache_control = false
 
 # Güvenlik ve DoS Kalkanı
 [security]

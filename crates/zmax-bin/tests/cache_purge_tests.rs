@@ -43,6 +43,7 @@ fn write_test_workspace(
     base: &Path,
     http_port: u16,
     api_port: u16,
+    extra_cache_toml: &str,
 ) -> PathBuf {
     let conf_dir = base.join("conf");
     let vhosts_dir = conf_dir.join("vhosts");
@@ -102,6 +103,7 @@ require_token = false
 enabled = true
 disk_cache_dir = "cachedata"
 default_ttl_seconds = 300
+{extra_cache_toml}
 
 [logging]
 access_log = "logs/access.log"
@@ -147,13 +149,21 @@ sendfile = false
 }
 
 fn start_server(prefix: &str) -> (ServerGuard, SocketAddr, SocketAddr) {
+    start_server_with(prefix, "")
+}
+
+/// `extra_cache_toml`: [cache] bölümüne eklenecek ek satırlar (ör. respect_request_cache_control).
+fn start_server_with(
+    prefix: &str,
+    extra_cache_toml: &str,
+) -> (ServerGuard, SocketAddr, SocketAddr) {
     let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("zmax_c1_{}_{}_{}", prefix, std::process::id(), seq));
     let _ = fs::remove_dir_all(&base);
 
     let http_port = pick_free_port();
     let api_port = pick_free_port();
-    let conf_path = write_test_workspace(&base, http_port, api_port);
+    let conf_path = write_test_workspace(&base, http_port, api_port, extra_cache_toml);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_zmax"))
         .arg("-c")
@@ -393,7 +403,8 @@ fn uri_purge_clears_entry() {
 
 #[test]
 fn no_cache_header_bypasses_cache() {
-    let (_guard, http_addr, _api_addr) = start_server("nocache");
+    let (_guard, http_addr, _api_addr) =
+        start_server_with("nocache", "respect_request_cache_control = true");
 
     // 1. X-LiteSpeed-Cache-Control: no-cache başlığı ile istek -> X-Cache: BYPASS dönmeli
     let (h_lsc_bypass, b_lsc) = send_http_request(
@@ -436,7 +447,8 @@ fn no_cache_header_bypasses_cache() {
 
 #[test]
 fn private_header_bypasses_cache() {
-    let (_guard, http_addr, _api_addr) = start_server("priv");
+    let (_guard, http_addr, _api_addr) =
+        start_server_with("priv", "respect_request_cache_control = true");
 
     // 1. X-LiteSpeed-Cache-Control: private başlığı ile istek -> X-Cache: BYPASS dönmeli
     let (h_priv_bypass, b_priv) = send_http_request(

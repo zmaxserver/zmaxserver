@@ -257,7 +257,7 @@ fn default_max_log_size_mb() -> u64 {
     100
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct CacheConfig {
     pub enabled: bool,
@@ -267,6 +267,47 @@ pub struct CacheConfig {
     pub purge_key_header: String,
     #[serde(default = "default_stale_while_revalidate_sec")]
     pub stale_while_revalidate_sec: u64,
+    /// HTTP `PURGE` metodu ve `X-LiteSpeed-Purge` istek başlığı ile önbellek temizleme (varsayılan KAPALI).
+    pub purge_enabled: bool,
+    /// `purge_key_header` başlığında beklenen gizli anahtar (boş = anahtar yetkisi yok).
+    pub purge_key: String,
+    /// Anahtarsız PURGE'e izinli IP / CIDR listesi (boş = IP yetkisi yok).
+    pub purge_allow_ips: Vec<String>,
+    /// İstek `Cache-Control` / `Pragma` / `X-LiteSpeed-Cache-Control` başlıklarının önbelleği atlamasına izin verir
+    /// (varsayılan KAPALI: OpenLiteSpeed gibi istek başlıkları yok sayılır; açıkken her istemci PHP'yi tetikleyebilir).
+    pub respect_request_cache_control: bool,
+}
+
+/// Gizli değeri `Debug` çıktısında göstermeden "ayarlı mı" bilgisini verir.
+fn redacted_secret(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        ""
+    } else {
+        "<gizli>"
+    }
+}
+
+impl std::fmt::Debug for CacheConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheConfig")
+            .field("enabled", &self.enabled)
+            .field("memory_cache_mb", &self.memory_cache_mb)
+            .field("disk_cache_dir", &self.disk_cache_dir)
+            .field("default_ttl_seconds", &self.default_ttl_seconds)
+            .field("purge_key_header", &self.purge_key_header)
+            .field(
+                "stale_while_revalidate_sec",
+                &self.stale_while_revalidate_sec,
+            )
+            .field("purge_enabled", &self.purge_enabled)
+            .field("purge_key", &redacted_secret(&self.purge_key))
+            .field("purge_allow_ips", &self.purge_allow_ips)
+            .field(
+                "respect_request_cache_control",
+                &self.respect_request_cache_control,
+            )
+            .finish()
+    }
 }
 
 impl Default for CacheConfig {
@@ -278,6 +319,10 @@ impl Default for CacheConfig {
             default_ttl_seconds: 300,
             purge_key_header: "X-ZMax-Purge-Key".to_string(),
             stale_while_revalidate_sec: default_stale_while_revalidate_sec(),
+            purge_enabled: false,
+            purge_key: String::new(),
+            purge_allow_ips: Vec::new(),
+            respect_request_cache_control: false,
         }
     }
 }
@@ -1093,6 +1138,7 @@ impl ZMaxConfig {
         if self.cache.enabled && (self.cache.memory_cache_mb == 0 || self.cache.default_ttl_seconds == 0) {
             return Err("Önbellek etkinken memory_cache_mb ve default_ttl_seconds 0 olamaz.".to_string());
         }
+        validate_ip_acl_list("cache", "purge_allow_ips", &self.cache.purge_allow_ips)?;
         self.logging.validate()?;
         validate_ip_acl_list("security", "allow_ips", &self.security.allow_ips)?;
         validate_ip_acl_list("security", "deny_ips", &self.security.deny_ips)?;
@@ -2920,5 +2966,31 @@ x_accel_prefix = "/protected/"
             Some(PathBuf::from("/var/www/acme"))
         );
         assert!(cfg.server.acme.force_https_exempt);
+    }
+
+    #[test]
+    fn test_cache_purge_defaults_off_validation_and_redacted_debug() {
+        let def = ZMaxConfig::default();
+        assert!(!def.cache.purge_enabled, "PURGE varsayılan KAPALI olmalı");
+        assert!(def.cache.purge_key.is_empty());
+        assert!(def.cache.purge_allow_ips.is_empty());
+        assert!(!def.cache.respect_request_cache_control);
+
+        let legacy = ZMaxConfig::parse_toml("[cache]\nenabled = true\n").unwrap();
+        assert!(!legacy.cache.purge_enabled);
+
+        let on = ZMaxConfig::parse_toml(
+            "[cache]\npurge_enabled = true\npurge_key = \"cok-gizli-anahtar\"\npurge_allow_ips = [\"10.0.0.0/8\"]\n",
+        )
+        .unwrap();
+        assert!(on.cache.purge_enabled);
+        assert!(on.validate().is_ok());
+        let dbg = format!("{:?}", on.cache);
+        assert!(!dbg.contains("cok-gizli-anahtar"), "anahtar Debug'a sızmamalı: {dbg}");
+        assert!(dbg.contains("<gizli>"));
+
+        let bad = ZMaxConfig::parse_toml("[cache]\npurge_enabled = true\npurge_allow_ips = [\"gecersiz\"]\n")
+            .unwrap();
+        assert!(bad.validate().is_err(), "geçersiz CIDR reddedilmeli");
     }
 }

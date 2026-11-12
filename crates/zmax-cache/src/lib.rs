@@ -1136,10 +1136,9 @@ impl ZMaxCache {
         }
         let mut purged_keys: HashSet<String> = HashSet::new();
         let scoped = Self::format_domain_tag(domain, t);
+        // Yalnız `alan::etiket` kayıtları: ham etiket birden çok vhost'un girdisini indekslediğinden
+        // burada silinirse başka vhost'un önbelleği de boşalırdı (vhost izolasyonu).
         purged_keys.extend(self.purge_by_tag_keys(&scoped).await);
-        if !domain.trim().is_empty() {
-            purged_keys.extend(self.purge_by_tag_keys(t).await);
-        }
         purged_keys.len()
     }
 

@@ -345,7 +345,7 @@ where
     let _ = socket.write_all(resp.as_bytes()).await;
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

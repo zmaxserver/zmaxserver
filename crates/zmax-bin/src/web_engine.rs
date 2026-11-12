@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use zmax_cache::{build_cache_key, CacheLookup, CachedResponse, StampedeSlot};
+use zmax_cache::{
+    build_cache_key, parse_lscache_headers, CacheLookup, CachedResponse, StampedeSlot,
+};
 use zmax_compress::{gzip_compress, is_compressible_mime, negotiate_encoding, ContentEncoding};
 use zmax_config::match_vhost;
 use zmax_fastcgi::{FastCgiClient, FastCgiParamsBuilder};
@@ -624,6 +626,51 @@ where
         return Ok(still_alive);
     }
 
+    // 5b. [matris-cache-tags] PURGE metodu / X-LiteSpeed-Purge istek başlığı (ortak yetki denetimi, h2 ile aynı)
+    match process_cache_purge_request(state, &vhost_ctx.vhost_name, &req, real_ip).await {
+        PurgeRequestOutcome::NotPurge => {}
+        outcome => {
+            let (status, reason, purge_body) = match outcome {
+                PurgeRequestOutcome::Done(n) => {
+                    (200, "OK", format!("Purged {n} entries\n").into_bytes())
+                }
+                _ => (403, "Forbidden", b"403 Forbidden\n".to_vec()),
+            };
+            let resp_hdrs = vec![("Content-Type".into(), "text/plain; charset=utf-8".into())];
+            write_http_response(
+                socket,
+                status,
+                reason,
+                &resp_hdrs,
+                &purge_body,
+                Some(purge_body.len()),
+                is_head,
+                is_https,
+                keep_alive,
+                keep_alive_timeout_sec,
+                sec_ref,
+                None,
+            )
+            .await?;
+            record_and_log(
+                state,
+                &real_ip_str,
+                &req.method,
+                &req.path,
+                status,
+                started,
+                Some(&vhost_ctx),
+                purge_body.len(),
+                referer_hdr,
+                ua_hdr,
+                "HTTP/1.1",
+                &req_id,
+            )
+            .await;
+            return Ok(keep_alive);
+        }
+    }
+
     // 6. Rewrite / .htaccess / try_files + PATH_INFO Yönlendirmesi
     let route_req = RouteRequest {
         doc_root: &vhost_ctx.doc_root,
@@ -766,9 +813,10 @@ where
             path: script_path,
             query: effective_query,
         } => {
+            let respect_req_cc = respect_request_cache_control(state).await;
             let php_cacheable_req = vhost_ctx.cache_enabled
                 && req.method.eq_ignore_ascii_case("GET")
-                && !request_has_bypass_cookie_or_auth(&req.headers);
+                && !request_has_bypass_cookie_or_auth(&req.headers, respect_req_cc);
 
             let enc_label = if wants_gzip { "gzip" } else { "identity" };
             let cache_key = build_cache_key(
@@ -1036,7 +1084,10 @@ where
                 vhost_ctx.auto_avif,
                 vhost_ctx.auto_webp,
             );
-            let has_req_bypass = request_has_bypass_cookie_or_auth(&req.headers);
+            let has_req_bypass = request_has_bypass_cookie_or_auth(
+                &req.headers,
+                respect_request_cache_control(state).await,
+            );
             let can_use_cache = vhost_ctx.cache_enabled
                 && req.method.eq_ignore_ascii_case("GET")
                 && !has_req_bypass
@@ -1726,6 +1777,8 @@ struct PreparedPhpResponse {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     applied_gzip: bool,
+    /// Yanıt (Set-Cookie, Cache-Control, X-LiteSpeed-Cache-Control) önbelleğe alınmayı yasaklıyor.
+    cache_forbidden: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1851,21 +1904,43 @@ async fn execute_and_prepare_php(
         out_headers.push(("Vary".into(), "Accept-Encoding".into()));
     }
 
+    // [matris-cache-tags] LSCache başlık köprüsü (X-LiteSpeed-Cache-Control / -Tag / -Purge)
+    let lscache = {
+        let hdr_refs: Vec<(&str, &str)> = out_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        parse_lscache_headers(hdr_refs)
+    };
+
+    // Uygulamanın tetiklediği temizlik yalnız bu vhost'un `alan::etiket` kayıtlarını siler.
+    if lscache.purge_all || !lscache.purge_tags.is_empty() {
+        state
+            .cache
+            .apply_lscache_purge(&vhost_ctx.vhost_name, &lscache)
+            .await;
+    }
+
+    // `public` yönergesi Set-Cookie / Cache-Control: private|no-store|no-cache yasaklarını ASLA aşmaz.
+    let cache_forbidden = response_forbids_cache(&out_headers)
+        || lscache.cacheable == Some(false)
+        || lscache.is_private;
+    let effective_ttl = lscache.max_age_secs.unwrap_or(vhost_ctx.cache_expire);
+
     let cache_eligible = php_cacheable_req
         && status == 200
-        && !response_forbids_cache(&out_headers)
+        && !cache_forbidden
+        && effective_ttl > 0
         && final_body.len() <= cache_max_object_bytes;
 
     if cache_eligible {
         let mut tags = Vec::new();
         append_domain_and_uri_cache_tags(&mut tags, &vhost_ctx.vhost_name, &req.path);
-        for (k, v) in &out_headers {
-            if k.eq_ignore_ascii_case("x-litespeed-tag") {
-                for t in v.split(',') {
-                    let trimmed = t.trim();
-                    if !trimmed.is_empty() && !tags.iter().any(|existing| existing == trimmed) {
-                        tags.push(trimmed.to_string());
-                    }
+        for tag in &lscache.tags {
+            let domain_tag = zmax_cache::ZMaxCache::format_domain_tag(&vhost_ctx.vhost_name, tag);
+            for t in [tag.clone(), domain_tag] {
+                if !tags.iter().any(|existing| existing == &t) {
+                    tags.push(t);
                 }
             }
         }
@@ -1882,11 +1957,18 @@ async fn execute_and_prepare_php(
                     body: bytes::Bytes::from(final_body.clone()),
                     tags,
                 },
-                vhost_ctx.cache_expire,
+                effective_ttl,
                 vhost_ctx.cache_stale_sec,
             )
             .await;
     }
+
+    // Dahili LSCache yönergeleri istemciye sızdırılmaz.
+    out_headers.retain(|(k, _)| {
+        !(k.eq_ignore_ascii_case("x-litespeed-tag")
+            || k.eq_ignore_ascii_case("x-litespeed-purge")
+            || k.eq_ignore_ascii_case("x-litespeed-cache-control"))
+    });
 
     Ok(Some(PreparedPhpResponse {
         status,
@@ -1895,6 +1977,7 @@ async fn execute_and_prepare_php(
         headers: out_headers,
         body: final_body,
         applied_gzip,
+        cache_forbidden,
     }))
 }
 
@@ -1994,7 +2077,7 @@ where
             } else {
                 prep.body.len()
             };
-            let cache_status = if !php_cacheable_req || response_forbids_cache(&prep.headers) {
+            let cache_status = if !php_cacheable_req || prep.cache_forbidden {
                 Some("BYPASS")
             } else {
                 Some("MISS")
@@ -2535,26 +2618,39 @@ fn parse_response_status(raw: &[u8]) -> Option<u16> {
     parts.next()?.parse::<u16>().ok()
 }
 
-fn request_has_bypass_cookie_or_auth(headers: &[(String, String)]) -> bool {
+/// `[cache] respect_request_cache_control` (varsayılan KAPALI): istek `Cache-Control`/`Pragma` başlıkları önbelleği atlatır mı?
+async fn respect_request_cache_control(state: &Arc<ServerState>) -> bool {
+    state
+        .runtime
+        .read()
+        .await
+        .config
+        .cache
+        .respect_request_cache_control
+}
+
+fn request_has_bypass_cookie_or_auth(
+    headers: &[(String, String)],
+    respect_request_cache_control: bool,
+) -> bool {
     for (k, v) in headers {
         if k.eq_ignore_ascii_case("authorization") {
             return true;
         }
-        if k.eq_ignore_ascii_case("cache-control") {
-            let lower = v.to_ascii_lowercase();
-            if lower.contains("no-cache") || lower.contains("no-store") || lower.contains("private") {
-                return true;
+        // Yapılandırma açık değilse bu başlıklar yok sayılır (istemci kaynaklı PHP amplifikasyonu).
+        if respect_request_cache_control {
+            if k.eq_ignore_ascii_case("cache-control")
+                || k.eq_ignore_ascii_case("x-litespeed-cache-control")
+            {
+                let lower = v.to_ascii_lowercase();
+                if lower.contains("no-cache")
+                    || lower.contains("no-store")
+                    || lower.contains("private")
+                {
+                    return true;
+                }
             }
-        }
-        if k.eq_ignore_ascii_case("pragma") {
-            let lower = v.to_ascii_lowercase();
-            if lower.contains("no-cache") {
-                return true;
-            }
-        }
-        if k.eq_ignore_ascii_case("x-litespeed-cache-control") {
-            let lower = v.to_ascii_lowercase();
-            if lower.contains("no-cache") || lower.contains("no-store") || lower.contains("private") {
+            if k.eq_ignore_ascii_case("pragma") && v.to_ascii_lowercase().contains("no-cache") {
                 return true;
             }
         }
@@ -2601,6 +2697,87 @@ fn response_forbids_cache(headers: &[(String, String)]) -> bool {
         }
     }
     false
+}
+
+/// `PURGE` isteği / `X-LiteSpeed-Purge` istek başlığı için yetki denetimi (HTTP/1.1 ve HTTP/2 ortak).
+///
+/// Özellik `[cache] purge_enabled = true` değilse KAPALIDIR. Açıkken istek ya `purge_key_header`
+/// başlığında `purge_key` değerini (sabit zamanlı karşılaştırma) taşımalı ya da istemci IP'si
+/// `purge_allow_ips` (IP/CIDR) listesinde olmalıdır; ikisi de yapılandırılmamışsa hiçbir istek yetkili değildir.
+pub(crate) fn authorize_purge(
+    cfg: &zmax_config::CacheConfig,
+    headers: &[(String, String)],
+    client_ip: IpAddr,
+) -> bool {
+    if !cfg.purge_enabled {
+        return false;
+    }
+    if !cfg.purge_key.is_empty() {
+        if let Some(given) = extract_header(headers, &cfg.purge_key_header) {
+            if !given.is_empty() && crate::api::constant_time_eq(given, &cfg.purge_key) {
+                return true;
+            }
+        }
+    }
+    cfg.purge_allow_ips
+        .iter()
+        .any(|spec| zmax_security::ip_matches_cidr_spec(client_ip, spec.trim()))
+}
+
+/// Ortak PURGE isteği sonucu (HTTP/1.1 ve HTTP/2 aynı karar yolunu kullanır).
+pub(crate) enum PurgeRequestOutcome {
+    /// İstek PURGE değil; normal akış sürer.
+    NotPurge,
+    /// PURGE isteği yetkisiz: 403, önbellek değişmez.
+    Forbidden,
+    /// Yetkili PURGE yapıldı; gerçekte silinen girdi sayısı.
+    Done(usize),
+}
+
+/// `PURGE` metodu veya `X-LiteSpeed-Purge` istek başlığını yetki denetiminden geçirip uygular.
+pub(crate) async fn process_cache_purge_request(
+    state: &Arc<ServerState>,
+    vhost_name: &str,
+    req: &ParsedHttpRequest,
+    client_ip: IpAddr,
+) -> PurgeRequestOutcome {
+    let purge_header = extract_header(&req.headers, "x-litespeed-purge");
+    if !req.method.eq_ignore_ascii_case("PURGE") && purge_header.is_none() {
+        return PurgeRequestOutcome::NotPurge;
+    }
+    let allowed = {
+        let rt = state.runtime.read().await;
+        authorize_purge(&rt.config.cache, &req.headers, client_ip)
+    };
+    if !allowed {
+        return PurgeRequestOutcome::Forbidden;
+    }
+    PurgeRequestOutcome::Done(
+        handle_lscache_request_purge(state, vhost_name, &req.path, purge_header).await,
+    )
+}
+
+/// Yetkili isteği vhost kapsamında uygular ve gerçekte silinen benzersiz girdi sayısını döner.
+///
+/// `X-LiteSpeed-Purge` varsa (`*` veya etiket listesi) yalnız bu vhost'un `alan::etiket` kayıtları silinir;
+/// yoksa `PURGE <yol>` o vhost'un ilgili yolundaki girdileri siler (başka vhost etkilenmez).
+async fn handle_lscache_request_purge(
+    state: &Arc<ServerState>,
+    vhost_name: &str,
+    path: &str,
+    purge_header: Option<&str>,
+) -> usize {
+    match purge_header {
+        Some(hdr) => {
+            let hdrs = [("x-litespeed-purge", hdr)];
+            let directive = parse_lscache_headers(hdrs.iter().copied());
+            state
+                .cache
+                .apply_lscache_purge(vhost_name, &directive)
+                .await
+        }
+        None => state.cache.purge_by_domain_uri(vhost_name, path).await,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3269,6 +3446,22 @@ pub async fn handle_h2_dispatched_request(
         crate::security_pipeline::SecurityVerdict::Allowed => {}
     }
 
+    // 4b. [matris-cache-tags] PURGE metodu / X-LiteSpeed-Purge istek basligi (HTTP/1.1 ile ayni yetki denetimi)
+    match process_cache_purge_request(state, &vhost_ctx.vhost_name, req, real_ip).await {
+        PurgeRequestOutcome::NotPurge => {}
+        outcome => {
+            let (status, purge_body) = match outcome {
+                PurgeRequestOutcome::Done(n) => (200, format!("Purged {n} entries\n")),
+                _ => (403, "403 Forbidden\n".to_string()),
+            };
+            let resp_hdrs = vec![
+                ("content-type".into(), "text/plain; charset=utf-8".into()),
+                ("x-request-id".into(), req_id.to_string()),
+            ];
+            return Ok((status, resp_hdrs, bytes::Bytes::from(purge_body), log_meta));
+        }
+    }
+
     // 5. Rewrite & .htaccess Cozumleme
     let real_ip_str = real_ip.to_string();
     let route_req = zmax_rewrite::RouteRequest {
@@ -3346,9 +3539,35 @@ pub async fn handle_h2_dispatched_request(
     // 6. FastCGI (PHP) veya Statik Dosya Yonlendirme
     if is_php_route && vhost_ctx.php_enabled {
         let is_head = req.method.eq_ignore_ascii_case("HEAD");
+        let respect_req_cc = respect_request_cache_control(state).await;
         let php_cacheable_req = vhost_ctx.cache_enabled
             && req.method.eq_ignore_ascii_case("GET")
-            && !request_has_bypass_cookie_or_auth(&req.headers);
+            && !request_has_bypass_cookie_or_auth(&req.headers, respect_req_cc);
+        // HTTP/1.1 ile ayni anahtar (istemcinin ham yolu + etkin sorgu): purge ve HIT iki protokolde ortak.
+        let php_cache_key = build_cache_key(
+            &vhost_ctx.vhost_name,
+            is_https,
+            &req.method,
+            &req.path,
+            &eff_query,
+            Some("identity"),
+        );
+        if php_cacheable_req {
+            if let CacheLookup::Fresh(cached) = state.cache.get_with_stale(&php_cache_key).await {
+                state.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                let body = if is_head || cached.status == 204 || cached.status == 304 {
+                    bytes::Bytes::new()
+                } else {
+                    cached.body
+                };
+                let resp_headers = vec![
+                    ("content-type".into(), cached.content_type),
+                    ("x-cache".into(), "HIT".to_string()),
+                    ("x-request-id".into(), req_id.to_string()),
+                ];
+                return Ok((cached.status, resp_headers, body, log_meta));
+            }
+        }
         let prep_res = execute_and_prepare_php(
             state,
             req,
@@ -3363,7 +3582,7 @@ pub async fn handle_h2_dispatched_request(
             false,
             &policies.gzip,
             php_cacheable_req,
-            &format!("{}:{}", effective_host, effective_path),
+            &php_cache_key,
             MAX_STATIC_CACHE_BYTES,
             is_head,
         )
@@ -3372,7 +3591,7 @@ pub async fn handle_h2_dispatched_request(
         match prep_res {
             Ok(Some(prep)) => {
                 let mut resp_headers = prep.headers;
-                let cache_status = if !php_cacheable_req || response_forbids_cache(&resp_headers) {
+                let cache_status = if !php_cacheable_req || prep.cache_forbidden {
                     "BYPASS"
                 } else {
                     "MISS"
