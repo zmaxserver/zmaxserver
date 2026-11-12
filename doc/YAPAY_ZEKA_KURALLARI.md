@@ -1,7 +1,7 @@
 # ZMax Server — Yapay Zeka Çalışma Kuralları
 
 Bu klasörde (`D:\zmaxserver`) kod ya da belge yazan her yapay zeka işe başlamadan bu dosyayı okur ve aynen uygular.
-**Kural sürümü: v6 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, bölüm 8c. v6: çakışma önleme + git kancaları, bölüm 8c madde 9.)
+**Kural sürümü: v7 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, 8c. v6: çakışma önleme, 8c madde 9. v7: gerçek test önce / VM döngüsü, 8d.)
 **SÜREKLİ KURALA BAK (zorunlu):** Bu dosyayı yalnız işe başlarken değil **çalışırken de** yeniden oku: (a) her yeni görev kartının başında, (b) her ~30 dakikada ya da ~20 araç çağrısında bir, (c) kod yazmaya/silmeye/bağlamaya başlamadan hemen önce, (d) bir testi "geçti" ya da bir özelliği "bitti" demeden önce, (e) uzun bir kesintiden (bağlam sıkıştırma, yeniden başlatma) sonra, (f) `DUZELTMELER.md` yeni karar yazdığında. Her okumada **kural sürümü** satırını bir öncekiyle karşılaştır; değiştiyse dosyanın tamamını baştan oku. Hafızandaki eski kurala güvenme. Raporda "Kural son okunma: <saat>, sürüm v4" yaz.
 **ZORUNLU OKUMA (işe başlamadan, bu sırayla; okumadan kod yazma):**
 1. Bu dosya.
@@ -105,6 +105,20 @@ Bu denetimi atlayan rapor geçersiz sayılır.
    - **Commit etme:** `doc/DUZELTMELER.md`, `doc/BITTI.md`, `doc/bitti/` (denetçi `main`'de commit eder), `doc/ornekmimariler/`, `target/`, `*.pem`, `*.key`.
    - **Bu kurallar şu an git kancasıyla ZORLANMIYOR** (kanca kurulumu sahip onayını bekliyor); uyum **denetçi tarafından commit geçmişinden (`git log`, `git diff --stat`) kontrol edilir**: `main`'e ajan commit'i, dal commit'inde iletişim dosyası ya da kart dışı dosya bulunursa kart RED olur. İleride kanca kurulursa (`.git/hooks`) onu atlatma/değiştirme/silme (`--no-verify`, `core.hooksPath`) **kesin yasak**.
    - Başka birinin (denetçi/ajan) dosyasını **değiştirme, geri alma (`git checkout -- <dosya>`), silme**.
+
+## 8d. Gerçek test önce: VM döngüsü (sahip kararı, v7)
+**İlke:** Kâğıt üzerindeki doğrulama (birim/entegrasyon testi) yetmez; eksikleri **gerçek sunucuda gerçek siteyle** denemek en hızlı bulur. Bu yüzden iş **döngüyle** yürür:
+1. **Derle:** denetçinin `main`'indeki ONAYLI hâlden Linux ikilisi.
+2. **VM testi:** yalnız **VM oturumu** (`paketleme-v2`) yapar; ZMax test portlarında (19480/19483/19486), 80/443/panel/OpenLiteSpeed'e dokunmadan, kalıcı değişiklik olmadan. Sonuç `doc/bitti/VM-TEST-<n>.md`: her madde GEÇTİ/KALDI/DENENEMEDİ + komut + literal çıktı + hangi karta ait.
+3. **Eksik listesi → kart:** `KALDI` maddeleri **öncelikli kart** olur (planlı kartlardan önce). Kart adı `Kart V<n>-<k>`; denetçi `ADIMLI_GELISTIRME_TAKIP.md`'ye ekler.
+4. **Ajanlar düzeltir:** kural, dal, rapor, denetçi onayı aynen geçerli.
+5. **Tekrar VM testi:** düzeltme `main`'e girince aynı madde yeniden denenir; geçerse kartın kararı **VM DOĞRULANDI** olur.
+**Sonuçlar:**
+- **Kart önceliği:** (1) VM testinde `KALDI` çıkan kartlar, (2) ONAYLI ama henüz VM'de denenmemiş kartların VM maddeleri, (3) planlı yeni kartlar. VM sonucu gelmeden **yeni büyük kart başlatma** (küçük, bağımsız kartlar serbest).
+- **Kart kararı iki kademeli:** `ONAYLI` = kod + test (denetçi); `VM DOĞRULANDI` = gerçek sunucuda geçti. `OLS_DENKLIK` ZORUNLU satırları ancak `VM DOĞRULANDI` olunca geçilmiş sayılır.
+- **Her kart raporuna ekle:** "VM'de denenecek komutlar" bölümü (3-8 satır: komut, beklenen sonuç). VM oturumu bunları test listesine alır.
+- **Ajanlar VM'ye dokunmaz** (bağlanma, dosya yazma, servis durdurma yasak); VM erişimi yalnız VM oturumundadır. Sırlar (parola/anahtar) hiçbir dosyaya/sohbete yazılmaz.
+- **VM sonucu geldiğinde** `DUZELTMELER.md` kart tablosuna "VM" notu denetçi tarafından yazılır; ajan tabloyu yine yalnız okur.
 
 ## 8b. Köprü: denetçiyle otomatik bildirim (bil ve ona göre yaz)
 Seninle denetçi (Claude) arasında **otomatik bir köprü çalışır**: `doc/tools/kopru_izle.py` her 5 sn'de `BITTI.md` ve `DUZELTMELER.md`'yi izler; içerik değişince denetçiye anında bildirim gider. Bu yüzden:
