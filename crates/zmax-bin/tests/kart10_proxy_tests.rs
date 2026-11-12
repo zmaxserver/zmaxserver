@@ -664,7 +664,7 @@ async fn kart10_e2e_reverse_proxy_xff_https_sse_websocket_and_timeout() {
     // --- Senaryo B: HTTPS (21101) uzerinden X-Forwarded-Proto: https, X-Forwarded-Host ve XFF append ---
     {
         let mut root_store = RootCertStore::empty();
-        root_store.add(cert_der).unwrap();
+        root_store.add(cert_der.clone()).unwrap();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut tls_cfg = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -823,6 +823,112 @@ async fn kart10_e2e_reverse_proxy_xff_https_sse_websocket_and_timeout() {
         );
         timeout_release.notify_one();
     }
+
+    // --- Senaryo F: P0 Request Smuggling Korumasi (Chunked / TE filtresi) ---
+    {
+        let mut client = TcpStream::connect(("127.0.0.1", TEST_HTTP_PORT))
+            .await
+            .unwrap();
+        // Smuggled istegi taklit eden govde: Cozulunce "0\r\n\r\nGET /smuggled..." olusur
+        let smuggled_data = "0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: xff.kart10.test\r\n\r\n";
+        let chunked_payload = format!("{:x}\r\n{}\r\n0\r\n\r\n", smuggled_data.len(), smuggled_data);
+        let req = format!(
+            "POST /submit HTTP/1.1\r\nHost: xff.kart10.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}",
+            chunked_payload
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let resp = read_http_response_complete(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "Smuggling testi 200 donmeli: {resp}");
+        // Upstream'e giden istekte Transfer-Encoding basligi kesinlikle DUSURULMUS olmali!
+        assert!(!resp.contains("Transfer-Encoding:"), "Upstream'e Transfer-Encoding basligi gitmemeli: {resp}");
+        // Govde cozulmus olarak tek bir parca halinde Content-Length ile iletilmeli
+        let expected_cl = format!("content-length: {}", smuggled_data.len());
+        let expected_cl_upper = format!("Content-Length: {}", smuggled_data.len());
+        assert!(
+            resp.contains(&expected_cl) || resp.contains(&expected_cl_upper),
+            "Upstream Content-Length basligi gormeli (beklenen: {}): {resp}",
+            smuggled_data.len()
+        );
+    }
+
+    // --- Senaryo G: RFC 9110 Hop-by-hop Baslik Temizligi ---
+    {
+        let mut client = TcpStream::connect(("127.0.0.1", TEST_HTTP_PORT))
+            .await
+            .unwrap();
+        let req = concat!(
+            "GET /hop-by-hop-test HTTP/1.1\r\n",
+            "Host: xff.kart10.test\r\n",
+            "Connection: close, X-Hop-Custom\r\n",
+            "X-Hop-Custom: gizli-deger\r\n",
+            "Keep-Alive: timeout=5\r\n",
+            "Proxy-Connection: keep-alive\r\n",
+            "TE: trailers\r\n",
+            "Trailer: X-Checksum\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let resp = read_http_response_complete(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 200 OK"), "{resp}");
+        assert!(!resp.contains("X-Hop-Custom:"), "Connection'da listelenen baslik upstream'e gecmemeli: {resp}");
+        assert!(!resp.contains("Keep-Alive:"), "Keep-Alive upstream'e gecmemeli: {resp}");
+        assert!(!resp.contains("Proxy-Connection:"), "Proxy-Connection upstream'e gecmemeli: {resp}");
+        assert!(!resp.contains("TE:"), "TE upstream'e gecmemeli: {resp}");
+        assert!(!resp.contains("Trailer:"), "Trailer upstream'e gecmemeli: {resp}");
+    }
+
+    // --- Senaryo H: HTTP/2 TLS ALPN h2 Uzerinden Ters Vekil Istegi ---
+    {
+        let mut root_store = RootCertStore::empty();
+        root_store.add(cert_der.clone()).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut h2_cfg = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        h2_cfg.alpn_protocols = vec![b"h2".to_vec()];
+        let connector = TlsConnector::from(Arc::new(h2_cfg));
+
+        let tcp = TcpStream::connect(("127.0.0.1", TEST_HTTPS_PORT))
+            .await
+            .unwrap();
+        let server_name = ServerName::try_from("https.kart10.test").unwrap();
+        let tls = connector.connect(server_name, tcp).await.unwrap();
+
+        let (mut client, h2_conn) = h2::client::handshake(tls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://https.kart10.test/h2-proxy-test")
+            .header("Host", "https.kart10.test")
+            .body(())
+            .unwrap();
+        let (response, _send_stream) = client.send_request(req, true).unwrap();
+        let (head, mut body) = response.await.unwrap().into_parts();
+        assert_eq!(head.status, 200);
+
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = body.data().await {
+            let data = chunk.unwrap();
+            body_bytes.extend_from_slice(&data);
+        }
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(
+            body_str.contains("X-Forwarded-Proto: https"),
+            "H2 vekil isteginde X-Forwarded-Proto: https olmali: {body_str}"
+        );
+        assert!(
+            body_str.contains("X-Forwarded-Host: https.kart10.test"),
+            "H2 vekil isteginde X-Forwarded-Host olmali: {body_str}"
+        );
+    }
 }
 
 #[test]
@@ -868,10 +974,12 @@ max_conns = 128
         .with_init_timeout(Duration::from_secs(vh.proxy_ext.init_timeout_sec))
         .with_keep_alive_timeout(Duration::from_secs(vh.proxy_ext.keep_alive_timeout_sec))
         .with_resp_buffer(vh.proxy_ext.resp_buffer)
-        .with_preserve_host(vh.proxy.preserve_host);
+        .with_preserve_host(vh.proxy.preserve_host)
+        .with_max_conns(vh.proxy_ext.max_conns);
     assert_eq!(proxy.init_timeout(), Duration::from_secs(300));
     assert_eq!(proxy.keep_alive_timeout(), Duration::from_secs(60));
     assert!(!proxy.resp_buffer());
+    assert_eq!(proxy.max_conns(), 128);
 
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -68,6 +68,7 @@ pub struct ReverseProxy {
     resp_buffer: bool,
     preserve_host: bool,
     https: bool,
+    max_conns: usize,
 }
 
 impl ReverseProxy {
@@ -81,6 +82,7 @@ impl ReverseProxy {
             resp_buffer: false,
             preserve_host: true,
             https: false,
+            max_conns: 0,
         }
     }
 
@@ -115,6 +117,15 @@ impl ReverseProxy {
     pub fn with_https(mut self, https: bool) -> Self {
         self.https = https;
         self
+    }
+
+    pub fn with_max_conns(mut self, max_conns: usize) -> Self {
+        self.max_conns = max_conns;
+        self
+    }
+
+    pub fn max_conns(&self) -> usize {
+        self.max_conns
     }
 
     pub fn init_timeout(&self) -> Duration {
@@ -924,13 +935,25 @@ fn build_rewritten_head_internal(
     let method = req.method.unwrap_or("GET");
     let path = req.path.unwrap_or("/");
     let ver = req.version.unwrap_or(1);
-    let upgrade = req
+    let is_ws_upgrade = req
         .headers
         .iter()
-        .any(|h| h.name.eq_ignore_ascii_case("upgrade"));
+        .any(|h| h.name.eq_ignore_ascii_case("upgrade") && sanitize_header_value(h.value).eq_ignore_ascii_case("websocket"));
+
+    let mut connection_tokens = Vec::new();
+    for h in req.headers.iter() {
+        if h.name.eq_ignore_ascii_case("connection") {
+            let cleaned = sanitize_header_value(h.value);
+            for tok in cleaned.split(',') {
+                let t = tok.trim().to_ascii_lowercase();
+                if !t.is_empty() {
+                    connection_tokens.push(t);
+                }
+            }
+        }
+    }
 
     let mut orig_host: Option<&[u8]> = None;
-    let mut has_connection = false;
     let mut forwarded_for_parts: Vec<String> = Vec::new();
 
     let mut out = Vec::with_capacity(512);
@@ -954,19 +977,29 @@ fn build_rewritten_head_internal(
             }
             continue;
         }
-        let drop = matches!(
+
+        // RFC 9110 §7.6.1 Hop-by-hop ve P0 Smuggling önleme kuralları:
+        let is_hop_by_hop = matches!(
+            n.as_str(),
+            "keep-alive"
+                | "proxy-connection"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+        ) || n == "connection"
+          || (n == "upgrade" && !is_ws_upgrade)
+          || connection_tokens.iter().any(|tok| tok == &n);
+
+        let is_forwarded_override = matches!(
             n.as_str(),
             "x-forwarded-proto"
                 | "x-forwarded-host"
                 | "x-real-ip"
-                | "keep-alive"
-                | "proxy-connection"
-        ) || (n == "connection" && !upgrade);
-        if drop {
+        );
+        if is_hop_by_hop || is_forwarded_override {
             continue;
-        }
-        if n == "connection" {
-            has_connection = true;
         }
         out.extend_from_slice(h.name.as_bytes());
         out.extend_from_slice(b": ");
@@ -998,10 +1031,8 @@ fn build_rewritten_head_internal(
         )
         .as_bytes(),
     );
-    if upgrade {
-        if !has_connection {
-            out.extend_from_slice(b"Connection: Upgrade\r\n");
-        }
+    if is_ws_upgrade {
+        out.extend_from_slice(b"Connection: Upgrade\r\nUpgrade: websocket\r\n");
     } else if keep_upstream_alive {
         out.extend_from_slice(b"Connection: keep-alive\r\n");
     } else {

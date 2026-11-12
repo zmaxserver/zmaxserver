@@ -2092,7 +2092,20 @@ where
         req.version.min(1)
     );
     for (k, v) in &req.headers {
+        // [kart-10: P0 request smuggling önleme]
+        // Gövde decode_chunked_stream ile çözüldüğünden, transfer-encoding başlığı upstream'e aktarılmaz!
+        if k.eq_ignore_ascii_case("transfer-encoding") || k.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
         raw_head.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    // Çözülmüş gerçek gövde uzunluğu Content-Length olarak eklenir
+    if !req.body.is_empty()
+        || req.method.eq_ignore_ascii_case("POST")
+        || req.method.eq_ignore_ascii_case("PUT")
+        || req.method.eq_ignore_ascii_case("PATCH")
+    {
+        raw_head.push_str(&format!("content-length: {}\r\n", req.body.len()));
     }
     raw_head.push_str("\r\n");
 
@@ -2101,8 +2114,8 @@ where
             .map(|u| u.eq_ignore_ascii_case("websocket"))
             .unwrap_or(false);
 
-    // [kart-10] initTimeout, pcKeepAliveTimeout ve tamponsuz akış (respBuffer 0) bağlaması
-    let conn_sec = if vhost_ctx.proxy_ext.connect_timeout_sec != 10 {
+    // [kart-10: sihirli sayı kaldırıldı]
+    let conn_sec = if vhost_ctx.proxy_ext.connect_timeout_sec > 0 {
         vhost_ctx.proxy_ext.connect_timeout_sec
     } else {
         connect_timeout_sec
@@ -2110,14 +2123,60 @@ where
     let conn_dur = Duration::from_secs(conn_sec.max(1));
     let init_dur = Duration::from_secs(vhost_ctx.proxy_ext.init_timeout_sec.max(1));
     let ka_dur = Duration::from_secs(vhost_ctx.proxy_ext.keep_alive_timeout_sec.max(1));
+    let is_head = req.method.eq_ignore_ascii_case("HEAD");
+
+    // [kart-10: max_conns eşzamanlı aktif bağlantı denetimi]
+    if vhost_ctx.proxy_ext.max_conns > 0
+        && !state
+            .upstream_pool
+            .try_acquire_conns_slot(&vhost_ctx.proxy_upstream, vhost_ctx.proxy_ext.max_conns)
+    {
+        let err_body = b"503 Service Unavailable - Upstream Connection Limit Reached\n";
+        write_http_response(
+            socket,
+            503,
+            "Service Unavailable",
+            &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
+            err_body,
+            Some(err_body.len()),
+            is_head,
+            is_https,
+            false,
+            0,
+            vhost_ctx.headers_policy.as_ref(),
+            None,
+        )
+        .await?;
+        let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+        return Ok((503, false, sent_err_bytes));
+    }
+
+    struct UpstreamConnGuard<'a> {
+        pool: &'a zmax_pool::UpstreamSocketPool,
+        addr: &'a str,
+        active: bool,
+    }
+    impl<'a> Drop for UpstreamConnGuard<'a> {
+        fn drop(&mut self) {
+            if self.active {
+                self.pool.release_conns_slot(self.addr);
+            }
+        }
+    }
+    let _conn_guard = UpstreamConnGuard {
+        pool: &state.upstream_pool,
+        addr: &vhost_ctx.proxy_upstream,
+        active: vhost_ctx.proxy_ext.max_conns > 0,
+    };
+
     let proxy = ReverseProxy::new(&vhost_ctx.proxy_upstream)
         .with_timeouts(conn_dur, init_dur)
         .with_init_timeout(init_dur)
         .with_keep_alive_timeout(ka_dur)
         .with_resp_buffer(vhost_ctx.proxy_ext.resp_buffer)
         .with_preserve_host(vhost_ctx.proxy_preserve_host)
+        .with_max_conns(vhost_ctx.proxy_ext.max_conns)
         .with_https(is_https);
-    let is_head = req.method.eq_ignore_ascii_case("HEAD");
 
     if is_ws {
         match proxy
@@ -2138,9 +2197,9 @@ where
                 let (code, reason, err_body): (u16, &str, &[u8]) = match &err.error {
                     ProxyError::BadRequest => (400, "Bad Request", b"400 Bad Request"),
                     ProxyError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out")
+                        (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out\n")
                     }
-                    _ => (502, "Bad Gateway", b"502 Bad Gateway - Upstream Unavailable"),
+                    _ => (502, "Bad Gateway", b"502 Bad Gateway - Upstream Unavailable\n"),
                 };
                 write_http_response(
                     socket,
@@ -2169,12 +2228,17 @@ where
         .await
     {
         Ok(s) => s,
-        Err(_) => {
-            let err_body = b"502 Bad Gateway - Proxy Upstream Unavailable";
+        Err(err) => {
+            let is_timeout = err.kind() == std::io::ErrorKind::TimedOut;
+            let (code, reason, err_body): (u16, &str, &[u8]) = if is_timeout {
+                (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out\n")
+            } else {
+                (502, "Bad Gateway", b"502 Bad Gateway - Proxy Upstream Unavailable\n")
+            };
             write_http_response(
                 socket,
-                502,
-                "Bad Gateway",
+                code,
+                reason,
                 &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
                 err_body,
                 Some(err_body.len()),
@@ -2187,7 +2251,7 @@ where
             )
             .await?;
             let sent_err_bytes = if is_head { 0 } else { err_body.len() };
-            return Ok((502, false, sent_err_bytes));
+            return Ok((code, false, sent_err_bytes));
         }
     };
 
@@ -2206,7 +2270,7 @@ where
             if res.upstream_reusable {
                 state
                     .upstream_pool
-                    .release(&vhost_ctx.proxy_upstream, upstream_stream);
+                    .release_with_ttl(&vhost_ctx.proxy_upstream, upstream_stream, ka_dur);
             }
             if !res.client_keep_alive {
                 let _ = socket.shutdown().await;
@@ -2221,9 +2285,9 @@ where
             let (code, reason, err_body): (u16, &str, &[u8]) = match &err.error {
                 ProxyError::BadRequest => (400, "Bad Request", b"400 Bad Request"),
                 ProxyError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out")
+                    (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out\n")
                 }
-                _ => (502, "Bad Gateway", b"502 Bad Gateway - Proxy Upstream Unavailable"),
+                _ => (502, "Bad Gateway", b"502 Bad Gateway - Proxy Upstream Unavailable\n"),
             };
             write_http_response(
                 socket,
@@ -2246,20 +2310,200 @@ where
     }
 }
 
-#[allow(dead_code)]
-fn response_has_connection_close(raw: &[u8]) -> bool {
-    let head_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap_or(raw.len());
-    let head = String::from_utf8_lossy(&raw[..head_end]);
-    head.lines().any(|line| {
-        if let Some((k, v)) = line.split_once(':') {
-            k.trim().eq_ignore_ascii_case("connection") && v.to_ascii_lowercase().contains("close")
-        } else {
-            false
+/// HTTP/2 üzerinden gelen vekil vhost isteklerini arka uç HTTP/1.1 sunucusuna iletir
+/// ve yanıtı HTTP/2 çerçevelerine uygun başlık/gövde olarak ayrıştırarak döndürür.
+async fn serve_h2_proxy_request(
+    state: &Arc<ServerState>,
+    req: &ParsedHttpRequest,
+    real_ip: IpAddr,
+    vhost_ctx: &ResolvedVHostContext,
+    default_connect_timeout_sec: u64,
+) -> Result<(u16, Vec<(String, String)>, bytes::Bytes), Box<dyn std::error::Error + Send + Sync>> {
+    let raw_target = if req.query.is_empty() {
+        req.path.clone()
+    } else {
+        format!("{}?{}", req.path, req.query)
+    };
+    let mut raw_head = format!("{} {} HTTP/1.1\r\n", req.method, raw_target);
+    for (k, v) in &req.headers {
+        if k.eq_ignore_ascii_case("transfer-encoding") || k.eq_ignore_ascii_case("content-length") {
+            continue;
         }
-    })
+        raw_head.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    if !req.body.is_empty()
+        || req.method.eq_ignore_ascii_case("POST")
+        || req.method.eq_ignore_ascii_case("PUT")
+        || req.method.eq_ignore_ascii_case("PATCH")
+    {
+        raw_head.push_str(&format!("content-length: {}\r\n", req.body.len()));
+    }
+    raw_head.push_str("\r\n");
+
+    let conn_sec = if vhost_ctx.proxy_ext.connect_timeout_sec > 0 {
+        vhost_ctx.proxy_ext.connect_timeout_sec
+    } else {
+        default_connect_timeout_sec
+    };
+    let conn_dur = Duration::from_secs(conn_sec.max(1));
+    let init_dur = Duration::from_secs(vhost_ctx.proxy_ext.init_timeout_sec.max(1));
+    let ka_dur = Duration::from_secs(vhost_ctx.proxy_ext.keep_alive_timeout_sec.max(1));
+
+    if vhost_ctx.proxy_ext.max_conns > 0
+        && !state
+            .upstream_pool
+            .try_acquire_conns_slot(&vhost_ctx.proxy_upstream, vhost_ctx.proxy_ext.max_conns)
+    {
+        return Ok((
+            503,
+            vec![("content-type".into(), "text/plain; charset=utf-8".into())],
+            bytes::Bytes::from_static(b"503 Service Unavailable - Upstream Connection Limit Reached\n"),
+        ));
+    }
+
+    struct UpstreamConnGuard<'a> {
+        pool: &'a zmax_pool::UpstreamSocketPool,
+        addr: &'a str,
+        active: bool,
+    }
+    impl<'a> Drop for UpstreamConnGuard<'a> {
+        fn drop(&mut self) {
+            if self.active {
+                self.pool.release_conns_slot(self.addr);
+            }
+        }
+    }
+    let _conn_guard = UpstreamConnGuard {
+        pool: &state.upstream_pool,
+        addr: &vhost_ctx.proxy_upstream,
+        active: vhost_ctx.proxy_ext.max_conns > 0,
+    };
+
+    let proxy = ReverseProxy::new(&vhost_ctx.proxy_upstream)
+        .with_timeouts(conn_dur, init_dur)
+        .with_init_timeout(init_dur)
+        .with_keep_alive_timeout(ka_dur)
+        .with_resp_buffer(vhost_ctx.proxy_ext.resp_buffer)
+        .with_preserve_host(vhost_ctx.proxy_preserve_host)
+        .with_max_conns(vhost_ctx.proxy_ext.max_conns)
+        .with_https(true);
+
+    let (mut upstream_stream, is_from_pool) = match state
+        .upstream_pool
+        .acquire_tagged_with_timeout(&vhost_ctx.proxy_upstream, conn_dur)
+        .await
+    {
+        Ok(res) => res,
+        Err(err) => {
+            let is_timeout = err.kind() == std::io::ErrorKind::TimedOut;
+            let (status, msg): (u16, &'static [u8]) = if is_timeout {
+                (504, b"504 Gateway Timeout - Proxy Upstream Timed Out\n")
+            } else {
+                (502, b"502 Bad Gateway - Proxy Upstream Unavailable\n")
+            };
+            return Ok((
+                status,
+                vec![("content-type".into(), "text/plain; charset=utf-8".into())],
+                bytes::Bytes::from_static(msg),
+            ));
+        }
+    };
+
+    let mut full_req = raw_head.into_bytes();
+    if !req.body.is_empty() {
+        full_req.extend_from_slice(&req.body);
+    }
+
+    let forward_res = proxy
+        .forward_http_on_stream(&mut upstream_stream, &full_req, SocketAddr::new(real_ip, 0))
+        .await;
+
+    let (resp_raw, reusable) = match forward_res {
+        Ok(res) => res,
+        Err(_) if is_from_pool => {
+            if let Ok(mut fresh_stream) = state
+                .upstream_pool
+                .dial_fresh_with_timeout(&vhost_ctx.proxy_upstream, conn_dur)
+                .await
+            {
+                match proxy
+                    .forward_http_on_stream(
+                        &mut fresh_stream,
+                        &full_req,
+                        SocketAddr::new(real_ip, 0),
+                    )
+                    .await
+                {
+                    Ok(retry_res) => {
+                        upstream_stream = fresh_stream;
+                        retry_res
+                    }
+                    Err(_) => {
+                        return Ok((
+                            502,
+                            vec![("content-type".into(), "text/plain; charset=utf-8".into())],
+                            bytes::Bytes::from_static(
+                                b"502 Bad Gateway - Proxy Upstream Unavailable\n",
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                return Ok((
+                    502,
+                    vec![("content-type".into(), "text/plain; charset=utf-8".into())],
+                    bytes::Bytes::from_static(b"502 Bad Gateway - Proxy Upstream Unavailable\n"),
+                ));
+            }
+        }
+        Err(_) => {
+            return Ok((
+                502,
+                vec![("content-type".into(), "text/plain; charset=utf-8".into())],
+                bytes::Bytes::from_static(b"502 Bad Gateway - Proxy Upstream Unavailable\n"),
+            ));
+        }
+    };
+
+    if reusable {
+        state
+            .upstream_pool
+            .release_with_ttl(&vhost_ctx.proxy_upstream, upstream_stream, ka_dur);
+    }
+
+    let mut hs = [httparse::EMPTY_HEADER; 96];
+    let mut parsed_resp = httparse::Response::new(&mut hs);
+    let body_offset = match parsed_resp.parse(&resp_raw) {
+        Ok(httparse::Status::Complete(offset)) => offset,
+        _ => {
+            return Ok((
+                502,
+                vec![("content-type".into(), "text/plain; charset=utf-8".into())],
+                bytes::Bytes::from_static(b"502 Bad Gateway - Invalid Upstream Response\n"),
+            ));
+        }
+    };
+
+    let status = parsed_resp.code.unwrap_or(200);
+    let mut h2_headers = Vec::with_capacity(parsed_resp.headers.len() + 1);
+    for h in parsed_resp.headers.iter() {
+        let name = h.name.to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "transfer-encoding"
+                | "upgrade"
+        ) {
+            continue;
+        }
+        let val = String::from_utf8_lossy(h.value).into_owned();
+        h2_headers.push((name, val));
+    }
+
+    let body = bytes::Bytes::copy_from_slice(&resp_raw[body_offset..]);
+    Ok((status, h2_headers, body))
 }
 
 fn is_negotiable_image_path(path: &Path) -> bool {
@@ -3264,6 +3508,36 @@ pub async fn handle_h2_dispatched_request(
             return Ok((301, headers, bytes::Bytes::new(), log_meta));
         }
         crate::security_pipeline::SecurityVerdict::Allowed => {}
+    }
+
+    // 4.5. Ters Vekil Yönlendirmesi (HTTP/2 -> Upstream HTTP/1.1)
+    if vhost_ctx.proxy_enabled
+        && !vhost_ctx.proxy_upstream.trim().is_empty()
+        && req.path.starts_with(&vhost_ctx.proxy_path_prefix)
+    {
+        match serve_h2_proxy_request(
+            state,
+            req,
+            real_ip,
+            &vhost_ctx,
+            policies.proxy.connect_timeout_sec,
+        )
+        .await
+        {
+            Ok((status, mut headers, body)) => {
+                headers.push(("x-request-id".into(), req_id.to_string()));
+                return Ok((status, headers, body, log_meta));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "H2 proxy request forward failed");
+                let body = bytes::Bytes::from_static(b"502 Bad Gateway - Proxy Forward Failed\n");
+                let headers = vec![
+                    ("content-type".into(), "text/plain; charset=utf-8".into()),
+                    ("x-request-id".into(), req_id.to_string()),
+                ];
+                return Ok((502, headers, body, log_meta));
+            }
+        }
     }
 
     // 5. Rewrite & .htaccess Cozumleme
