@@ -19,6 +19,9 @@ pub use acme::AcmeConfig;
 // [kart-10] Sanal konak ters vekil zaman aşımı, keep-alive ve tamponsuz akış şeması
 pub mod proxy_ext;
 pub use proxy_ext::ProxyExtConfig;
+// [kart-9] vHost HTTP Basic Authentication (Parola Korumalı Dizinler)
+pub mod auth;
+pub use auth::*;
 
 /// Popüler paneller (cPanel, Plesk, DirectAdmin, CyberPanel, HestiaCP, aaPanel, zPanel vb.)
 /// ve OS ephemeral aralıkları (Linux 32768-60999, Windows 49152-65535) ile çakışmayan
@@ -473,10 +476,13 @@ pub struct VHostEntry {
     #[serde(default)]
     pub acl: VhostAclConfig,
     #[serde(default)]
+    #[serde(default)]
     pub acme: AcmeConfig,
     // [kart-10] Ters vekil genişletilmiş ayarları (initTimeout, keep-alive, respBuffer)
     #[serde(default)]
     pub proxy_ext: ProxyExtConfig,
+    #[serde(default)]
+    pub auth: VHostAuthSection,
 }
 
 impl Default for VHostEntry {
@@ -505,6 +511,7 @@ impl Default for VHostEntry {
             acl: VhostAclConfig::default(),
             acme: AcmeConfig::default(),
             proxy_ext: ProxyExtConfig::default(),
+            auth: VHostAuthSection::default(),
         }
     }
 }

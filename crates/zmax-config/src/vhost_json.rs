@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::{LoadedVHost, VHostEntry, VHostRewriteRule};
+use crate::{LoadedVHost, VHostAuthSection, VHostEntry, VHostRewriteRule};
 
 /// Bir JSON değerini metin (String) olarak doğrular ve döndürür.
 pub fn val_as_str(v: &Value, field: &str) -> Result<String, String> {
@@ -461,6 +461,23 @@ pub fn merge_vhost_json_patch(
         entry.proxy.websocket = val_as_bool(v, "websocket")?;
     }
 
+    // Auth (Parola Korumalı Dizinler)
+    if let Some(v) = obj.get("auth") {
+        if let Ok(sec) = serde_json::from_value::<VHostAuthSection>(v.clone()) {
+            entry.auth = sec;
+        }
+    }
+    if let Some(v) = obj.get("auth_enabled") {
+        entry.auth.enabled = val_as_bool(v, "auth_enabled")?;
+    }
+    if let Some(v) = obj.get("auth_realm") {
+        entry.auth.realm = val_as_str(v, "auth_realm")?;
+    }
+    if let Some(v) = obj.get("htpasswd_path") {
+        let p = val_as_str(v, "htpasswd_path")?;
+        entry.auth.htpasswd_path = if p.trim().is_empty() { None } else { Some(p) };
+    }
+
     // 4. Doğrulamalar (Validation)
     if entry.document_root.contains("..")
         || entry.document_root.contains('\0')
@@ -475,9 +492,18 @@ pub fn merge_vhost_json_patch(
         ("error_docs.dir", entry.error_docs.dir.as_str()),
         ("ssl.certificate", entry.ssl.certificate.as_str()),
         ("ssl.key", entry.ssl.key.as_str()),
+        ("auth.htpasswd_path", entry.auth.htpasswd_path.as_deref().unwrap_or("")),
     ] {
         if has_parent_dir_traversal(path_val) {
             return Err(format!("Geçersiz {} dosya yolu: '{}'", label, path_val));
+        }
+    }
+
+    for dir in &entry.auth.directories {
+        if let Some(ref p) = dir.htpasswd_path {
+            if has_parent_dir_traversal(p) {
+                return Err(format!("Geçersiz auth.directories.htpasswd_path dosya yolu: '{}'", p));
+            }
         }
     }
 
@@ -875,6 +901,9 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
     }
     if a.acl != b.acl {
         return Some(format!("acl: '{:?}' != '{:?}'", a.acl, b.acl));
+    }
+    if a.auth != b.auth {
+        return Some(format!("auth: '{:?}' != '{:?}'", a.auth, b.auth));
     }
     None
 }

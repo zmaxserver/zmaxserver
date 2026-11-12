@@ -1,6 +1,10 @@
 //! # zmax-security
 //! WAF, bellek-sınırlı Rate Limiting, IP yasak yöneticisi ve WordPress brute-force kalkanı.
 
+// [kart-9] Apache htpasswd ve Basic Authentication modülü
+pub mod basic_auth;
+pub use basic_auth::*;
+
 use dashmap::DashMap;
 use std::fmt;
 use std::net::IpAddr;
