@@ -147,6 +147,74 @@ pub fn build_cache_key(
     format!("{scheme}://{clean_vhost}|{clean_method}|{clean_enc}|{clean_path}?{query}")
 }
 
+/// Ham URI girdisinden temiz yol (`path`) bilgisini ayıklar.
+///
+/// Örnekler:
+/// - `"/index.html?v=1"` -> `"/index.html"`
+/// - `"http://site.test|GET|identity|/api/v1?page=1"` -> `"/api/v1"`
+/// - `"https://site.test/foo/bar?baz"` -> `"/foo/bar"`
+/// - `"index.html"` -> `"/index.html"`
+pub fn extract_path_from_uri(uri: &str) -> String {
+    let u = uri.trim();
+    if u.is_empty() {
+        return "/".to_string();
+    }
+    // Bileşik anahtar formatı (içinde '|' olan)
+    if let Some(pipe_idx) = u.rfind('|') {
+        let after_pipe = &u[pipe_idx + 1..];
+        let path_part = after_pipe.split('?').next().unwrap_or("/");
+        return if path_part.starts_with('/') {
+            path_part.to_string()
+        } else {
+            format!("/{path_part}")
+        };
+    }
+    // HTTP/HTTPS tam URL
+    if let Some(scheme_end) = u.find("://") {
+        let rest = &u[scheme_end + 3..];
+        if let Some(slash_idx) = rest.find('/') {
+            let path_query = &rest[slash_idx..];
+            let path_part = path_query.split('?').next().unwrap_or("/");
+            return path_part.to_string();
+        }
+        return "/".to_string();
+    }
+    // Normal yol (query içerebilir)
+    let path_part = u.split('?').next().unwrap_or("/");
+    if path_part.starts_with('/') {
+        path_part.to_string()
+    } else {
+        format!("/{path_part}")
+    }
+}
+
+/// Verilen önbellek anahtarının belirtilen yol veya URI ile eşleşip eşleşmediğini doğrular.
+pub fn key_matches_uri(key: &str, target_path: &str) -> bool {
+    let clean_target = if target_path.starts_with('/') {
+        target_path
+    } else {
+        target_path
+    };
+    if key == target_path || key == clean_target {
+        return true;
+    }
+    // Bileşik anahtar ayrıştırması
+    if let Some(last_pipe) = key.rfind('|') {
+        let path_query = &key[last_pipe + 1..];
+        let key_path = path_query.split('?').next().unwrap_or("");
+        if key_path == clean_target {
+            return true;
+        }
+        if clean_target.starts_with('/') && key_path == &clean_target[1..] {
+            return true;
+        }
+        if !clean_target.starts_with('/') && key_path.starts_with('/') && &key_path[1..] == clean_target {
+            return true;
+        }
+    }
+    false
+}
+
 /// LiteSpeed (`X-LiteSpeed-Cache-Control`, `X-LiteSpeed-Tag`, `X-LiteSpeed-Purge`, `X-LiteSpeed-Vary`)
 /// HTTP yanıt başlıklarından ayrıştırılan önbellek yönergeleri.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -475,6 +543,124 @@ impl DiskCache {
         }
         purged_keys
     }
+
+    /// Verilen alan adına ait tüm önbellek dosyalarını temizler ve anahtarlarını döner.
+    pub async fn purge_by_domain_match(&self, domain: &str) -> Vec<String> {
+        let mut purged_keys = Vec::new();
+        let Ok(mut rd) = tokio::fs::read_dir(&self.dir).await else {
+            return purged_keys;
+        };
+        let d = domain.trim().to_ascii_lowercase();
+        let needle_http = format!("http://{d}|");
+        let needle_https = format!("https://{d}|");
+        let tag_domain_scoped = format!("domain::{d}");
+        let tag_domain_colon = format!("domain:{d}");
+        let tag_wildcard = format!("{d}::*");
+
+        while let Ok(Some(dir_entry)) = rd.next_entry().await {
+            let path = dir_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("zcache") {
+                continue;
+            }
+            let Ok(raw) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            if let Some((key, entry)) = decode_disk_entry(&raw) {
+                let matches_domain = key.starts_with(&needle_http)
+                    || key.starts_with(&needle_https)
+                    || entry.response.tags.iter().any(|t| {
+                        t == &d
+                            || t == &tag_domain_scoped
+                            || t == &tag_domain_colon
+                            || t == &tag_wildcard
+                    });
+                if matches_domain && tokio::fs::remove_file(&path).await.is_ok() {
+                    purged_keys.push(key);
+                }
+            } else {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+        purged_keys
+    }
+
+    /// Verilen URI / yol ile eşleşen tüm önbellek dosyalarını temizler ve anahtarlarını döner.
+    pub async fn purge_by_uri_match(&self, target_path: &str) -> Vec<String> {
+        let mut purged_keys = Vec::new();
+        let Ok(mut rd) = tokio::fs::read_dir(&self.dir).await else {
+            return purged_keys;
+        };
+        let uri_tag = format!("__uri:{target_path}");
+        let path_tag = format!("__path:{target_path}");
+
+        while let Ok(Some(dir_entry)) = rd.next_entry().await {
+            let path = dir_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("zcache") {
+                continue;
+            }
+            let Ok(raw) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            if let Some((key, entry)) = decode_disk_entry(&raw) {
+                let matches_uri = key_matches_uri(&key, target_path)
+                    || entry
+                        .response
+                        .tags
+                        .iter()
+                        .any(|t| t == &uri_tag || t == &path_tag);
+                if matches_uri && tokio::fs::remove_file(&path).await.is_ok() {
+                    purged_keys.push(key);
+                }
+            } else {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+        purged_keys
+    }
+
+    /// Hem alan adı hem URI yolu eşleşen önbellek dosyalarını temizler.
+    pub async fn purge_by_domain_and_uri_match(
+        &self,
+        domain: &str,
+        target_path: &str,
+    ) -> Vec<String> {
+        let mut purged_keys = Vec::new();
+        let Ok(mut rd) = tokio::fs::read_dir(&self.dir).await else {
+            return purged_keys;
+        };
+        let d = domain.trim().to_ascii_lowercase();
+        let needle_http = format!("http://{d}|");
+        let needle_https = format!("https://{d}|");
+        let tag_domain_scoped = format!("domain::{d}");
+        let tag_wildcard = format!("{d}::*");
+        let uri_tag = format!("__uri:{target_path}");
+
+        while let Ok(Some(dir_entry)) = rd.next_entry().await {
+            let path = dir_entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("zcache") {
+                continue;
+            }
+            let Ok(raw) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            if let Some((key, entry)) = decode_disk_entry(&raw) {
+                let matches_domain = key.starts_with(&needle_http)
+                    || key.starts_with(&needle_https)
+                    || entry.response.tags.iter().any(|t| {
+                        t == &d || t == &tag_domain_scoped || t == &tag_wildcard
+                    });
+                let matches_uri = key_matches_uri(&key, target_path)
+                    || entry.response.tags.iter().any(|t| t == &uri_tag);
+
+                if matches_domain && matches_uri && tokio::fs::remove_file(&path).await.is_ok() {
+                    purged_keys.push(key);
+                }
+            } else {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+        purged_keys
+    }
 }
 
 pub struct ZMaxCache {
@@ -774,19 +960,187 @@ impl ZMaxCache {
         self.purge_by_tag_keys(tag).await.len()
     }
 
+    /// Belirli bir alan adına ait tüm önbellek girdilerini temizler (L1 ve L2).
+    /// Hem `domain::<alan>`, `<alan>`, `<alan>::*` etiketlerini hem de bileşik anahtarlardaki alan adını eşleştirir.
+    pub async fn purge_by_domain(&self, domain: &str) -> usize {
+        let d = domain.trim().to_ascii_lowercase();
+        if d.is_empty() {
+            return 0;
+        }
+        let mut purged_keys: HashSet<String> = HashSet::new();
+
+        // 1. Olası tüm etiket formatlarını temizle
+        let candidate_tags = [
+            Self::format_domain_tag(&d, "*"),
+            format!("domain::{d}"),
+            format!("domain:{d}"),
+            d.clone(),
+        ];
+        for tag in &candidate_tags {
+            purged_keys.extend(self.purge_by_tag_keys(tag).await);
+        }
+
+        // 2. L1 anahtar listesinde (key_tags) domain bileşeni içerenleri temizle
+        let domain_needle_http = format!("http://{d}|");
+        let domain_needle_https = format!("https://{d}|");
+        let matching_l1_keys: Vec<String> = self
+            .key_tags
+            .iter()
+            .filter(|entry| {
+                let k = entry.key();
+                k.starts_with(&domain_needle_http) || k.starts_with(&domain_needle_https)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in matching_l1_keys {
+            self.cache.invalidate(&key).await;
+            self.unregister_key_tags(&key);
+            if let Some(disk) = &self.disk {
+                disk.purge(&key).await;
+            }
+            purged_keys.insert(key);
+        }
+
+        // 3. L2 disk önbelleğinde domaine ait dosyaları temizle
+        if let Some(disk) = &self.disk {
+            for key in disk.purge_by_domain_match(&d).await {
+                self.cache.invalidate(&key).await;
+                self.unregister_key_tags(&key);
+                purged_keys.insert(key);
+            }
+        }
+
+        purged_keys.len()
+    }
+
+    /// Ham URI yolu veya anahtar ile önbellek girdilerini temizler (L1 ve L2).
+    /// Tam anahtar eşleşmesini, `__uri:<path>` etiketini ve anahtar içindeki path ayrıştırmasını destekler.
+    pub async fn purge_by_uri(&self, target_uri: &str) -> usize {
+        let uri = target_uri.trim();
+        if uri.is_empty() {
+            return 0;
+        }
+        let mut purged_keys: HashSet<String> = HashSet::new();
+
+        // 1. Doğrudan tam anahtar olarak dene
+        if self.key_tags.contains_key(uri) {
+            self.cache.invalidate(uri).await;
+            self.unregister_key_tags(uri);
+            if let Some(disk) = &self.disk {
+                disk.purge(uri).await;
+            }
+            purged_keys.insert(uri.to_string());
+        }
+
+        // 2. URI'yi temiz path biçimine dönüştür
+        let normalized_path = extract_path_from_uri(uri);
+
+        // 3. Etiket eşleşmesi: __uri:<path> ve __path:<path>
+        let uri_tag = format!("__uri:{normalized_path}");
+        let path_tag = format!("__path:{normalized_path}");
+        purged_keys.extend(self.purge_by_tag_keys(&uri_tag).await);
+        purged_keys.extend(self.purge_by_tag_keys(&path_tag).await);
+
+        // 4. L1 anahtarlarını tara
+        let matching_l1_keys: Vec<String> = self
+            .key_tags
+            .iter()
+            .filter(|entry| key_matches_uri(entry.key(), &normalized_path))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in matching_l1_keys {
+            self.cache.invalidate(&key).await;
+            self.unregister_key_tags(&key);
+            if let Some(disk) = &self.disk {
+                disk.purge(&key).await;
+            }
+            purged_keys.insert(key);
+        }
+
+        // 5. L2 disk önbelleğinde eşleşenleri temizle
+        if let Some(disk) = &self.disk {
+            for key in disk.purge_by_uri_match(&normalized_path).await {
+                self.cache.invalidate(&key).await;
+                self.unregister_key_tags(&key);
+                purged_keys.insert(key);
+            }
+        }
+
+        purged_keys.len()
+    }
+
+    /// Belirli bir alan adı ve URI yolu ile eşleşen önbellek girdilerini temizler (L1 ve L2).
+    pub async fn purge_by_domain_uri(&self, domain: &str, target_uri: &str) -> usize {
+        let d = domain.trim().to_ascii_lowercase();
+        let uri = target_uri.trim();
+        if d.is_empty() {
+            return self.purge_by_uri(uri).await;
+        }
+        if uri.is_empty() {
+            return self.purge_by_domain(&d).await;
+        }
+        let normalized_path = extract_path_from_uri(uri);
+        let mut purged_keys: HashSet<String> = HashSet::new();
+
+        let domain_needle_http = format!("http://{d}|");
+        let domain_needle_https = format!("https://{d}|");
+
+        // L1 eşleşmeleri
+        let matching_l1: Vec<String> = self
+            .key_tags
+            .iter()
+            .filter(|entry| {
+                let k = entry.key();
+                (k.starts_with(&domain_needle_http) || k.starts_with(&domain_needle_https))
+                    && key_matches_uri(k, &normalized_path)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in matching_l1 {
+            self.cache.invalidate(&key).await;
+            self.unregister_key_tags(&key);
+            if let Some(disk) = &self.disk {
+                disk.purge(&key).await;
+            }
+            purged_keys.insert(key);
+        }
+
+        // L2 disk eşleşmeleri
+        if let Some(disk) = &self.disk {
+            for key in disk.purge_by_domain_and_uri_match(&d, &normalized_path).await {
+                self.cache.invalidate(&key).await;
+                self.unregister_key_tags(&key);
+                purged_keys.insert(key);
+            }
+        }
+
+        purged_keys.len()
+    }
+
     /// Belirli bir alan adına (`domain::tag`) ait önbellek girdilerini temizler.
     pub async fn purge_by_domain_tag(&self, domain: &str, tag: &str) -> usize {
         let t = tag.trim();
         if t.is_empty() {
             return 0;
         }
-        if t == "*" && domain.trim().is_empty() {
-            let count = self.key_tags.len().max(self.cache.entry_count() as usize);
-            self.purge_all().await;
-            return count;
+        if t == "*" {
+            if domain.trim().is_empty() {
+                let count = self.key_tags.len().max(self.cache.entry_count() as usize);
+                self.purge_all().await;
+                return count;
+            }
+            return self.purge_by_domain(domain).await;
         }
+        let mut purged_keys: HashSet<String> = HashSet::new();
         let scoped = Self::format_domain_tag(domain, t);
-        self.purge_by_tag(&scoped).await
+        purged_keys.extend(self.purge_by_tag_keys(&scoped).await);
+        if !domain.trim().is_empty() {
+            purged_keys.extend(self.purge_by_tag_keys(t).await);
+        }
+        purged_keys.len()
     }
 
     /// Verilen alan adı için birden çok etiketi tek seferde temizler ve benzersiz silinen kayıt sayısını döner.
@@ -1563,5 +1917,130 @@ mod tests {
         assert_eq!(purged, 2);
         assert!(cache.get(&k1).await.is_none());
         assert!(cache.get(&k2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_purge_by_domain_with_multiple_tag_formats_and_composite_key() {
+        let dir = std::env::temp_dir().join(format!("zmax_domain_purge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = ZMaxCache::with_disk_dir(1024 * 1024, 60, &dir);
+
+        let k1 = build_cache_key("site.test", false, "GET", "/page1", "", None);
+        let k2 = build_cache_key("site.test", true, "GET", "/page2", "", None);
+        let k_other = build_cache_key("other.test", false, "GET", "/page1", "", None);
+
+        // k1: web_engine'in eski tarz tekil domain etiketi
+        cache
+            .set_with_ttl_and_stale(
+                k1.clone(),
+                sample_resp("body1", vec!["site.test"]),
+                120,
+                30,
+            )
+            .await;
+
+        // k2: domain::site.test etiketi
+        cache
+            .set_with_ttl_and_stale(
+                k2.clone(),
+                sample_resp("body2", vec!["domain::site.test"]),
+                120,
+                30,
+            )
+            .await;
+
+        // k_other: başka alan adı
+        cache
+            .set_with_ttl_and_stale(
+                k_other.clone(),
+                sample_resp("other", vec!["other.test"]),
+                120,
+                30,
+            )
+            .await;
+
+        // site.test temizlenmeli, other.test korunmalı
+        let purged = cache.purge_by_domain("site.test").await;
+        assert_eq!(purged, 2);
+        assert!(cache.get(&k1).await.is_none());
+        assert!(cache.get(&k2).await.is_none());
+        assert!(cache.get(&k_other).await.is_some());
+
+        // purge_by_domain_tag("other.test", "*") ile wildcard temizliği de doğrula
+        let purged_other = cache.purge_by_domain_tag("other.test", "*").await;
+        assert_eq!(purged_other, 1);
+        assert!(cache.get(&k_other).await.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_purge_by_raw_uri_matches_composite_cache_key() {
+        let dir = std::env::temp_dir().join(format!("zmax_uri_purge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = ZMaxCache::with_disk_dir(1024 * 1024, 60, &dir);
+
+        let k_index = build_cache_key("shop.test", false, "GET", "/index.html", "", None);
+        let k_about = build_cache_key("shop.test", false, "GET", "/about", "", None);
+
+        cache
+            .set_with_ttl_and_stale(
+                k_index.clone(),
+                sample_resp("index", vec!["shop.test", "__uri:/index.html"]),
+                120,
+                30,
+            )
+            .await;
+
+        cache
+            .set_with_ttl_and_stale(
+                k_about.clone(),
+                sample_resp("about", vec!["shop.test", "__uri:/about"]),
+                120,
+                30,
+            )
+            .await;
+
+        // Ham URI "/index.html" temizlenmeli
+        let purged = cache.purge_by_uri("/index.html").await;
+        assert_eq!(purged, 1);
+        assert!(cache.get(&k_index).await.is_none());
+        assert!(cache.get(&k_about).await.is_some());
+
+        // Ham URI "about" (başında slash olmadan) da temizlenebilmeli
+        let purged_about = cache.purge_by_uri("about").await;
+        assert_eq!(purged_about, 1);
+        assert!(cache.get(&k_about).await.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_purge_by_domain_and_uri() {
+        let dir = std::env::temp_dir().join(format!("zmax_dom_uri_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = ZMaxCache::with_disk_dir(1024 * 1024, 60, &dir);
+
+        let k_d1_p = build_cache_key("dom1.test", false, "GET", "/page", "", None);
+        let k_d1_o = build_cache_key("dom1.test", false, "GET", "/other", "", None);
+        let k_d2_p = build_cache_key("dom2.test", false, "GET", "/page", "", None);
+
+        cache
+            .set_with_ttl_and_stale(k_d1_p.clone(), sample_resp("d1_p", vec!["dom1.test"]), 120, 30)
+            .await;
+        cache
+            .set_with_ttl_and_stale(k_d1_o.clone(), sample_resp("d1_o", vec!["dom1.test"]), 120, 30)
+            .await;
+        cache
+            .set_with_ttl_and_stale(k_d2_p.clone(), sample_resp("d2_p", vec!["dom2.test"]), 120, 30)
+            .await;
+
+        let purged = cache.purge_by_domain_uri("dom1.test", "/page").await;
+        assert_eq!(purged, 1);
+        assert!(cache.get(&k_d1_p).await.is_none());
+        assert!(cache.get(&k_d1_o).await.is_some());
+        assert!(cache.get(&k_d2_p).await.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

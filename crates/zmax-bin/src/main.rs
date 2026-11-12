@@ -578,9 +578,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !unix_api_sock.trim().is_empty() {
         let sock_path = PathBuf::from(unix_api_sock.trim());
         if let Some(parent) = sock_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let _ = std::fs::remove_file(&sock_path);
+        let _ = tokio::fs::remove_file(&sock_path).await;
         if let Ok(unix_listener) = tokio::net::UnixListener::bind(&sock_path) {
             println!("* API Unix Soket: {}", sock_path.display());
             let state_unix = Arc::clone(&state);

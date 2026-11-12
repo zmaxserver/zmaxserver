@@ -1446,7 +1446,7 @@ where
                 return Ok(true);
             }
             (Some(domain), None, None, None) => {
-                let purged = state.cache.purge_by_domain_tag(&domain, "*").await;
+                let purged = state.cache.purge_by_domain(&domain).await;
                 if let Some(redis) = redis_opt {
                     let ev = zmax_redis::ClusterSyncEvent::PurgeDomain {
                         domain: domain.clone(),
@@ -1471,8 +1471,35 @@ where
                 send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
                 return Ok(true);
             }
+            (Some(domain), None, None, Some(target_uri)) => {
+                let purged = state.cache.purge_by_domain_uri(&domain, &target_uri).await;
+                if let Some(redis) = redis_opt {
+                    let d = domain.clone();
+                    let u = target_uri.clone();
+                    tokio::spawn(async move {
+                        let msg = format!("{}:{}", d, u);
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(250),
+                            redis.publish_purge(&msg),
+                        )
+                        .await;
+                    });
+                }
+                let json = serde_json::json!({
+                    "ok": true,
+                    "status": "success",
+                    "scope": "domain_uri",
+                    "domain": domain,
+                    "uri": target_uri,
+                    "purged": purged,
+                    "message": "Secili alan adi ve URI onbellegi temizlendi."
+                })
+                .to_string();
+                send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
+                return Ok(true);
+            }
             (_, _, _, Some(target_uri)) => {
-                state.cache.purge(&target_uri).await;
+                let purged = state.cache.purge_by_uri(&target_uri).await;
                 if let Some(redis) = redis_opt {
                     let msg = target_uri.clone();
                     tokio::spawn(async move {
@@ -1486,9 +1513,11 @@ where
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
-                    "scope": "key",
+                    "scope": "uri",
+                    "uri": target_uri,
                     "key": target_uri,
-                    "message": "Secili onbellek anahtari temizlendi."
+                    "purged": purged,
+                    "message": "Secili onbellek anahtari veya URI temizlendi."
                 })
                 .to_string();
                 send_json_response(socket, 200, "OK", &cors_origin, &json).await?;

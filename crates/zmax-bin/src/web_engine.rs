@@ -86,6 +86,35 @@ pub struct ResolvedVHostContext {
     pub acme_root: Option<PathBuf>,
 }
 
+/// [kart-cache-1] Önbellek etiketlerine alan adı varyantlarını ve ham URI etiketlerini ekler.
+#[inline]
+fn append_domain_and_uri_cache_tags(tags: &mut Vec<String>, domain: &str, req_path: &str) {
+    let clean_domain = domain.trim().to_ascii_lowercase();
+    if !clean_domain.is_empty() {
+        for tag in [
+            clean_domain.clone(),
+            format!("domain::{clean_domain}"),
+            format!("domain:{clean_domain}"),
+            format!("{clean_domain}::*"),
+        ] {
+            if !tags.iter().any(|t| t == &tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    let clean_path = zmax_cache::extract_path_from_uri(req_path);
+    if !clean_path.is_empty() {
+        for tag in [
+            format!("__uri:{clean_path}"),
+            format!("__path:{clean_path}"),
+        ] {
+            if !tags.iter().any(|t| t == &tag) {
+                tags.push(tag);
+            }
+        }
+    }
+}
+
 /// Ana Web Trafiği Yöneticisi (HTTP/1.1 Keep-Alive destekli).
 pub async fn handle_web_connection<S>(
     mut socket: S,
@@ -1615,7 +1644,8 @@ where
     };
 
     if can_use_cache && final_bytes.len() <= cache_max_object_bytes.min(MAX_STATIC_CACHE_BYTES) {
-        let mut tags = vec![vhost_ctx.vhost_name.clone()];
+        let mut tags = Vec::new();
+        append_domain_and_uri_cache_tags(&mut tags, &vhost_ctx.vhost_name, &req.path);
         if vhost_ctx.etag_enabled {
             tags.push(format!("__etag:{}", info.etag));
         }
@@ -1820,7 +1850,8 @@ async fn execute_and_prepare_php(
         && final_body.len() <= cache_max_object_bytes;
 
     if cache_eligible {
-        let mut tags = vec![vhost_ctx.vhost_name.clone()];
+        let mut tags = Vec::new();
+        append_domain_and_uri_cache_tags(&mut tags, &vhost_ctx.vhost_name, &req.path);
         if applied_gzip {
             tags.push("__enc:gzip".to_string());
         }
@@ -2413,7 +2444,8 @@ async fn revalidate_static_cache(
         return;
     }
 
-    let mut tags = vec![vhost_ctx.vhost_name.clone()];
+    let mut tags = Vec::new();
+    append_domain_and_uri_cache_tags(&mut tags, &vhost_ctx.vhost_name, static_path);
     if vhost_ctx.etag_enabled {
         tags.push(format!("__etag:{}", info.etag));
     }
