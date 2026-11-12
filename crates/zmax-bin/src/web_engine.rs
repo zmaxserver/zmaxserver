@@ -255,9 +255,10 @@ where
                         vh.entry.security.allow_ips.clone(),
                         vh.entry.security.deny_ips.clone(),
                     ),
-                    vhost_acl_engine: zmax_security::VhostAcl::new(
-                        vh.entry.effective_acl().allow_ips,
-                        vh.entry.effective_acl().deny_ips,
+                    // [v1-1b] [vhost.security] ve [vhost.acl] kurallari tutarli birlestirilir
+                    vhost_acl_engine: crate::security_pipeline::build_merged_vhost_acl(
+                        &vh.entry.security,
+                        &vh.entry.acl,
                     ),
                     rewrite_enabled: vh.entry.rewrite.enabled && policies.rewrite_enabled,
                     rewrite_try_files: vh.entry.rewrite.try_files,
@@ -370,91 +371,35 @@ where
         String::new()
     };
 
-    // 1. Yasaklı IP, CIDR ACL (allow/deny) & Rate Limit Denetimi
-    if state.ban_manager.is_banned(peer_addr.ip()) || state.ban_manager.is_banned(real_ip) {
-        let err_body = b"403 Forbidden - IP Blocked";
-        write_http_response(
-            socket,
-            403,
-            "Forbidden",
-            &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            err_body,
-            None,
-            is_head,
-            is_https,
-            false,
-            keep_alive_timeout_sec,
-            sec_ref,
-            None,
-        )
-        .await?;
-        record_and_log(
-            state,
-            &real_ip_str,
-            &req.method,
-            &req.path,
-            403,
-            started,
-            Some(&vhost_ctx),
-            err_body.len(),
-            referer_hdr,
-            ua_hdr,
-            "HTTP/1.1",
-            &req_id,
-        )
-        .await;
-        return Ok(false);
-    }
+    // [v1-1b] Ortak Guvenlik Boru Hatti (BanManager, Global/vHost ACL, vHost WAF, WP BruteForce, force_https)
+    let verdict = crate::security_pipeline::evaluate_request_security(
+        &vhost_ctx,
+        real_ip,
+        peer_addr.ip(),
+        &req.method,
+        &req.path,
+        &req.query,
+        &req.host,
+        &req.headers,
+        &req.body,
+        is_https,
+        https_port,
+        &state.ban_manager,
+        &policies.waf.inspector,
+        &state.wp_guard,
+        policies.waf.wp_brute_force_enabled,
+    );
 
-    if (!vhost_ctx.global_acl.is_empty() && !vhost_ctx.global_acl.is_allowed(real_ip))
-        || (!vhost_ctx.vhost_acl.is_empty() && !vhost_ctx.vhost_acl.is_allowed(real_ip))
-    {
-        append_error_log_limit(
-            &state.base_dir,
-            &format!(
-                "[ACL] {} {} {} -> IP Access Denied",
-                real_ip_str, req.method, req.path
-            ),
-            vhost_ctx.max_log_size_bytes,
-        )
-        .await;
-        let err_body = b"403 Forbidden - IP Access Denied";
-        write_http_response(
-            socket,
-            403,
-            "Forbidden",
-            &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            err_body,
-            None,
-            is_head,
-            is_https,
-            false,
-            keep_alive_timeout_sec,
-            sec_ref,
-            None,
-        )
-        .await?;
-        record_and_log(
-            state,
-            &real_ip_str,
-            &req.method,
-            &req.path,
-            403,
-            started,
-            Some(&vhost_ctx),
-            err_body.len(),
-            referer_hdr,
-            ua_hdr,
-            "HTTP/1.1",
-            &req_id,
-        )
-        .await;
-        return Ok(false);
-    }
-
-    {
-        let limiter = state.limiter.read().await;
-        if !limiter.check_allowed(real_ip) {
+    if !matches!(
+        verdict,
+        crate::security_pipeline::SecurityVerdict::Blocked { .. }
+            | crate::security_pipeline::SecurityVerdict::WafBlocked { .. }
+    ) {
+        let rate_allowed = {
+            let limiter = state.limiter.read().await;
+            limiter.check_allowed(real_ip)
+        };
+        if !rate_allowed {
             let err_body = b"Too Many Requests!";
             write_http_response(
                 socket,
@@ -479,7 +424,7 @@ where
                 429,
                 started,
                 Some(&vhost_ctx),
-                err_body.len(),
+                if is_head { 0 } else { err_body.len() },
                 referer_hdr,
                 ua_hdr,
                 "HTTP/1.1",
@@ -490,107 +435,97 @@ where
         }
     }
 
-    // 2. WAF / Alan Adina Ozel WAF Politikasi
-    let vhost_waf_policy = zmax_security::VHostWafPolicy {
-        waf_enabled: vhost_ctx.waf_enabled,
-        exclude_paths: &vhost_ctx.waf_exclude_paths,
-    };
-    if let Err(violation) = policies.waf.inspector.inspect_with_policy(
-        &req.method,
-        &req.path,
-        &req.query,
-        &req.headers,
-        &req.body,
-        &vhost_waf_policy,
-    ) {
-        let err_line = format!(
-            "[WAF] [{}] {} {} {} -> {}",
-            vhost_ctx.vhost_name, real_ip_str, req.method, req.path, violation
-        );
-        append_error_log_limit(&state.base_dir, &err_line, vhost_ctx.max_log_size_bytes).await;
-        let written_bytes = write_error_response(
-            socket,
-            403,
-            "Forbidden",
-            b"403 Forbidden - WAF Blocked",
-            Some(&vhost_ctx),
-            is_head,
-            is_https,
-            false,
-            keep_alive_timeout_sec,
-            sec_ref,
-        )
-        .await?;
-        record_and_log(
-            state,
-            &real_ip_str,
-            &req.method,
-            &req.path,
-            403,
-            started,
-            Some(&vhost_ctx),
-            written_bytes,
-            referer_hdr,
-            ua_hdr,
-            "HTTP/1.1",
-            &req_id,
-        )
-        .await;
-        return Ok(false);
-    }
-
-    // 3. WordPress Brute-Force Koruması (/wp-login.php, /xmlrpc.php)
-    if policies.waf.wp_brute_force_enabled
-        && !state
-            .wp_guard
-            .check_and_ban(real_ip, &req.method, &req.path, &state.ban_manager)
-    {
-        if let Some(redis) = redis_client {
-            let ip_s = real_ip_str.clone();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_millis(200), redis.ban_ip(&ip_s, 900))
-                    .await;
-            });
+    match verdict {
+        crate::security_pipeline::SecurityVerdict::Blocked { reason } => {
+            if reason.contains("IP Access Denied") {
+                append_error_log_limit(
+                    &state.base_dir,
+                    &format!(
+                        "[ACL] {} {} {} -> IP Access Denied",
+                        real_ip_str, req.method, req.path
+                    ),
+                    vhost_ctx.max_log_size_bytes,
+                )
+                .await;
+            } else if reason.contains("Brute Force") {
+                if let Some(redis) = redis_client {
+                    let ip_s = real_ip_str.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(200),
+                            redis.ban_ip(&ip_s, 900),
+                        )
+                        .await;
+                    });
+                }
+            }
+            let written_bytes = write_error_response(
+                socket,
+                403,
+                "Forbidden",
+                reason.as_bytes(),
+                Some(&vhost_ctx),
+                is_head,
+                is_https,
+                false,
+                keep_alive_timeout_sec,
+                sec_ref,
+            )
+            .await?;
+            record_and_log(
+                state,
+                &real_ip_str,
+                &req.method,
+                &req.path,
+                403,
+                started,
+                Some(&vhost_ctx),
+                written_bytes,
+                referer_hdr,
+                ua_hdr,
+                "HTTP/1.1",
+                &req_id,
+            )
+            .await;
+            return Ok(false);
         }
-        let err_body = b"403 Forbidden - Brute Force Protection";
-        write_http_response(
-            socket,
-            403,
-            "Forbidden",
-            &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            err_body,
-            None,
-            is_head,
-            is_https,
-            false,
-            keep_alive_timeout_sec,
-            sec_ref,
-            None,
-        )
-        .await?;
-        record_and_log(
-            state,
-            &real_ip_str,
-            &req.method,
-            &req.path,
-            403,
-            started,
-            Some(&vhost_ctx),
-            err_body.len(),
-            referer_hdr,
-            ua_hdr,
-            "HTTP/1.1",
-            &req_id,
-        )
-        .await;
-        return Ok(false);
-    }
-
-    // 4. force_https: HTTP isteğini HTTPS'e yönlendir (ACME HTTP-01 muaf)
-    if !is_https && vhost_ctx.force_https && !is_acme_challenge(&req.path) {
-        if let Some(location) =
-            https_redirect_location(&req.host, &req.path, &req.query, https_port)
-        {
+        crate::security_pipeline::SecurityVerdict::WafBlocked { violation } => {
+            let err_line = format!(
+                "[WAF] [{}] {} {} {} -> {}",
+                vhost_ctx.vhost_name, real_ip_str, req.method, req.path, violation
+            );
+            append_error_log_limit(&state.base_dir, &err_line, vhost_ctx.max_log_size_bytes).await;
+            let written_bytes = write_error_response(
+                socket,
+                403,
+                "Forbidden",
+                b"403 Forbidden - WAF Blocked",
+                Some(&vhost_ctx),
+                is_head,
+                is_https,
+                false,
+                keep_alive_timeout_sec,
+                sec_ref,
+            )
+            .await?;
+            record_and_log(
+                state,
+                &real_ip_str,
+                &req.method,
+                &req.path,
+                403,
+                started,
+                Some(&vhost_ctx),
+                written_bytes,
+                referer_hdr,
+                ua_hdr,
+                "HTTP/1.1",
+                &req_id,
+            )
+            .await;
+            return Ok(false);
+        }
+        crate::security_pipeline::SecurityVerdict::RedirectHttps { location } => {
             write_http_response(
                 socket,
                 301,
@@ -623,6 +558,7 @@ where
             .await;
             return Ok(keep_alive);
         }
+        crate::security_pipeline::SecurityVerdict::Allowed => {}
     }
 
     // 5. Ters Proxy & WebSocket Yönlendirmesi (zmax-proxy + UpstreamSocketPool)
@@ -3078,9 +3014,10 @@ pub async fn handle_h2_dispatched_request(
                     vh.entry.security.allow_ips.clone(),
                     vh.entry.security.deny_ips.clone(),
                 ),
-                vhost_acl_engine: zmax_security::VhostAcl::new(
-                    vh.entry.effective_acl().allow_ips,
-                    vh.entry.effective_acl().deny_ips,
+                // [v1-1b] [vhost.security] ve [vhost.acl] kurallari tutarli birlestirilir
+                vhost_acl_engine: crate::security_pipeline::build_merged_vhost_acl(
+                    &vh.entry.security,
+                    &vh.entry.acl,
                 ),
                 rewrite_enabled: vh.entry.rewrite.enabled && policies.rewrite_enabled,
                 rewrite_try_files: vh.entry.rewrite.try_files,
