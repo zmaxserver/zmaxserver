@@ -156,6 +156,7 @@ pub struct RouteRequest<'a> {
     pub index_files: &'a [String],
     pub php_enabled: bool,
     pub try_files_enabled: bool,
+    pub autoindex: bool,
 }
 
 impl<'a> RouteRequest<'a> {
@@ -174,6 +175,7 @@ impl<'a> RouteRequest<'a> {
             index_files: &[],
             php_enabled: true,
             try_files_enabled: true,
+            autoindex: false,
         }
     }
 }
@@ -522,6 +524,100 @@ fn resolve_filesystem_target(
     None
 }
 
+// [ols-b5] İndeks dosyası içermeyen fiziksel dizin olup olmadığını güvenli kontrol eder (.well-known hariç).
+fn is_existing_dir_without_index(
+    canonical_root: &Path,
+    doc_root: &Path,
+    clean_path: &str,
+    index_files: &[&str],
+) -> bool {
+    let rel = clean_path.trim_matches('/');
+    if rel == ".well-known" || rel.starts_with(".well-known/") {
+        return false;
+    }
+    let target = if rel.is_empty() {
+        canonical_root.to_path_buf()
+    } else {
+        doc_root.join(rel)
+    };
+    let Ok(canon_target) = std::fs::canonicalize(&target) else {
+        return false;
+    };
+    if !canon_target.starts_with(canonical_root) || !canon_target.is_dir() {
+        return false;
+    }
+
+    for idx in index_files {
+        if !is_safe_index_entry(idx) {
+            continue;
+        }
+        let cand = canon_target.join(idx);
+        if let Ok(canon_cand) = std::fs::canonicalize(&cand) {
+            if canon_cand.starts_with(&canon_target) && canon_cand.is_file() {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// [ols-b5] OLS B5 Denkliği ve WordPress güvenlik standardı:
+/// Hassas dosyalar (.env, wp-config, xmlrpc, readme, license), gizli dizinler (.git) ve tehlikeli uzantılar.
+pub fn is_protected_or_dangerous_path(raw_path: &str) -> bool {
+    if raw_path == "/.well-known"
+        || raw_path.starts_with("/.well-known/")
+        || raw_path.starts_with(".well-known/")
+    {
+        return false;
+    }
+
+    let clean = raw_path.split('?').next().unwrap_or(raw_path);
+    let trimmed = clean.trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // 1. Dizin segmentleri kontrolü
+    for seg in trimmed.split('/') {
+        if seg.is_empty() {
+            continue;
+        }
+        let seg_lower = seg.to_ascii_lowercase();
+        if seg_lower == ".git" || seg_lower.starts_with(".git/") || seg_lower == ".gitignore" {
+            return true;
+        }
+        if seg_lower == ".env" || seg_lower.starts_with(".env.") {
+            return true;
+        }
+        if seg_lower.starts_with(".ht") {
+            return true;
+        }
+    }
+
+    // 2. Dosya adı ve uzantı kontrolleri
+    let filename = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let filename_lower = filename.to_ascii_lowercase();
+
+    if filename_lower == "wp-config.php"
+        || filename_lower == "xmlrpc.php"
+        || filename_lower == "readme.html"
+        || filename_lower == "license.txt"
+        || filename_lower == "licence.txt"
+    {
+        return true;
+    }
+
+    if let Some((_, ext)) = filename_lower.rsplit_once('.') {
+        match ext {
+            "sql" | "bak" | "log" | "sh" | "swp" => return true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
 fn merge_env_vars(dst: &mut Vec<(String, String)>, src: Vec<(String, String)>) {
     for (k, v) in src {
         if !dst.iter().any(|(ek, _)| *ek == k) {
@@ -607,6 +703,15 @@ fn resolve_chain_with_info(
         headers: req.headers,
     };
 
+    // [ols-b5] Doğrudan korunan hassas dosya ve tehlikeli uzantı kontrolü (.env, .git, wp-config, .(sql|bak|log|sh|swp))
+    if is_protected_or_dangerous_path(decoded_path) {
+        return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+            collected_env,
+            disable_indexes,
+            error_documents,
+        );
+    }
+
     // <FilesMatch> ve <Files> kuralları (RewriteEngine Off olsa dahi hiyerarşik uygulanır)
     let filename = decoded_path.rsplit('/').next().unwrap_or("");
     if !filename.is_empty() {
@@ -621,6 +726,16 @@ fn resolve_chain_with_info(
                 }
             }
         }
+    }
+
+    // [ols-b5] İndeks dosyası içermeyen fiziksel dizin koruması (autoindex off / Options -Indexes -> 403 Forbidden)
+    let is_autoindex_off = disable_indexes.unwrap_or(!req.autoindex);
+    if is_autoindex_off && is_existing_dir_without_index(canonical_root, req.doc_root, decoded_path, &custom_indexes) {
+        return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+            collected_env,
+            disable_indexes,
+            error_documents,
+        );
     }
 
     // 2. En derin alt dizinden köke doğru `.htaccess` kurallarını değerlendir (alt dizin baskınlığı)
@@ -688,6 +803,18 @@ fn resolve_chain_with_info(
         req.php_enabled,
     ) {
         return found.with_metadata(collected_env, disable_indexes, error_documents);
+    }
+
+    // [ols-b5] İndeks dosyası içermeyen fiziksel dizin koruması (autoindex off / Options -Indexes -> 403 Forbidden)
+    if is_existing_dir_without_index(canonical_root, req.doc_root, decoded_path, &custom_indexes) {
+        let is_autoindex_off = disable_indexes.unwrap_or(!req.autoindex);
+        if is_autoindex_off {
+            return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                collected_env,
+                disable_indexes,
+                error_documents,
+            );
+        }
     }
 
     // 4. try_files fallback (/index.php)

@@ -91,6 +91,7 @@ pub struct ResolvedVHostContext {
     pub acme_root: Option<PathBuf>,
     // [kart-8] FastCGI bağlantı zaman aşımı (milisaniye)
     pub php_dial_timeout_ms: u64,
+    pub autoindex: bool,
 }
 
 /// [kart-cache-1] Önbellek etiketlerine alan adı varyantlarını ve ham URI etiketlerini ekler.
@@ -343,6 +344,7 @@ where
                         vh.entry.php.dial_timeout_ms,
                         policies.fastcgi.dial_timeout_ms,
                     ),
+                    autoindex: vh.entry.static_files.autoindex,
                 }
             }
             None => ResolvedVHostContext {
@@ -399,6 +401,7 @@ where
                     None,
                     policies.fastcgi.dial_timeout_ms,
                 ),
+                autoindex: policies.static_policy.directory_browsing,
             },
         };
         (policies, redis_client, ctx)
@@ -712,6 +715,7 @@ where
         index_files: &vhost_ctx.index_files,
         php_enabled: vhost_ctx.php_enabled,
         try_files_enabled: vhost_ctx.rewrite_enabled && vhost_ctx.rewrite_try_files,
+        autoindex: vhost_ctx.autoindex,
     };
 
     let (outcome, path_info) = if is_acme_challenge(&req.path) {
@@ -3839,6 +3843,7 @@ pub async fn handle_h2_dispatched_request(
                     vh.entry.php.dial_timeout_ms,
                     policies.fastcgi.dial_timeout_ms,
                 ),
+                autoindex: vh.entry.static_files.autoindex,
             },
             None => ResolvedVHostContext {
                 doc_root: state.base_dir.join("www").join("html"),
@@ -3886,6 +3891,7 @@ pub async fn handle_h2_dispatched_request(
                     None,
                     policies.fastcgi.dial_timeout_ms,
                 ),
+                autoindex: policies.static_policy.directory_browsing,
             },
         };
         (policies, ctx)
@@ -4052,6 +4058,7 @@ pub async fn handle_h2_dispatched_request(
         index_files: &vhost_ctx.index_files,
         php_enabled: vhost_ctx.php_enabled,
         try_files_enabled: vhost_ctx.rewrite_try_files,
+        autoindex: vhost_ctx.autoindex,
     };
     let (effective_path, is_php_route, eff_query) = if is_acme_challenge(&req.path) {
         (req.path.clone(), false, req.query.clone())
