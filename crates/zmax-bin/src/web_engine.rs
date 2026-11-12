@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use zmax_cache::{
     build_cache_key, parse_lscache_headers, CacheLookup, CachedResponse, StampedeSlot,
 };
