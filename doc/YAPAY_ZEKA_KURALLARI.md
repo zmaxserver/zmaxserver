@@ -1,7 +1,7 @@
 # ZMax Server — Yapay Zeka Çalışma Kuralları
 
 Bu klasörde (`D:\zmaxserver`) kod ya da belge yazan her yapay zeka işe başlamadan bu dosyayı okur ve aynen uygular.
-**Kural sürümü: v7 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, 8c. v6: çakışma önleme, 8c madde 9. v7: gerçek test önce / VM döngüsü, 8d.)
+**Kural sürümü: v8 (2026-11-12).** Bu dosya sık güncellenir. (v5: GitHub çalışma düzeni, 8c. v6: çakışma önleme, 8c madde 9. v7: gerçek test önce / VM döngüsü, 8d. v8: iki test sunucusu, giriş bilgisi yasağı, aşama 1/aşama 2, 8d.)
 **SÜREKLİ KURALA BAK (zorunlu):** Bu dosyayı yalnız işe başlarken değil **çalışırken de** yeniden oku: (a) her yeni görev kartının başında, (b) her ~30 dakikada ya da ~20 araç çağrısında bir, (c) kod yazmaya/silmeye/bağlamaya başlamadan hemen önce, (d) bir testi "geçti" ya da bir özelliği "bitti" demeden önce, (e) uzun bir kesintiden (bağlam sıkıştırma, yeniden başlatma) sonra, (f) `DUZELTMELER.md` yeni karar yazdığında. Her okumada **kural sürümü** satırını bir öncekiyle karşılaştır; değiştiyse dosyanın tamamını baştan oku. Hafızandaki eski kurala güvenme. Raporda "Kural son okunma: <saat>, sürüm v4" yaz.
 **ZORUNLU OKUMA (işe başlamadan, bu sırayla; okumadan kod yazma):**
 1. Bu dosya.
@@ -117,7 +117,11 @@ Bu denetimi atlayan rapor geçersiz sayılır.
 - **Kart önceliği:** (1) VM testinde `KALDI` çıkan kartlar, (2) ONAYLI ama henüz VM'de denenmemiş kartların VM maddeleri, (3) planlı yeni kartlar. VM sonucu gelmeden **yeni büyük kart başlatma** (küçük, bağımsız kartlar serbest).
 - **Kart kararı iki kademeli:** `ONAYLI` = kod + test (denetçi); `VM DOĞRULANDI` = gerçek sunucuda geçti. `OLS_DENKLIK` ZORUNLU satırları ancak `VM DOĞRULANDI` olunca geçilmiş sayılır.
 - **Her kart raporuna ekle:** "VM'de denenecek komutlar" bölümü (3-8 satır: komut, beklenen sonuç). VM oturumu bunları test listesine alır.
-- **Ajanlar VM'ye dokunmaz** (bağlanma, dosya yazma, servis durdurma yasak); VM erişimi yalnız VM oturumundadır. Sırlar (parola/anahtar) hiçbir dosyaya/sohbete yazılmaz.
+- **VM erişimi, iki test sunucusu (sahip kararı):** (a) **yerel test VM'si** → **VM oturumu** (`paketleme-v2`) kullanır; (b) **uzak test sunucusu** (içinde müşteri alan adı YOK; adı/giriş bilgisi sahip tarafından **ZMax'i yazan yapay zekaya doğrudan verilir**, bu açık depoya YAZILMAZ) → o yapay zeka kullanabilir. **Aynı anda her sunucuda tek taraf** çalışır; aynı sunucuyu ikisi birden kullanmaz.
+- **Giriş bilgileri:** parola, anahtar, jeton, sunucu adı/IP'si **hiçbir dosyaya, commit'e, rapora, sohbete veya komut satırı argümanına YAZILMAZ** (depo AÇIK). Raporlarda sunucu "uzak test sunucusu" olarak anılır.
+- **AŞAMA 1 (şimdi, iki sunucuda da):** yalnız ZMax **test portları** (19480/19483/19486); **80/443'e, panele (8026/8036/8047), OpenLiteSpeed'e dokunma yok** (durdurma/yeniden başlatma yok); kalıcı değişiklik yok (test dosyaları kendi dizininde, bitince temizlenir, ZMax test süreci bitince durdurulur); sistem paketi kurma/silme, güvenlik duvarı/yapılandırma değişikliği yok. Test portlarını internete **AÇMA**, testler sunucu içinden `127.0.0.1` ile. Her VM testinde başlangıç/bitiş saati ve çalıştırılan her komut `VM-TEST-<n>.md`'ye yazılır.
+- **AŞAMA 2 (80/443 geçişi, `zmax-gecis.sh`):** YALNIZ `DUZELTMELER.md`'ye denetçi/sahip **"AŞAMA 2 İZNİ"** yazarsa, VM-TEST-1'de aşama 1 maddeleri geçtikten ve **OpenLiteSpeed'e tek komutla geri dönüş önce denenip rapora yazıldıktan** sonra. İzin yoksa yasak.
+- Emin olmadığın komutu çalıştırma, dur ve sor. **Diğer ajanlar VM'ye dokunmaz** (bağlanma, dosya yazma, servis durdurma yasak); yalnız yukarıdaki iki rol.
 - **VM sonucu geldiğinde** `DUZELTMELER.md` kart tablosuna "VM" notu denetçi tarafından yazılır; ajan tabloyu yine yalnız okur.
 
 ## 8b. Köprü: denetçiyle otomatik bildirim (bil ve ona göre yaz)
