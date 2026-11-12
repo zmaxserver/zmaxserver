@@ -848,11 +848,10 @@ pub fn resolve_acme_challenge(
         }
     }
 
-    // 2. Bulunamadıysa ortak kök (açık acme_root -> global_acme_root -> otomatik tespit yedek) altında ara
+    // 2. Bulunamadıysa ortak kök (açık acme_root -> global_acme_root) altında ara
     let fallback_root = acme_root
         .map(|p| p.to_path_buf())
-        .or_else(get_global_acme_root)
-        .or_else(|| auto_detect_acme_root(vhost_docroot));
+        .or_else(get_global_acme_root);
 
     if let Some(common_root) = fallback_root {
         if let Ok(canonical_common) = std::fs::canonicalize(&common_root) {
@@ -880,53 +879,6 @@ pub fn resolve_acme_challenge(
         }
     }
 
-    None
-}
-
-/// vhost belge kökünden veya çalışma alanından ortak ACME kökünü otomatik tespit eder.
-/// Yalnızca çalışma alanı düzeyindeki dizinleri (`common_acme`, `acme`, `conf/zmax.toml`) inceler;
-/// başka vHost dosyalarındaki (`conf/vhosts/*.toml`) özel kökler izole tutulur.
-fn auto_detect_acme_root(vhost_docroot: &Path) -> Option<PathBuf> {
-    let mut curr = vhost_docroot;
-    for _ in 0..4 {
-        if let Some(parent) = curr.parent() {
-            let cand1 = parent.join("common_acme");
-            if cand1.is_dir() {
-                return Some(cand1);
-            }
-            let cand2 = parent.join("acme");
-            if cand2.is_dir() {
-                return Some(cand2);
-            }
-            let conf_file = parent.join("conf").join("zmax.toml");
-            if conf_file.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&conf_file) {
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((key, val)) = trimmed.split_once('=') {
-                            if key.trim() == "acme_root" {
-                                let raw_val = val.split('#').next().unwrap_or("").trim();
-                                let cleaned = raw_val.trim_matches('"').trim_matches('\'').trim();
-                                if !cleaned.is_empty() {
-                                    let p = PathBuf::from(cleaned);
-                                    let resolved = if p.is_absolute() { p } else { parent.join(p) };
-                                    if resolved.is_dir() {
-                                        return Some(resolved);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            curr = parent;
-        } else {
-            break;
-        }
-    }
     None
 }
 
@@ -1317,9 +1269,11 @@ mod tests {
         assert!(handler.resolve("/%2e%2e/zmax_secret.txt").is_none());
         assert!(handler.resolve("/%2e%2e%2fzmax_secret.txt").is_none());
         assert!(handler.resolve("/%2E%2E/zmax_secret.txt").is_none());
-        assert!(handler
-            .resolve("/subdir/%2e%2e/%2e%2e/zmax_secret.txt")
-            .is_none());
+        assert!(
+            handler
+                .resolve("/subdir/%2e%2e/%2e%2e/zmax_secret.txt")
+                .is_none()
+        );
         assert!(handler.resolve("/%252e%252e%252fzmax_secret.txt").is_none());
         assert!(handler.resolve("/dosya.txt%00.png").is_none());
         assert!(handler.resolve("/a%5cb").is_none());
@@ -1349,9 +1303,11 @@ mod tests {
 
         let handler = StaticFileHandler::new(&root);
         assert!(handler.resolve("/.well-known/acme-challenge/tok").is_some());
-        assert!(handler
-            .resolve("/.well-known/acme-challenge/.secret")
-            .is_none());
+        assert!(
+            handler
+                .resolve("/.well-known/acme-challenge/.secret")
+                .is_none()
+        );
         assert!(handler.resolve("/.env").is_none());
         assert!(handler.resolve("/%2eenv").is_none());
         assert!(handler.resolve("/.htaccess").is_none());
@@ -1360,12 +1316,16 @@ mod tests {
         assert!(handler.resolve("/subdir/.htaccess").is_none());
         assert!(handler.resolve("/subdir/%2ehtaccess").is_none());
         assert!(handler.resolve("/.well-known/other").is_none());
-        assert!(handler
-            .resolve("/.well-known/acme-challenge/../../.env")
-            .is_none());
-        assert!(handler
-            .resolve_with_index("/.well-known/acme-challenge/", &["tok".into()])
-            .is_none());
+        assert!(
+            handler
+                .resolve("/.well-known/acme-challenge/../../.env")
+                .is_none()
+        );
+        assert!(
+            handler
+                .resolve_with_index("/.well-known/acme-challenge/", &["tok".into()])
+                .is_none()
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1444,9 +1404,11 @@ mod tests {
             .resolve_with_index("/klasor/stil.css", &indexes)
             .unwrap();
         assert_eq!(css.mime_type, "text/css");
-        assert!(handler
-            .resolve_with_index("/klasor/stil.css/", &indexes)
-            .is_none());
+        assert!(
+            handler
+                .resolve_with_index("/klasor/stil.css/", &indexes)
+                .is_none()
+        );
 
         // Boş dizinde index bulunmaz -> None
         assert!(handler.resolve_with_index("/bos/", &indexes).is_none());
@@ -1951,33 +1913,46 @@ mod tests {
         clear_global_acme_root();
 
         // Test 6: Güvenlik denetimleri (traversal, gizli dosya, geçersiz yollar)
-        assert!(handler
-            .resolve_acme_challenge_with_root(
-                "/.well-known/acme-challenge/../outside.txt",
-                Some(&common_acme),
-            )
-            .is_none());
-        assert!(handler
-            .resolve_acme_challenge_with_root(
-                "/.well-known/acme-challenge/.secret",
-                Some(&common_acme),
-            )
-            .is_none());
-        assert!(handler
-            .resolve_acme_challenge_with_root(
-                "/.well-known/acme-challenge/%2e%2e/outside.txt",
-                Some(&common_acme),
-            )
-            .is_none());
-        assert!(handler
-            .resolve_acme_challenge_with_root("/.well-known/acme-challenge/", Some(&common_acme),)
-            .is_none());
-        assert!(handler
-            .resolve_acme_challenge_with_root(
-                "/.well-known/acme-challenge/non-existent-token",
-                Some(&common_acme),
-            )
-            .is_none());
+        assert!(
+            handler
+                .resolve_acme_challenge_with_root(
+                    "/.well-known/acme-challenge/../outside.txt",
+                    Some(&common_acme),
+                )
+                .is_none()
+        );
+        assert!(
+            handler
+                .resolve_acme_challenge_with_root(
+                    "/.well-known/acme-challenge/.secret",
+                    Some(&common_acme),
+                )
+                .is_none()
+        );
+        assert!(
+            handler
+                .resolve_acme_challenge_with_root(
+                    "/.well-known/acme-challenge/%2e%2e/outside.txt",
+                    Some(&common_acme),
+                )
+                .is_none()
+        );
+        assert!(
+            handler
+                .resolve_acme_challenge_with_root(
+                    "/.well-known/acme-challenge/",
+                    Some(&common_acme),
+                )
+                .is_none()
+        );
+        assert!(
+            handler
+                .resolve_acme_challenge_with_root(
+                    "/.well-known/acme-challenge/non-existent-token",
+                    Some(&common_acme),
+                )
+                .is_none()
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

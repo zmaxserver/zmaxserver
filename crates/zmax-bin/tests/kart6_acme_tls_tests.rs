@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -10,10 +10,32 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zmax_tls::extract_cert_serial_hex;
 
-const HTTP_PORT: u16 = 21060;
-const HTTPS_PORT: u16 = 21061;
-const API_PORT: u16 = 21062;
-const ADMIN_PORT: u16 = 21063;
+#[derive(Clone, Copy, Debug)]
+struct TestPorts {
+    http: u16,
+    https: u16,
+    api: u16,
+    admin: u16,
+}
+
+impl TestPorts {
+    fn pick_unique() -> Self {
+        let mut ports = Vec::with_capacity(4);
+        let mut listeners = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("Rastgele port alinamadi");
+            ports.push(l.local_addr().expect("Adres alinamadi").port());
+            listeners.push(l);
+        }
+        drop(listeners);
+        Self {
+            http: ports[0],
+            https: ports[1],
+            api: ports[2],
+            admin: ports[3],
+        }
+    }
+}
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -392,7 +414,7 @@ fn toml_path(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-fn write_zmax_toml(conf_path: &Path, acme_root_line: &str) -> TestResult<()> {
+fn write_zmax_toml(conf_path: &Path, acme_root_line: &str, ports: TestPorts) -> TestResult<()> {
     let content = format!(
         r#"[server]
 server_name = "ZMax-Kart6-Test"
@@ -405,27 +427,27 @@ force_https_exempt = true
 [listeners.http]
 enabled = true
 address = "127.0.0.1"
-port = {HTTP_PORT}
+port = {}
 backlog = 128
 tcp_nodelay = true
 
 [listeners.https]
 enabled = true
 address = "127.0.0.1"
-port = {HTTPS_PORT}
+port = {}
 ssl = true
 
 [listeners.admin]
 enabled = true
 address = "127.0.0.1"
-port = {ADMIN_PORT}
+port = {}
 document_root = "admin"
 require_token = false
 
 [listeners.api]
 enabled = true
 address = "127.0.0.1"
-port = {API_PORT}
+port = {}
 require_token = false
 
 [cache]
@@ -440,7 +462,8 @@ block_path_traversal = true
 
 [vhosts_dir]
 path = "conf/vhosts"
-"#
+"#,
+        ports.http, ports.https, ports.admin, ports.api
     );
     std::fs::write(conf_path, content)?;
     Ok(())
@@ -540,15 +563,22 @@ async fn kart6_end_to_end_acme_root_precedence_traversal_and_tls_reload() -> Tes
         "RELOADED_GLOBAL_ACME_TOKEN",
     )?;
 
-    // (d) Ilk TLS sertifikasi (cert1)
+    // (d) Ilk TLS sertifikasi (cert1) ve site2 icin TLS sertifikasi
     let cert_path = root.join("certs").join("site1.crt");
     let key_path = root.join("certs").join("site1.key");
     generate_self_signed_cert(&cert_path, &key_path, "site1.test", &["site1.test"])?;
+
+    let cert2_path = root.join("certs").join("site2.crt");
+    let key2_path = root.join("certs").join("site2.key");
+    generate_self_signed_cert(&cert2_path, &key2_path, "site2.test", &["site2.test"])?;
+
+    let ports = TestPorts::pick_unique();
 
     let conf_path = root.join("conf").join("zmax.toml");
     write_zmax_toml(
         &conf_path,
         &format!("acme_root = \"{}\"", toml_path(&global_acme_1)),
+        ports,
     )?;
 
     // vHost 1: Global ACME root kullanir, force_https = true, TLS sertifikali
@@ -572,7 +602,7 @@ force_https = true
         ),
     )?;
 
-    // vHost 2: Kendi [vhost.acme] acme_root tanimli + WAF kapali test (.. traversal 404 kontrolu dahil)
+    // vHost 2: Kendi [vhost.acme] acme_root tanimli + TLS sertifikali + WAF kapali test (.. traversal 404 kontrolu dahil)
     std::fs::write(
         root.join("conf").join("vhosts").join("02-site2.toml"),
         format!(
@@ -580,10 +610,16 @@ force_https = true
 name = "site2.test"
 document_root = "{}"
 
+[vhost.ssl]
+certificate = "{}"
+key = "{}"
+
 [vhost.acme]
 acme_root = "{}"
 "#,
             toml_path(&site2_doc),
+            toml_path(&cert2_path),
+            toml_path(&key2_path),
             toml_path(&vhost2_acme),
         ),
     )?;
@@ -612,14 +648,14 @@ acme_root = "{}"
 
     // --- (a) Global acme_root: docroot'ta yok, ortak kokten 200 OK ve force_https muafiyeti ---
     let redirect_resp =
-        send_http1_request(HTTP_PORT, "GET", "site1.test", "/index.html", b"").await?;
+        send_http1_request(ports.http, "GET", "site1.test", "/index.html", b"").await?;
     assert_eq!(
         redirect_resp.status, 301,
         "Normal HTTP istegi force_https ile 301 almali"
     );
 
     let acme_nested = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site1.test",
         "/.well-known/acme-challenge/tok-global-nested",
@@ -634,7 +670,7 @@ acme_root = "{}"
     assert_eq!(acme_nested.body, "GLOBAL_NESTED_200_OK");
 
     let acme_flat = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site1.test",
         "/.well-known/acme-challenge/tok-global-flat",
@@ -645,7 +681,7 @@ acme_root = "{}"
     assert_eq!(acme_flat.body, "GLOBAL_FLAT_200_OK");
 
     let acme_missing = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site1.test",
         "/.well-known/acme-challenge/olmayan-token",
@@ -656,7 +692,7 @@ acme_root = "{}"
 
     // --- (b) vhost acme_root varsa o once (ve vhost docroot > vhost acme_root) ---
     let site2_shared = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site2.test",
         "/.well-known/acme-challenge/tok-shared",
@@ -667,7 +703,7 @@ acme_root = "{}"
     assert_eq!(site2_shared.body, "FROM_VHOST2_CUSTOM_ACME_ROOT");
 
     let site1_shared = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site1.test",
         "/.well-known/acme-challenge/tok-shared",
@@ -678,7 +714,7 @@ acme_root = "{}"
     assert_eq!(site1_shared.body, "FROM_GLOBAL_ROOT");
 
     let site2_docroot_pref = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site2.test",
         "/.well-known/acme-challenge/tok-docroot-first",
@@ -689,7 +725,7 @@ acme_root = "{}"
     assert_eq!(site2_docroot_pref.body, "FROM_SITE2_DOCROOT");
 
     let site2_isolated = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site2.test",
         "/.well-known/acme-challenge/tok-global-nested",
@@ -701,9 +737,34 @@ acme_root = "{}"
         "Kendi vhost.acme.acme_root tanimli vhost global ACME koke dusmemeli"
     );
 
+    // vHost acme_root icin HTTP/2 (TLS ALPN h2) istek hatti testi
+    let (s2_serial, h2_s2_shared) = tls_handshake_serial_and_optional_h2_get(
+        ports.https,
+        "site2.test",
+        Some("/.well-known/acme-challenge/tok-shared"),
+    )
+    .await?;
+    assert!(!s2_serial.is_empty());
+    let (s2_status, s2_body) = h2_s2_shared.ok_or("vHost acme_root HTTP/2 ACME yaniti eksik")?;
+    assert_eq!(s2_status, 200);
+    assert_eq!(s2_body, "FROM_VHOST2_CUSTOM_ACME_ROOT");
+
+    let (_, h2_s2_isolated) = tls_handshake_serial_and_optional_h2_get(
+        ports.https,
+        "site2.test",
+        Some("/.well-known/acme-challenge/tok-global-nested"),
+    )
+    .await?;
+    let (s2_iso_status, _) =
+        h2_s2_isolated.ok_or("vHost acme_root HTTP/2 izolasyon yaniti eksik")?;
+    assert_eq!(
+        s2_iso_status, 404,
+        "vHost acme_root HTTP/2 uzerinden de global ACME koke sizmamali"
+    );
+
     // --- (c) Ortak kok disina .. -> 404 (WAF kapatilmis vhost uzerinde dogrudan static resolver kaniti) ---
     let traversal_raw = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site3-nowaf.test",
         "/.well-known/acme-challenge/../../secret.txt",
@@ -714,7 +775,7 @@ acme_root = "{}"
     assert!(!traversal_raw.body.contains("DISARI_GIZLI_BILGI"));
 
     let traversal_encoded = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site3-nowaf.test",
         "/.well-known/acme-challenge/%2e%2e/%2e%2e/secret.txt",
@@ -725,7 +786,7 @@ acme_root = "{}"
     assert!(!traversal_encoded.body.contains("DISARI_GIZLI_BILGI"));
 
     let hidden_dotfile = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site3-nowaf.test",
         "/.well-known/acme-challenge/.hidden",
@@ -736,7 +797,7 @@ acme_root = "{}"
 
     // --- (d) Ilk TLS sertifikasini (ve HTTP/2 ACME cozumlemesini) dogrula, yenile, /api/v1/reload cagir ---
     let (serial_before, h2_acme_res) = tls_handshake_serial_and_optional_h2_get(
-        HTTPS_PORT,
+        ports.https,
         "site1.test",
         Some("/.well-known/acme-challenge/tok-global-nested"),
     )
@@ -752,10 +813,11 @@ acme_root = "{}"
     write_zmax_toml(
         &conf_path,
         &format!("acme_root = \"{}\"", toml_path(&global_acme_2)),
+        ports,
     )?;
 
     let reload_resp =
-        send_http1_request(API_PORT, "POST", "127.0.0.1", "/api/v1/reload", b"").await?;
+        send_http1_request(ports.api, "POST", "127.0.0.1", "/api/v1/reload", b"").await?;
     assert_eq!(reload_resp.status, 200);
     assert!(
         reload_resp.body.contains("\"status\":\"reloaded\""),
@@ -765,7 +827,7 @@ acme_root = "{}"
 
     // Reload sonrasi YENI TLS sertifika seri numarasi sunuldugunu kanitla
     let (serial_after, _) =
-        tls_handshake_serial_and_optional_h2_get(HTTPS_PORT, "site1.test", None).await?;
+        tls_handshake_serial_and_optional_h2_get(ports.https, "site1.test", None).await?;
     assert_ne!(
         serial_before, serial_after,
         "POST /api/v1/reload sonrasi yeni sertifika seri no sunulmali"
@@ -773,7 +835,7 @@ acme_root = "{}"
 
     // Reload sonrasi yeni global acme_root guncellenmis olmali
     let reloaded_acme = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site1.test",
         "/.well-known/acme-challenge/tok-reloaded",
@@ -784,13 +846,13 @@ acme_root = "{}"
     assert_eq!(reloaded_acme.body, "RELOADED_GLOBAL_ACME_TOKEN");
 
     // Reload sirasinda acme_root bosaltilirsa clear_global_acme_root cagrilmamali (mevcut kok korunur)
-    write_zmax_toml(&conf_path, "acme_root = \"\"")?;
+    write_zmax_toml(&conf_path, "acme_root = \"\"", ports)?;
     let reload_empty =
-        send_http1_request(API_PORT, "POST", "127.0.0.1", "/api/v1/reload", b"").await?;
+        send_http1_request(ports.api, "POST", "127.0.0.1", "/api/v1/reload", b"").await?;
     assert_eq!(reload_empty.status, 200);
 
     let still_preserved = send_http1_request(
-        HTTP_PORT,
+        ports.http,
         "GET",
         "site1.test",
         "/.well-known/acme-challenge/tok-reloaded",
