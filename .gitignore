@@ -29,3 +29,7 @@
 .env.*
 # test artıkları (kabul betiği)
 /www/vhost-*/
+
+# süreç belgeleri GitHub'a girmez (sahip emri 2026-11-12); yerel kanal D:\zmaxserver\doc
+/doc/
+/bitti.md
