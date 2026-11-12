@@ -21,11 +21,12 @@
 | Kart | Ad | Karar | Tarih |
 |---|---|---|---|
 | 1 | Faz 0 doğrulama + istek hattı entegrasyon testleri | **ONAYLI** (denetçi, 6. denetim) | 2026-11-12 |
-| 2 | Günlükte gerçek bayt, panel/fail2ban uyumu | BEKLİYOR (başlanabilir) | — |
+| 2 | Günlükte gerçek bayt, panel/fail2ban uyumu | **ONAYLI** (denetçi, 1. denetim) — günlük + gerçek bayt **VM DOĞRULANDI** (HTTP/2 ve HTTP/1.1, `VM-TEST-1` madde 14/16) | 2026-11-12 |
 | 4 | `.htaccess` ve yönlendirme | **ONAYLI** (denetçi, 1. denetim; UNIT TESTED düzeyi) | 2026-11-12 |
 | 7 | Go: `RenderZmaxVhost` genişletme (panel) | **ONAYLI** (denetçi, 1. denetim) | 2026-11-12 |
 | 3 | vhost API CRUD (Kart 1 sırasında `api.rs` ön çalışması yapılmıştı; Kart 3'te testle kanıtlandı) | **ONAYLI** (denetçi, 1. denetim; INTEGRATION TESTED in-process) | 2026-11-12 |
-| 5 | Hotlink listesi + IP ACL | **RED (küçük/orta: listeler istek hattına bağlı değil)** | 2026-11-12 |
+| 5 | Hotlink listesi + IP ACL | **RED (orta)** — listeler bağlı değil + **VM bulgusu: hotlink HTTP/2 yolunda YOK** | 2026-11-12 |
+| V1-1 | **HTTP/2 yolu, HTTP/1.1 ile aynı güvenlik denetimlerinden geçsin** (VM-TEST-1 bulgusu, Kart 5 ajanına verildi) | BEKLİYOR (öncelikli) | — |
 | 6, 8–11 | `ADIMLI_GELISTIRME_TAKIP.md` kartları | BEKLİYOR | — |
 
 ---
@@ -211,3 +212,22 @@ Kart 1'in kararı RED (küçük): 2 madde açık. DUZELTMELER.md'deki "ONAYLI" k
 Kart 5 RED (küçük/orta). `main`'e Kart 3/4/7 ve çakışma çözümü girdi; `git fetch origin && git rebase origin/main` ile dalını güncelle (zmax-config/src/lib.rs'te mod satırı çakışması beklenir: iki bloğu da koru). YAP: 1) web_engine.rs'te `is_hotlink_blocked(..., &[], &[], ...)` sabit boş dilimleri yerine vhost'un yapılandırmasından (HotlinkConfig.allowed_referers / extensions; yoksa geriye uyumlu varsayılan) gerçek listeleri geçir; VHostEntry'ye bağlı alanı `vhost_ctx`'e taşı (ortak dosyada yalnız tek satır/alan; yeni mantık kendi dosyanda). 2) VhostAclConfig/acl.rs'i istek hattına bağla ya da mevcut `security.allow_ips/deny_ips` yolunun yeni şemayla aynı olduğunu göster ve sadeleştir; HİÇ kullanılmayan kod bırakma. 3) zmax-bin istek hattından geçen GERÇEK istek testleri ekle (main.rs test modülü): özel izinli referer geçer, listedeki uzantı korunur/listede olmayan uzantı korunmaz, boş referer geçer, CIDR deny 403 / allow istisnası 200. 4) Raporda "hotlink listesi/ACL INTEGRATION TESTED" etiketini yalnız bu testlerle ver; kural v6'yı yeniden oku. Yeni bölümü bitti/KART-5.md'ye ekle.
 ```
 **Bağımlılık notu:** Bu alanlar Kart 3'ün `vhost_json.rs` API tur testine (JSON↔TOML) ve panelin `RenderZmaxVhost`'una (Kart 7b) henüz yansımadı; Kart 5 ONAYLI olunca ayrı küçük iş olarak eklenecek.
+
+
+---
+
+## Kart 2 — 1. denetim (2026-11-12 ~03:50) — KARAR: ONAYLI; günlük/bayt VM DOĞRULANDI
+
+**Bağımsız doğrulananlar:** dal doğru tabandan (`856a2a1`); 4 commit `main` üzerine çakışmasız cherry-pick edildi; `vm-entegre` (main+Kart 5+Kart 2) `cargo test --workspace` **253 geçti / 0 kaldı** (251 + 2 yeni test); rapordaki bayt/yanıt tipi tablosu ve `kart2_real_bytes_all_response_types_and_panel_compatibility` entegrasyon testi var. **Canlı (VM-TEST-1, madde 14 ve 16):** vhost günlüğü `"GET /readme.html HTTP/2.0" 200 9961` (gerçek dosya boyutu 9961 = `Content-Length` = günlük baytı).
+**Notlar:** rapor SHA'sı eski kalmıştı (`fd6eedd`; son `8f467ec`) düzeltildi; rapor v5 okuyor (geçerli v8/EMİR); Kart 2 dalında Kart 4/3 sonrası `main`'e taşınan kod çakışmadı.
+**Açık:** panel ayrıştırıcısıyla (`logs.ParseAccess`) gerçek satırın uyumu VM'de denenmedi (Kart 12 yan yana test).
+
+---
+
+## Kart 5 — VM bulgusu ile GENİŞLETİLMİŞ RED (2026-11-12 ~03:50)
+
+`VM-TEST-1` madde 11 (canlı, HTTPS=HTTP/2): **hotlink koruması HTTP/2 yolunda HİÇ çalışmıyor** (yabancı Referer 403 yerine 200). Koddan doğrulandı: `web_engine.rs` içinde `is_hotlink_blocked` çağrısı YALNIZ HTTP/1.1 statik yolunda (satır ~1004); `handle_h2_dispatched_request` (satır ~2987) `hotlink_protection` alanını bağlama alıyor ama HİÇ kontrol etmiyor. Ayrıca Kart 1'in "HTTP/2'de WAF/rewrite/cache/log uyumu" maddesi hiç kanıtlanmamıştı: HTTP/2 yolunda başka güvenlik denetimleri de (IP ACL, vhost WAF, force_https, rewrite) eksik olabilir.
+**Yapay zekaya (Kart 5 ajanına, mevcut RED talimatına EK, kopyala):**
+```
+Kart 5 RED'ine EK (VM-TEST-1 canlı bulgusu): hotlink HTTP/2 yolunda çalışmıyor. YAP (sırayla): 1) HTTP/1.1 ve HTTP/2 yollarında istek denetimlerinin ORTAK bir fonksiyondan geçmesini sağla (yeni dosya/modül, ortak dosyada yalnız çağrı satırı): hotlink, IP ACL, vhost WAF, force_https. İki yolun hangi denetimleri yaptığını koddan çıkar, FARKLARI raporda tablo yap (denetim | HTTP/1.1 | HTTP/2 | düzeltme). 2) Önceki RED maddeleri (listeler sabit &[] değil vhost'tan; VhostAcl bağla). 3) zmax-bin istek hattından geçen testler: HER denetim için HTTP/1.1 VE HTTP/2 (h2 client) gerçek istek: yabancı Referer 403 / boş Referer 200 / izinli referer 200, deny CIDR 403, WAF 403, force_https 301. 4) EMİR: uzak test sunucusunda (Aşama 1) HTTPS (h2) üzerinden aynı maddeleri `curl --http2` ile dene, VM-TEST-2.md'ye yaz. Bu bölüm bitmeden Kart 5 onaylanmaz.
+```

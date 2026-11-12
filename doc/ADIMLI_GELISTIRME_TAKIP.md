@@ -20,6 +20,7 @@
 | 9 | Basic Auth (`$apr1$`) | v1.0.03 | C3 | R |
 | 10 | Vekil: `X-Forwarded-*`, tamponsuz akış, WebSocket | v1.0.06 | D1–D3 | R |
 | 11 | WAF aç/kapa/istisna + olay günlüğü/sayaç | v1.0.08 | C5 | R (+G) |
+| V1-1 | **HTTP/2 yolu, HTTP/1.1 ile aynı güvenlik denetimlerinden geçsin** (VM-TEST-1 bulgusu) — ÖNCELİKLİ, Kart 5 ile birlikte | v1.0.02 | C1, C2, C5, B9 | R |
 | 12 | OLS denklik kapısı (HTTP/3 dahil) | v1.0.10 | tümü | R+G |
 Sonraki fazlar (kart henüz yok; Faz 2–4 maddeleri): [`YOL_HARITASI.md`](YOL_HARITASI.md) §4.
 
@@ -128,3 +129,11 @@ Sonraki fazlar (kart henüz yok; Faz 2–4 maddeleri): [`YOL_HARITASI.md`](YOL_H
 - **Yapılacak/Kabul:** OLS_DENKLIK §2'deki 7 madde (yan yana test, 5 uygulama, panel işlevleri, protokol, 24 saat/yük altında reload, geri dönüş, araçlar).
 - **YAPILMAYACAK:** kapı geçilmeden 80/443'ü ZMax'e çevirmek.
 - **Kanıt:** her madde için komut+çıktı dosyası.
+
+## Kart V1-1 — HTTP/2 yolu güvenlik denetimleri eşitliği (VM-TEST-1 bulgusu)
+- **Neden:** canlıda (VM-TEST-1) HTTPS/h2 üzerinde hotlink koruması çalışmadı; `handle_h2_dispatched_request` (`web_engine.rs`) `hotlink_protection` alanını okumuyor. Başka denetimler (IP ACL, vhost WAF, force_https, rewrite) için de h2 yolu kanıtsız.
+- **Dokunulacak:** `web_engine.rs` / `h2_engine.rs` (ortak denetim fonksiyonu; mümkünse yeni modül, ortak dosyada yalnız çağrı satırı).
+- **Yapılacak:** iki yolun denetimleri koddan çıkarılıp farklar tablosu (denetim | HTTP/1.1 | HTTP/2 | düzeltme); eksikler ortak fonksiyon üzerinden her iki yola bağlanır; Kart 5 RED maddeleri (listeler `&[]` değil, vhost'tan) birlikte kapanır.
+- **YAPILMAYACAK:** yeni özellik, HTTP/3.
+- **Kabul testi:** her denetim için hem HTTP/1.1 hem h2 gerçek istek: yabancı Referer 403 / boş 200 / izinli 200; deny CIDR 403; WAF 403; force_https 301. Uzak test sunucusunda (Aşama 1) `curl --http2` ile tekrar, `VM-TEST-2.md`.
+- **Kanıt:** komut+çıktı.
