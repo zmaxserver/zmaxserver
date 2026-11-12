@@ -36,13 +36,16 @@ pub fn get_global_acme_root() -> Option<PathBuf> {
     }
     if let Ok(env_root) = std::env::var("ZMAX_ACME_ROOT") {
         let p = PathBuf::from(env_root.trim());
-        if !p.as_os_str().is_empty() {
+        if !p.as_os_str().is_empty() && p.is_dir() {
             return Some(p);
         }
     }
-    let default_var_acme = PathBuf::from("/var/www/acme");
-    if default_var_acme.exists() {
-        return Some(default_var_acme);
+    #[cfg(unix)]
+    {
+        let default_var_acme = PathBuf::from("/var/www/acme");
+        if default_var_acme.is_dir() {
+            return Some(default_var_acme);
+        }
     }
     None
 }
@@ -187,10 +190,7 @@ pub fn percent_decode_path(raw_path: &str) -> Option<String> {
 /// Güvenliyse baştaki `/` temizlenmiş göreceli yolu (kök için `""`) döndürür.
 fn validate_and_decode_relative_path(request_path: &str) -> Option<String> {
     // 1. Decode ÖNCESİ kontroller
-    if request_path.contains('\0')
-        || request_path.contains('\\')
-        || request_path.contains("..")
-    {
+    if request_path.contains('\0') || request_path.contains('\\') || request_path.contains("..") {
         return None;
     }
     let raw_lower = request_path.to_ascii_lowercase();
@@ -211,10 +211,7 @@ fn validate_and_decode_relative_path(request_path: &str) -> Option<String> {
         return None;
     }
     let dec_lower = decoded.to_ascii_lowercase();
-    if dec_lower.contains("%00")
-        || dec_lower.contains("%5c")
-        || dec_lower.contains("%2e%2e")
-    {
+    if dec_lower.contains("%00") || dec_lower.contains("%5c") || dec_lower.contains("%2e%2e") {
         return None;
     }
 
@@ -516,7 +513,11 @@ impl StaticFileHandler {
 
     /// ACME HTTP-01 challenge dosyasını vhost kökünde veya ortak kökte çözümler.
     pub fn resolve_acme_challenge(&self, request_path: &str) -> Option<StaticFileInfo> {
-        resolve_acme_challenge(&self.root_dir, get_global_acme_root().as_deref(), request_path)
+        resolve_acme_challenge(
+            &self.root_dir,
+            get_global_acme_root().as_deref(),
+            request_path,
+        )
     }
 
     /// ACME HTTP-01 challenge dosyasını belirtilen özel acme_root köküyle çözümler.
@@ -655,15 +656,15 @@ impl StaticFileHandler {
         allow_br: bool,
         allow_gzip: bool,
     ) -> Result<SidecarFile, StaticError> {
-        let already_compressed_ext = orig
-            .path
-            .extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|e| {
-                e.eq_ignore_ascii_case("zst")
-                    || e.eq_ignore_ascii_case("br")
-                    || e.eq_ignore_ascii_case("gz")
-            });
+        let already_compressed_ext =
+            orig.path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|e| {
+                    e.eq_ignore_ascii_case("zst")
+                        || e.eq_ignore_ascii_case("br")
+                        || e.eq_ignore_ascii_case("gz")
+                });
 
         if !precompressed || already_compressed_ext {
             return Ok(SidecarFile {
@@ -831,12 +832,13 @@ pub fn resolve_acme_challenge(
             return None;
         }
     }
-    let token_relative = segments[2..].join("/");
+    let clean_rel_path: PathBuf = segments.iter().collect();
+    let token_rel_path: PathBuf = segments[2..].iter().collect();
 
     // 1. Önce vhost docroot/.well-known/acme-challenge/* altında ara
-    if let Ok(canonical_docroot) = std::fs::canonicalize(vhost_docroot) {
-        let target = canonical_docroot.join(&clean_rel);
-        if let Ok(canonical_target) = std::fs::canonicalize(&target) {
+    let target = vhost_docroot.join(&clean_rel_path);
+    if let Ok(canonical_target) = std::fs::canonicalize(&target) {
+        if let Ok(canonical_docroot) = std::fs::canonicalize(vhost_docroot) {
             if canonical_target.starts_with(&canonical_docroot) && canonical_target.is_file() {
                 if let Some(mut info) = StaticFileHandler::build_file_info(canonical_target) {
                     info.mime_type = "text/plain; charset=utf-8";
@@ -846,15 +848,16 @@ pub fn resolve_acme_challenge(
         }
     }
 
-    // 2. Bulunamadıysa ortak kök (acme_root veya global_acme_root) altında ara
+    // 2. Bulunamadıysa ortak kök (açık acme_root -> global_acme_root -> otomatik tespit yedek) altında ara
     let fallback_root = acme_root
         .map(|p| p.to_path_buf())
-        .or_else(get_global_acme_root);
+        .or_else(get_global_acme_root)
+        .or_else(|| auto_detect_acme_root(vhost_docroot));
 
     if let Some(common_root) = fallback_root {
         if let Ok(canonical_common) = std::fs::canonicalize(&common_root) {
             // Aday 1: common_root/.well-known/acme-challenge/<token> (certbot webroot standardı)
-            let candidate1 = canonical_common.join(&clean_rel);
+            let candidate1 = common_root.join(&clean_rel_path);
             if let Ok(canon_cand1) = std::fs::canonicalize(&candidate1) {
                 if canon_cand1.starts_with(&canonical_common) && canon_cand1.is_file() {
                     if let Some(mut info) = StaticFileHandler::build_file_info(canon_cand1) {
@@ -865,7 +868,7 @@ pub fn resolve_acme_challenge(
             }
 
             // Aday 2: common_root/<token> (düz token kökü desteği)
-            let candidate2 = canonical_common.join(&token_relative);
+            let candidate2 = common_root.join(&token_rel_path);
             if let Ok(canon_cand2) = std::fs::canonicalize(&candidate2) {
                 if canon_cand2.starts_with(&canonical_common) && canon_cand2.is_file() {
                     if let Some(mut info) = StaticFileHandler::build_file_info(canon_cand2) {
@@ -877,6 +880,53 @@ pub fn resolve_acme_challenge(
         }
     }
 
+    None
+}
+
+/// vhost belge kökünden veya çalışma alanından ortak ACME kökünü otomatik tespit eder.
+/// Yalnızca çalışma alanı düzeyindeki dizinleri (`common_acme`, `acme`, `conf/zmax.toml`) inceler;
+/// başka vHost dosyalarındaki (`conf/vhosts/*.toml`) özel kökler izole tutulur.
+fn auto_detect_acme_root(vhost_docroot: &Path) -> Option<PathBuf> {
+    let mut curr = vhost_docroot;
+    for _ in 0..4 {
+        if let Some(parent) = curr.parent() {
+            let cand1 = parent.join("common_acme");
+            if cand1.is_dir() {
+                return Some(cand1);
+            }
+            let cand2 = parent.join("acme");
+            if cand2.is_dir() {
+                return Some(cand2);
+            }
+            let conf_file = parent.join("conf").join("zmax.toml");
+            if conf_file.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&conf_file) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with('#') {
+                            continue;
+                        }
+                        if let Some((key, val)) = trimmed.split_once('=') {
+                            if key.trim() == "acme_root" {
+                                let raw_val = val.split('#').next().unwrap_or("").trim();
+                                let cleaned = raw_val.trim_matches('"').trim_matches('\'').trim();
+                                if !cleaned.is_empty() {
+                                    let p = PathBuf::from(cleaned);
+                                    let resolved = if p.is_absolute() { p } else { parent.join(p) };
+                                    if resolved.is_dir() {
+                                        return Some(resolved);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            curr = parent;
+        } else {
+            break;
+        }
+    }
     None
 }
 
@@ -1034,7 +1084,8 @@ fn negotiate_sidecar_candidates(
         0
     };
 
-    let mut ranked: Vec<(u16, u8, &'static str, &'static str, &'static str)> = Vec::with_capacity(3);
+    let mut ranked: Vec<(u16, u8, &'static str, &'static str, &'static str)> =
+        Vec::with_capacity(3);
     if eff_zstd > 0 {
         ranked.push((eff_zstd, 0, ".zst", "zstd", "zst"));
     }
@@ -1071,8 +1122,7 @@ fn encode_uri_segment(input: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(input.len());
     for &b in input.as_bytes() {
-        let is_unreserved =
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+        let is_unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
         if is_unreserved {
             out.push(b as char);
         } else {
@@ -1086,7 +1136,10 @@ fn encode_uri_segment(input: &str) -> String {
 
 /// Dizin içeriğini XSS'e karşı sıkı HTML-escape edilmiş güvenli `autoindex` HTML sayfası
 /// olarak üretir. Gizli `.` ile başlayan girdileri listelemez.
-pub fn render_directory_listing(request_path: &str, dir_path: &Path) -> Result<String, StaticError> {
+pub fn render_directory_listing(
+    request_path: &str,
+    dir_path: &Path,
+) -> Result<String, StaticError> {
     let meta = std::fs::metadata(dir_path)?;
     if !meta.is_dir() {
         return Err(StaticError::NotFound);
@@ -1264,7 +1317,9 @@ mod tests {
         assert!(handler.resolve("/%2e%2e/zmax_secret.txt").is_none());
         assert!(handler.resolve("/%2e%2e%2fzmax_secret.txt").is_none());
         assert!(handler.resolve("/%2E%2E/zmax_secret.txt").is_none());
-        assert!(handler.resolve("/subdir/%2e%2e/%2e%2e/zmax_secret.txt").is_none());
+        assert!(handler
+            .resolve("/subdir/%2e%2e/%2e%2e/zmax_secret.txt")
+            .is_none());
         assert!(handler.resolve("/%252e%252e%252fzmax_secret.txt").is_none());
         assert!(handler.resolve("/dosya.txt%00.png").is_none());
         assert!(handler.resolve("/a%5cb").is_none());
@@ -1294,7 +1349,9 @@ mod tests {
 
         let handler = StaticFileHandler::new(&root);
         assert!(handler.resolve("/.well-known/acme-challenge/tok").is_some());
-        assert!(handler.resolve("/.well-known/acme-challenge/.secret").is_none());
+        assert!(handler
+            .resolve("/.well-known/acme-challenge/.secret")
+            .is_none());
         assert!(handler.resolve("/.env").is_none());
         assert!(handler.resolve("/%2eenv").is_none());
         assert!(handler.resolve("/.htaccess").is_none());
@@ -1303,8 +1360,12 @@ mod tests {
         assert!(handler.resolve("/subdir/.htaccess").is_none());
         assert!(handler.resolve("/subdir/%2ehtaccess").is_none());
         assert!(handler.resolve("/.well-known/other").is_none());
-        assert!(handler.resolve("/.well-known/acme-challenge/../../.env").is_none());
-        assert!(handler.resolve_with_index("/.well-known/acme-challenge/", &["tok".into()]).is_none());
+        assert!(handler
+            .resolve("/.well-known/acme-challenge/../../.env")
+            .is_none());
+        assert!(handler
+            .resolve_with_index("/.well-known/acme-challenge/", &["tok".into()])
+            .is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1379,9 +1440,13 @@ mod tests {
         assert!(d1.path.ends_with("index.html"));
 
         // Gerçek dosya doğrudan çözülür; sonunda '/' varsa reddedilir
-        let css = handler.resolve_with_index("/klasor/stil.css", &indexes).unwrap();
+        let css = handler
+            .resolve_with_index("/klasor/stil.css", &indexes)
+            .unwrap();
         assert_eq!(css.mime_type, "text/css");
-        assert!(handler.resolve_with_index("/klasor/stil.css/", &indexes).is_none());
+        assert!(handler
+            .resolve_with_index("/klasor/stil.css/", &indexes)
+            .is_none());
 
         // Boş dizinde index bulunmaz -> None
         assert!(handler.resolve_with_index("/bos/", &indexes).is_none());
@@ -1412,7 +1477,10 @@ mod tests {
             etag
         ));
         assert!(check_if_none_match(
-            &[("If-None-Match".into(), "\"1-1\", W/\"a5-5f10\", \"2-2\"".into())],
+            &[(
+                "If-None-Match".into(),
+                "\"1-1\", W/\"a5-5f10\", \"2-2\"".into()
+            )],
             etag
         ));
         assert!(check_if_none_match(
@@ -1485,7 +1553,10 @@ mod tests {
         );
         // Geçersiz veya çoklu aralık -> None
         assert_eq!(parse_byte_range("bytes=10-5", 20), ByteRangeResult::None);
-        assert_eq!(parse_byte_range("bytes=0-1, 4-5", 20), ByteRangeResult::None);
+        assert_eq!(
+            parse_byte_range("bytes=0-1, 4-5", 20),
+            ByteRangeResult::None
+        );
         assert_eq!(parse_byte_range("items=0-5", 20), ByteRangeResult::None);
         assert_eq!(parse_byte_range("invalid", 20), ByteRangeResult::None);
     }
@@ -1635,7 +1706,11 @@ mod tests {
         std::fs::write(doc_root.join(".env"), b"DB_PASS=123").unwrap();
 
         // 512 KiB sınırında ve sınırı aşan dosyalar
-        std::fs::write(doc_root.join("exact_limit.html"), vec![b'a'; MAX_ERROR_DOC_BYTES]).unwrap();
+        std::fs::write(
+            doc_root.join("exact_limit.html"),
+            vec![b'a'; MAX_ERROR_DOC_BYTES],
+        )
+        .unwrap();
         std::fs::write(
             doc_root.join("too_big.html"),
             vec![b'b'; MAX_ERROR_DOC_BYTES + 1],
@@ -1645,7 +1720,9 @@ mod tests {
         let handler = StaticFileHandler::new(&doc_root);
 
         assert_eq!(
-            handler.resolve_error_doc_file(&doc_root, None, "404.html").unwrap(),
+            handler
+                .resolve_error_doc_file(&doc_root, None, "404.html")
+                .unwrap(),
             b"<h1>Bulunamadi</h1>"
         );
         assert_eq!(
@@ -1760,8 +1837,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    static GLOBAL_ACME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ClearGlobalAcmeOnDrop;
+    impl Drop for ClearGlobalAcmeOnDrop {
+        fn drop(&mut self) {
+            clear_global_acme_root();
+        }
+    }
+
     #[test]
     fn test_acme_common_root_and_vhost_docroot_resolution() {
+        let _guard = GLOBAL_ACME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = ClearGlobalAcmeOnDrop;
         let base = temp_root("acme_res_test");
         let vhost_docroot = base.join("vhost_docroot");
         let common_acme = base.join("common_acme");
@@ -1778,7 +1868,11 @@ mod tests {
 
         // 2. Sadece ortak kök (.well-known/acme-challenge) altında olan token
         let common_token_content = "common-challenge-token-content-67890";
-        std::fs::write(common_acme_dir.join("common-only-token"), common_token_content).unwrap();
+        std::fs::write(
+            common_acme_dir.join("common-only-token"),
+            common_token_content,
+        )
+        .unwrap();
 
         // 3. Ortak kökün doğrudan altında (düz kök) olan token
         let flat_token_content = "flat-common-token-abcde";
@@ -1795,73 +1889,201 @@ mod tests {
         let handler = StaticFileHandler::new(&vhost_docroot);
 
         // Test 1: vhost docroot'tan okuma
-        let res1 = handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/vhost-only-token",
-            Some(&common_acme),
-        ).expect("vhost-only-token bulunmalı");
+        let res1 = handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/vhost-only-token",
+                Some(&common_acme),
+            )
+            .expect("vhost-only-token bulunmalı");
         assert_eq!(res1.mime_type, "text/plain; charset=utf-8");
         let c1 = std::fs::read_to_string(&res1.path).unwrap();
         assert_eq!(c1, vhost_token_content);
 
         // Test 2: Ortak kökten okuma (.well-known altı)
-        let res2 = handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/common-only-token",
-            Some(&common_acme),
-        ).expect("common-only-token bulunmalı");
+        let res2 = handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/common-only-token",
+                Some(&common_acme),
+            )
+            .expect("common-only-token bulunmalı");
         assert_eq!(res2.mime_type, "text/plain; charset=utf-8");
         let c2 = std::fs::read_to_string(&res2.path).unwrap();
         assert_eq!(c2, common_token_content);
 
         // Test 3: Ortak kökten okuma (düz kök altı)
-        let res3 = handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/flat-only-token",
-            Some(&common_acme),
-        ).expect("flat-only-token bulunmalı");
+        let res3 = handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/flat-only-token",
+                Some(&common_acme),
+            )
+            .expect("flat-only-token bulunmalı");
         assert_eq!(res3.mime_type, "text/plain; charset=utf-8");
         let c3 = std::fs::read_to_string(&res3.path).unwrap();
         assert_eq!(c3, flat_token_content);
 
         // Test 4: Öncelik kontrolü (vhost versiyonu dönmeli)
-        let res4 = handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/both-token",
-            Some(&common_acme),
-        ).expect("both-token bulunmalı");
+        let res4 = handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/both-token",
+                Some(&common_acme),
+            )
+            .expect("both-token bulunmalı");
         let c4 = std::fs::read_to_string(&res4.path).unwrap();
         assert_eq!(c4, "vhost-version");
 
         // Test 5: Global ACME root ile resolve() ve resolve_acme_challenge()
         set_global_acme_root(&common_acme);
-        let res5 = handler.resolve("/.well-known/acme-challenge/common-only-token")
+        let res5 = handler
+            .resolve("/.well-known/acme-challenge/common-only-token")
             .expect("global_acme_root ile resolve() common-only-token bulmalı");
-        assert_eq!(std::fs::read_to_string(&res5.path).unwrap(), common_token_content);
+        assert_eq!(
+            std::fs::read_to_string(&res5.path).unwrap(),
+            common_token_content
+        );
 
-        let res5_direct = handler.resolve_acme_challenge("/.well-known/acme-challenge/common-only-token")
+        let res5_direct = handler
+            .resolve_acme_challenge("/.well-known/acme-challenge/common-only-token")
             .expect("resolve_acme_challenge bulmalı");
-        assert_eq!(std::fs::read_to_string(&res5_direct.path).unwrap(), common_token_content);
+        assert_eq!(
+            std::fs::read_to_string(&res5_direct.path).unwrap(),
+            common_token_content
+        );
         clear_global_acme_root();
 
         // Test 6: Güvenlik denetimleri (traversal, gizli dosya, geçersiz yollar)
-        assert!(handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/../outside.txt",
-            Some(&common_acme),
-        ).is_none());
-        assert!(handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/.secret",
-            Some(&common_acme),
-        ).is_none());
-        assert!(handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/%2e%2e/outside.txt",
-            Some(&common_acme),
-        ).is_none());
-        assert!(handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/",
-            Some(&common_acme),
-        ).is_none());
-        assert!(handler.resolve_acme_challenge_with_root(
-            "/.well-known/acme-challenge/non-existent-token",
-            Some(&common_acme),
-        ).is_none());
+        assert!(handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/../outside.txt",
+                Some(&common_acme),
+            )
+            .is_none());
+        assert!(handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/.secret",
+                Some(&common_acme),
+            )
+            .is_none());
+        assert!(handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/%2e%2e/outside.txt",
+                Some(&common_acme),
+            )
+            .is_none());
+        assert!(handler
+            .resolve_acme_challenge_with_root("/.well-known/acme-challenge/", Some(&common_acme),)
+            .is_none());
+        assert!(handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/non-existent-token",
+                Some(&common_acme),
+            )
+            .is_none());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_acme_root_precedence_and_no_cross_vhost_leak() {
+        let _guard = GLOBAL_ACME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _reset = ClearGlobalAcmeOnDrop;
+
+        let base = temp_root("acme_precedence");
+        let docroot_a = base.join("www").join("site_a");
+        let auto_common = base.join("common_acme");
+        let explicit_global = base.join("explicit_global");
+        let vhost_acme = base.join("vhost_a_acme");
+        let other_vhost_acme = base.join("other_vhost_acme");
+
+        for dir in [
+            &docroot_a,
+            &auto_common,
+            &explicit_global,
+            &vhost_acme,
+            &other_vhost_acme,
+        ] {
+            std::fs::create_dir_all(dir.join(".well-known").join("acme-challenge")).unwrap();
+        }
+        std::fs::create_dir_all(base.join("conf").join("vhosts")).unwrap();
+
+        // Komsu vhost dosyasi: baska vhost'un acme_root ayari auto_detect tarafindan sizdirilmamali
+        std::fs::write(
+            base.join("conf").join("vhosts").join("other.toml"),
+            format!(
+                "[vhost]\nname = \"other.test\"\n[vhost.acme]\nacme_root = \"{}\"\n",
+                other_vhost_acme.display().to_string().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            other_vhost_acme
+                .join(".well-known")
+                .join("acme-challenge")
+                .join("other-only-token"),
+            "OTHER_VHOST_SECRET_TOKEN",
+        )
+        .unwrap();
+
+        std::fs::write(
+            auto_common
+                .join(".well-known")
+                .join("acme-challenge")
+                .join("shared-token"),
+            "AUTO_DETECT_LOSER",
+        )
+        .unwrap();
+        std::fs::write(
+            explicit_global
+                .join(".well-known")
+                .join("acme-challenge")
+                .join("shared-token"),
+            "GLOBAL_ACME_WINNER",
+        )
+        .unwrap();
+        std::fs::write(
+            vhost_acme
+                .join(".well-known")
+                .join("acme-challenge")
+                .join("shared-token"),
+            "VHOST_ACME_WINNER",
+        )
+        .unwrap();
+
+        let handler = StaticFileHandler::new(&docroot_a);
+
+        // 1. Komsu vhost dosyasi uzerinden token sizmamali
+        clear_global_acme_root();
+        assert!(
+            handler
+                .resolve_acme_challenge("/.well-known/acme-challenge/other-only-token")
+                .is_none(),
+            "Baska vhost acme_root degeri otomatik tespit ile diger vhosta sizmamali"
+        );
+
+        // 2. set_global_acme_root() tanimliysa auto_detect common_acme yerine global kullanilmali
+        set_global_acme_root(&explicit_global);
+        let res_global = handler
+            .resolve_acme_challenge("/.well-known/acme-challenge/shared-token")
+            .expect("Global ACME root uzerinden bulunmali");
+        assert_eq!(
+            std::fs::read_to_string(&res_global.path).unwrap(),
+            "GLOBAL_ACME_WINNER"
+        );
+
+        // 3. vhost acme_root tanimliysa global acme_root yerine vhost acme_root kullanilmali
+        let res_vhost = handler
+            .resolve_acme_challenge_with_root(
+                "/.well-known/acme-challenge/shared-token",
+                Some(&vhost_acme),
+            )
+            .expect("vHost ACME root uzerinden bulunmali");
+        assert_eq!(
+            std::fs::read_to_string(&res_vhost.path).unwrap(),
+            "VHOST_ACME_WINNER"
+        );
+
+        clear_global_acme_root();
         let _ = std::fs::remove_dir_all(&base);
     }
 }

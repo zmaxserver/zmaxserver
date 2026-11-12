@@ -5,8 +5,8 @@
 pub use crate::api::ParsedHttpRequest;
 use crate::api::{read_http_request_with_limits, send_http_read_error, ServerState};
 use crate::modules_runtime::{
-    append_access_log_limit, append_error_log_limit,
-    resolve_vhost_security_headers, select_negotiated_image_path,
+    append_access_log_limit, append_error_log_limit, resolve_vhost_security_headers,
+    select_negotiated_image_path,
 };
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -83,6 +83,7 @@ pub struct ResolvedVHostContext {
     pub error_docs: zmax_config::VHostErrorDocsSection,
     pub logging: zmax_config::VHostLoggingSection,
     pub tls_http2: bool,
+    pub acme_root: Option<PathBuf>,
 }
 
 /// Ana Web Trafiği Yöneticisi (HTTP/1.1 Keep-Alive destekli).
@@ -285,6 +286,10 @@ where
                     error_docs: vh.entry.error_docs.clone(),
                     logging: vh.entry.logging.clone(),
                     tls_http2: vh.entry.tls.http2,
+                    acme_root: crate::acme_runtime::resolve_vhost_acme_root(
+                        Some(&vh.entry),
+                        &state.base_dir,
+                    ),
                 }
             }
             None => ResolvedVHostContext {
@@ -334,6 +339,7 @@ where
                 error_docs: zmax_config::VHostErrorDocsSection::default(),
                 logging: zmax_config::VHostLoggingSection::default(),
                 tls_http2: true,
+                acme_root: None,
             },
         };
         (policies, redis_client, ctx)
@@ -669,15 +675,24 @@ where
         try_files_enabled: vhost_ctx.rewrite_enabled && vhost_ctx.rewrite_try_files,
     };
 
-    let htaccess_resolver = if vhost_ctx.rewrite_enabled && vhost_ctx.rewrite_htaccess {
-        HtAccessResolver::from_doc_root(&vhost_ctx.doc_root)
+    let (outcome, path_info) = if is_acme_challenge(&req.path) {
+        (
+            RouteOutcome::StaticFile {
+                path: req.path.clone(),
+                query: req.query.clone(),
+            },
+            String::new(),
+        )
     } else {
-        HtAccessResolver::from_htaccess(None)
+        let htaccess_resolver = if vhost_ctx.rewrite_enabled && vhost_ctx.rewrite_htaccess {
+            HtAccessResolver::from_doc_root(&vhost_ctx.doc_root)
+        } else {
+            HtAccessResolver::from_htaccess(None)
+        };
+        let resolution = RewriteEngine::new()
+            .resolve_with_htaccess_info(&route_req, htaccess_resolver.htaccess());
+        (resolution.outcome, resolution.path_info)
     };
-    let resolution =
-        RewriteEngine::new().resolve_with_htaccess_info(&route_req, htaccess_resolver.htaccess());
-    let path_info = resolution.path_info;
-    let outcome = resolution.outcome;
 
     let wants_gzip = policies.gzip.enabled
         && negotiate_encoding(extract_header(&req.headers, "accept-encoding"))
@@ -1059,7 +1074,8 @@ where
             let can_use_cache = vhost_ctx.cache_enabled
                 && req.method.eq_ignore_ascii_case("GET")
                 && !has_range
-                && !has_if_none_match;
+                && !has_if_none_match
+                && !is_acme_challenge(&static_path);
             let enc_label = format!(
                 "{}{}",
                 if wants_gzip { "gzip" } else { "identity" },
@@ -1231,11 +1247,18 @@ where
             state.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
 
             let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-            let file_info = handler
-                .resolve_with_index(&static_path, &vhost_ctx.index_files)
-                // [kart-6] ACME challenge ve TLS reload
-                .or_else(|| handler.resolve_acme_challenge(&static_path))
-                .or_else(|| resolve_predecoded_static_file(&vhost_ctx.doc_root, &static_path));
+            let file_info = if is_acme_challenge(&static_path) {
+                match vhost_ctx.acme_root.as_deref() {
+                    Some(vhost_root) => {
+                        handler.resolve_acme_challenge_with_root(&static_path, Some(vhost_root))
+                    }
+                    None => handler.resolve_acme_challenge(&static_path),
+                }
+            } else {
+                handler
+                    .resolve_with_index(&static_path, &vhost_ctx.index_files)
+                    .or_else(|| resolve_predecoded_static_file(&vhost_ctx.doc_root, &static_path))
+            };
 
             if let Some(info) = file_info {
                 let (status, static_bytes) = serve_static_file(
@@ -3083,6 +3106,10 @@ pub async fn handle_h2_dispatched_request(
                 error_docs: vh.entry.error_docs.clone(),
                 logging: vh.entry.logging.clone(),
                 tls_http2: vh.entry.tls.http2,
+                acme_root: crate::acme_runtime::resolve_vhost_acme_root(
+                    Some(&vh.entry),
+                    &state.base_dir,
+                ),
             },
             None => ResolvedVHostContext {
                 doc_root: state.base_dir.join("www").join("html"),
@@ -3123,6 +3150,7 @@ pub async fn handle_h2_dispatched_request(
                 error_docs: zmax_config::VHostErrorDocsSection::default(),
                 logging: zmax_config::VHostLoggingSection::default(),
                 tls_http2: true,
+                acme_root: None,
             },
         };
         (policies, ctx)
@@ -3242,57 +3270,61 @@ pub async fn handle_h2_dispatched_request(
         php_enabled: vhost_ctx.php_enabled,
         try_files_enabled: vhost_ctx.rewrite_try_files,
     };
-    let route_res = state.htaccess_resolver.resolve(&route_req);
-    let (effective_path, is_php_route, eff_query) = match route_res {
-        RouteOutcome::Redirect { status, location } => {
-            let headers = vec![
-                ("location".into(), location),
-                ("x-request-id".into(), req_id.to_string()),
-            ];
-            return Ok((status, headers, bytes::Bytes::new(), log_meta));
-        }
-        RouteOutcome::PhpScript { path, query } => (path, true, query),
-        RouteOutcome::StaticFile { path, query } => (path, false, query),
-        RouteOutcome::Forbidden => {
-            let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-            let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
-                handler
-                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
-                    .unwrap_or_else(|_| b"403 Forbidden\n".to_vec())
-            } else {
-                b"403 Forbidden\n".to_vec()
-            };
-            return Ok((
-                403,
-                vec![("content-type".into(), "text/html; charset=utf-8".into())],
-                bytes::Bytes::from(body),
-                log_meta,
-            ));
-        }
-        RouteOutcome::Gone => {
-            let body = b"410 Gone\n".to_vec();
-            return Ok((
-                410,
-                vec![("content-type".into(), "text/plain".into())],
-                bytes::Bytes::from(body),
-                log_meta,
-            ));
-        }
-        RouteOutcome::NotFound => {
-            let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-            let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&404) {
-                handler
-                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
-                    .unwrap_or_else(|_| b"404 Not Found\n".to_vec())
-            } else {
-                b"404 Not Found\n".to_vec()
-            };
-            return Ok((
-                404,
-                vec![("content-type".into(), "text/html; charset=utf-8".into())],
-                bytes::Bytes::from(body),
-                log_meta,
-            ));
+    let (effective_path, is_php_route, eff_query) = if is_acme_challenge(&req.path) {
+        (req.path.clone(), false, req.query.clone())
+    } else {
+        let route_res = state.htaccess_resolver.resolve(&route_req);
+        match route_res {
+            RouteOutcome::Redirect { status, location } => {
+                let headers = vec![
+                    ("location".into(), location),
+                    ("x-request-id".into(), req_id.to_string()),
+                ];
+                return Ok((status, headers, bytes::Bytes::new(), log_meta));
+            }
+            RouteOutcome::PhpScript { path, query } => (path, true, query),
+            RouteOutcome::StaticFile { path, query } => (path, false, query),
+            RouteOutcome::Forbidden => {
+                let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
+                let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
+                    handler
+                        .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                        .unwrap_or_else(|_| b"403 Forbidden\n".to_vec())
+                } else {
+                    b"403 Forbidden\n".to_vec()
+                };
+                return Ok((
+                    403,
+                    vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                    bytes::Bytes::from(body),
+                    log_meta,
+                ));
+            }
+            RouteOutcome::Gone => {
+                let body = b"410 Gone\n".to_vec();
+                return Ok((
+                    410,
+                    vec![("content-type".into(), "text/plain".into())],
+                    bytes::Bytes::from(body),
+                    log_meta,
+                ));
+            }
+            RouteOutcome::NotFound => {
+                let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
+                let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&404) {
+                    handler
+                        .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                        .unwrap_or_else(|_| b"404 Not Found\n".to_vec())
+                } else {
+                    b"404 Not Found\n".to_vec()
+                };
+                return Ok((
+                    404,
+                    vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                    bytes::Bytes::from(body),
+                    log_meta,
+                ));
+            }
         }
     };
 
@@ -3351,7 +3383,18 @@ pub async fn handle_h2_dispatched_request(
 
     // 7. Statik Dosya Sunumu
     let static_handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-    let resolved = static_handler.resolve_with_index(&effective_path, &vhost_ctx.index_files);
+    let resolved = if is_acme_challenge(&effective_path) {
+        match vhost_ctx.acme_root.as_deref() {
+            Some(vhost_root) => {
+                static_handler.resolve_acme_challenge_with_root(&effective_path, Some(vhost_root))
+            }
+            None => static_handler.resolve_acme_challenge(&effective_path),
+        }
+    } else {
+        static_handler
+            .resolve_with_index(&effective_path, &vhost_ctx.index_files)
+            .or_else(|| resolve_predecoded_static_file(&vhost_ctx.doc_root, &effective_path))
+    };
     match resolved {
         Some(info) => {
             // [kart-5] HTTP/2 Hotlink Korumasi Denetimi

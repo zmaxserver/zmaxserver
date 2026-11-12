@@ -2,6 +2,7 @@
 //! Evrensel panel uyumlu (zPanel, cPanel, Plesk, DirectAdmin, CyberPanel, Hestia vb.),
 //! çakışmasız port mimarili, bellek güvenli yüksek hızlı Rust HTTP motoru ve WebAdmin konsolu.
 
+mod acme_runtime;
 mod api;
 mod h2_engine;
 mod logger;
@@ -202,6 +203,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let validation_warnings = config
         .validate_workspace_layout(&base_dir, &vhosts, &modules)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    acme_runtime::apply_global_acme_root(&config, &base_dir);
 
     if cli.check_only {
         for w in &validation_warnings {
@@ -3034,8 +3037,14 @@ mod tests {
             "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: http://saldirgan.com/sayfa\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r1.starts_with("HTTP/1.1 403 Forbidden"), "H1.1 403 olmalı: {r1}");
-        assert!(r1.contains("Hotlink Protection"), "H1.1 hotlink body içermeli: {r1}");
+        assert!(
+            r1.starts_with("HTTP/1.1 403 Forbidden"),
+            "H1.1 403 olmalı: {r1}"
+        );
+        assert!(
+            r1.contains("Hotlink Protection"),
+            "H1.1 hotlink body içermeli: {r1}"
+        );
 
         // 1.2 Boş Referer -> 200 OK (Doğrudan erişim izinli)
         let r2 = run_request(
@@ -3045,7 +3054,10 @@ mod tests {
         )
         .await;
         assert!(r2.starts_with("HTTP/1.1 200 OK"), "H1.2 200 olmalı: {r2}");
-        assert!(r2.ends_with("RESIM_ICERIK_PNG_12345"), "H1.2 içerik eşleşmeli: {r2}");
+        assert!(
+            r2.ends_with("RESIM_ICERIK_PNG_12345"),
+            "H1.2 içerik eşleşmeli: {r2}"
+        );
 
         // 1.3 İzinli Referer -> 200 OK
         let r3 = run_request(
@@ -3083,8 +3095,14 @@ mod tests {
             "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r6.starts_with("HTTP/1.1 403 Forbidden"), "H1.6 403 olmalı: {r6}");
-        assert!(r6.contains("IP Access Denied"), "H1.6 ACL body içermeli: {r6}");
+        assert!(
+            r6.starts_with("HTTP/1.1 403 Forbidden"),
+            "H1.6 403 olmalı: {r6}"
+        );
+        assert!(
+            r6.contains("IP Access Denied"),
+            "H1.6 ACL body içermeli: {r6}"
+        );
 
         // 1.7 WAF SQLi Engeli -> 403 Forbidden (WAF Blocked)
         let r7 = run_request(
@@ -3093,7 +3111,10 @@ mod tests {
             "GET /sayfa.html?q=union+select+1 HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r7.starts_with("HTTP/1.1 403 Forbidden"), "H1.7 403 olmalı: {r7}");
+        assert!(
+            r7.starts_with("HTTP/1.1 403 Forbidden"),
+            "H1.7 403 olmalı: {r7}"
+        );
         assert!(r7.contains("WAF Blocked"), "H1.7 WAF body içermeli: {r7}");
 
         // 1.8 force_https -> 301 Moved Permanently (HTTP isteğinde)
@@ -3103,8 +3124,14 @@ mod tests {
             "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r8.starts_with("HTTP/1.1 301 Moved Permanently"), "H1.8 301 olmalı: {r8}");
-        assert!(r8.contains("Location: https://kart5.test/sayfa.html"), "H1.8 redirect header olmalı: {r8}");
+        assert!(
+            r8.starts_with("HTTP/1.1 301 Moved Permanently"),
+            "H1.8 301 olmalı: {r8}"
+        );
+        assert!(
+            r8.contains("Location: https://kart5.test/sayfa.html"),
+            "H1.8 redirect header olmalı: {r8}"
+        );
 
         // -------------------------------------------------------------
         // KISIM 2: HTTP/2 İstek Hattı Güvenlik Denetimleri (Gerçek h2 Client)
@@ -3114,12 +3141,16 @@ mod tests {
             state: &Arc<ServerState>,
             peer: SocketAddr,
             is_https: bool,
-        ) -> (h2::client::SendRequest<bytes::Bytes>, tokio::task::JoinHandle<()>) {
+        ) -> (
+            h2::client::SendRequest<bytes::Bytes>,
+            tokio::task::JoinHandle<()>,
+        ) {
             let (client_io, server_io) = tokio::io::duplex(256 * 1024);
             let st = Arc::clone(state);
             let port = if is_https { 443 } else { 80 };
             let srv_task = tokio::spawn(async move {
-                let _ = h2_engine::handle_h2_connection(server_io, peer, st, is_https, port, None).await;
+                let _ = h2_engine::handle_h2_connection(server_io, peer, st, is_https, port, None)
+                    .await;
             });
             let (client, h2_conn) = h2::client::handshake(client_io)
                 .await
@@ -3148,7 +3179,11 @@ mod tests {
                 .unwrap();
             let (response, _) = client.send_request(req, true).unwrap();
             let resp = response.await.unwrap();
-            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "H2.1 403 olmalı");
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::FORBIDDEN,
+                "H2.1 403 olmalı"
+            );
             let mut body_stream = resp.into_body();
             let mut body_buf = Vec::new();
             while let Some(chunk) = body_stream.data().await {
@@ -3157,7 +3192,10 @@ mod tests {
                 let _ = body_stream.flow_control().release_capacity(b.len());
             }
             let body_str = String::from_utf8_lossy(&body_buf);
-            assert!(body_str.contains("Hotlink Protection"), "H2.1 hotlink body içermeli: {body_str}");
+            assert!(
+                body_str.contains("Hotlink Protection"),
+                "H2.1 hotlink body içermeli: {body_str}"
+            );
         }
 
         // 2.2 HTTP/2 Boş Referer -> 200 OK
@@ -3238,7 +3276,11 @@ mod tests {
                 .unwrap();
             let (response, _) = client.send_request(req, true).unwrap();
             let resp = response.await.unwrap();
-            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "H2.6 403 olmalı");
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::FORBIDDEN,
+                "H2.6 403 olmalı"
+            );
             let mut body_stream = resp.into_body();
             let mut body_buf = Vec::new();
             while let Some(chunk) = body_stream.data().await {
@@ -3247,7 +3289,10 @@ mod tests {
                 let _ = body_stream.flow_control().release_capacity(b.len());
             }
             let body_str = String::from_utf8_lossy(&body_buf);
-            assert!(body_str.contains("IP Access Denied"), "H2.6 ACL body içermeli: {body_str}");
+            assert!(
+                body_str.contains("IP Access Denied"),
+                "H2.6 ACL body içermeli: {body_str}"
+            );
         }
 
         // 2.7 HTTP/2 WAF SQLi Engeli -> 403 Forbidden (WAF Blocked)
@@ -3261,7 +3306,11 @@ mod tests {
                 .unwrap();
             let (response, _) = client.send_request(req, true).unwrap();
             let resp = response.await.unwrap();
-            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "H2.7 403 olmalı");
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::FORBIDDEN,
+                "H2.7 403 olmalı"
+            );
             let mut body_stream = resp.into_body();
             let mut body_buf = Vec::new();
             while let Some(chunk) = body_stream.data().await {
@@ -3270,7 +3319,10 @@ mod tests {
                 let _ = body_stream.flow_control().release_capacity(b.len());
             }
             let body_str = String::from_utf8_lossy(&body_buf);
-            assert!(body_str.contains("WAF Blocked"), "H2.7 WAF body içermeli: {body_str}");
+            assert!(
+                body_str.contains("WAF Blocked"),
+                "H2.7 WAF body içermeli: {body_str}"
+            );
         }
 
         // 2.8 HTTP/2 force_https -> 301 Moved Permanently (HTTP üzerinden geldiğinde)
@@ -3284,9 +3336,16 @@ mod tests {
                 .unwrap();
             let (response, _) = client.send_request(req, true).unwrap();
             let resp = response.await.unwrap();
-            assert_eq!(resp.status(), http::StatusCode::MOVED_PERMANENTLY, "H2.8 301 olmalı");
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::MOVED_PERMANENTLY,
+                "H2.8 301 olmalı"
+            );
             let loc = resp.headers().get("location").unwrap().to_str().unwrap();
-            assert_eq!(loc, "https://kart5.test/sayfa.html", "H2.8 location başlığı eşleşmeli");
+            assert_eq!(
+                loc, "https://kart5.test/sayfa.html",
+                "H2.8 location başlığı eşleşmeli"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&state.base_dir);

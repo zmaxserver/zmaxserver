@@ -18,7 +18,9 @@ use zmax_config::{
     load_vhosts_dir, resolve_path, serialize_vhost_toml, validate_domain, LoadedModules,
     LoadedVHost, VHostEntry, ZMaxConfig, KNOWN_PANEL_PORTS,
 };
-use zmax_httpparser::{read_http1_request_buffered, HttpReadError, HttpReadLimits, HttpRequestData};
+use zmax_httpparser::{
+    read_http1_request_buffered, HttpReadError, HttpReadLimits, HttpRequestData,
+};
 use zmax_obfuscate::zpoly;
 
 const MAX_IN_MEMORY_LOGS: usize = 200;
@@ -77,7 +79,14 @@ pub struct ServerState {
 
 impl ServerState {
     /// Bellekte tutulan son erişim günlüklerine yeni bir kayıt ekler (en fazla 200 kayıt).
-    pub fn record_access_log(&self, ip: &str, method: &str, path: &str, status: u16, elapsed: Duration) {
+    pub fn record_access_log(
+        &self,
+        ip: &str,
+        method: &str,
+        path: &str,
+        status: u16,
+        elapsed: Duration,
+    ) {
         self.record_access_log_detailed(ip, method, path, status, elapsed, 0, "", "");
     }
 
@@ -317,9 +326,11 @@ where
 {
     let (code, reason, body) = match err {
         HttpReadError::PayloadTooLarge => (413u16, "Payload Too Large", "413 Payload Too Large"),
-        HttpReadError::HeadersTooLarge => {
-            (431u16, "Request Header Fields Too Large", "431 Request Header Fields Too Large")
-        }
+        HttpReadError::HeadersTooLarge => (
+            431u16,
+            "Request Header Fields Too Large",
+            "431 Request Header Fields Too Large",
+        ),
         HttpReadError::Timeout => (408u16, "Request Timeout", "408 Request Timeout"),
         HttpReadError::BadRequest(_) => (400u16, "Bad Request", "400 Bad Request"),
         HttpReadError::Io(_) => return,
@@ -383,7 +394,11 @@ async fn send_response_with_content_type<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let origin = if cors_origin.is_empty() { "*" } else { cors_origin };
+    let origin = if cors_origin.is_empty() {
+        "*"
+    } else {
+        cors_origin
+    };
     let resp = format!(
         "HTTP/1.1 {} {}\r\nServer: {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_code,
@@ -465,7 +480,11 @@ pub async fn reload_runtime_state_with_alpn(
 ) -> Result<(usize, Vec<Vec<u8>>), String> {
     let (conf_path, old_vhosts_dir, modules_dir) = {
         let rt = state.runtime.read().await;
-        (rt.conf_path.clone(), rt.vhosts_dir.clone(), rt.modules_dir.clone())
+        (
+            rt.conf_path.clone(),
+            rt.vhosts_dir.clone(),
+            rt.modules_dir.clone(),
+        )
     };
 
     let new_cfg = ZMaxConfig::load_or_default(&conf_path)?;
@@ -515,6 +534,7 @@ pub async fn reload_runtime_state_with_alpn(
         .update_global_paths(global_access_log, global_error_log)
         .await;
     state.htaccess_resolver.clear_cache();
+    crate::acme_runtime::apply_global_acme_root(&new_cfg, &state.base_dir);
 
     refresh_tls_certs(&state.tls, &loaded_vhosts, &state.base_dir).await;
     refresh_listener_tls_cert(
@@ -598,8 +618,8 @@ async fn write_vhost_atomic_with_rollback(
         None
     };
 
-    let toml_text = serialize_vhost_toml(entry)
-        .map_err(|e| format!("TOML serileştirme hatası: {}", e))?;
+    let toml_text =
+        serialize_vhost_toml(entry).map_err(|e| format!("TOML serileştirme hatası: {}", e))?;
     let content = format!(
         "# ZMax Server API tarafından otomatik yönetilen Sanal Konak ({})\n{}",
         domain, toml_text
@@ -782,7 +802,11 @@ where
 
     // CORS Preflight
     if req.method == "OPTIONS" {
-        let origin = if cors_origin.is_empty() { "*" } else { &cors_origin };
+        let origin = if cors_origin.is_empty() {
+            "*"
+        } else {
+            &cors_origin
+        };
         let resp = format!(
             "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             origin
@@ -811,7 +835,8 @@ where
 
     // Token kontrolü (yapılandırılmışsa veya dinleyici loopback dışındaysa zorunlu)
     if !is_authorized(req, &expected_token, require_token) {
-        let err = r#"{"ok":false,"error":"Yetkisiz erisim: Gecerli Bearer veya X-ZMax-Token gerekli."}"#;
+        let err =
+            r#"{"ok":false,"error":"Yetkisiz erisim: Gecerli Bearer veya X-ZMax-Token gerekli."}"#;
         send_json_response(socket, 401, "Unauthorized", &cors_origin, err).await?;
         return Ok(true);
     }
@@ -1057,8 +1082,8 @@ where
         let kind_q = parse_query_param(&req.query, "kind")
             .map(|s| s.trim().to_ascii_lowercase())
             .filter(|s| !s.is_empty());
-        let lines_q = parse_query_param(&req.query, "lines")
-            .and_then(|s| s.trim().parse::<usize>().ok());
+        let lines_q =
+            parse_query_param(&req.query, "lines").and_then(|s| s.trim().parse::<usize>().ok());
 
         if domain_q.is_some() || kind_q.as_deref() == Some("error") {
             let kind = kind_q.unwrap_or_else(|| "access".to_string());
@@ -1170,7 +1195,9 @@ where
             .access_logs
             .lock()
             .map(|q| {
-                let take_n = lines_q.unwrap_or(MAX_IN_MEMORY_LOGS).min(MAX_IN_MEMORY_LOGS);
+                let take_n = lines_q
+                    .unwrap_or(MAX_IN_MEMORY_LOGS)
+                    .min(MAX_IN_MEMORY_LOGS);
                 q.iter().take(take_n).cloned().collect()
             })
             .unwrap_or_default();
@@ -1202,7 +1229,8 @@ where
     }
 
     // 5b. Log Dosyalarını Yeniden Açma / Logrotate (POST /api/v1/logs/reopen ve /api/logs/reopen)
-    if (req_path == "/api/v1/logs/reopen" || req_path == "/api/logs/reopen") && req.method == "POST" {
+    if (req_path == "/api/v1/logs/reopen" || req_path == "/api/logs/reopen") && req.method == "POST"
+    {
         state.log_manager.reopen_all().await;
         let dropped = state.log_manager.dropped_count();
         let json = serde_json::json!({
@@ -1227,9 +1255,7 @@ where
             cfg.listeners.admin.port,
             cfg.listeners.api.port,
         ];
-        let collision = active_ports
-            .iter()
-            .any(|p| KNOWN_PANEL_PORTS.contains(p));
+        let collision = active_ports.iter().any(|p| KNOWN_PANEL_PORTS.contains(p));
         let json = format!(
             r#"{{"ok":true,"collision_detected":{},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"tls":{{"https":{},"admin":{},"api":{}}},"unix_socket":"{}","known_panel_ports":[{}]}}"#,
             collision,
@@ -1499,7 +1525,8 @@ where
             }
             Err(e) => {
                 let json = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&e));
-                send_json_response(socket, 500, "Internal Server Error", &cors_origin, &json).await?;
+                send_json_response(socket, 500, "Internal Server Error", &cors_origin, &json)
+                    .await?;
             }
         }
         return Ok(true);
@@ -1567,7 +1594,8 @@ where
 
     // 11. Yeni Sanal Konak Oluşturma / Güncelleme (POST /api/v1/vhosts veya PUT /api/v1/vhosts/<domain>)
     if (req_path == "/api/v1/vhosts" && req.method == "POST")
-        || (req_path.starts_with("/api/v1/vhosts/") && (req.method == "PUT" || req.method == "POST"))
+        || (req_path.starts_with("/api/v1/vhosts/")
+            && (req.method == "PUT" || req.method == "POST"))
     {
         let body_str = String::from_utf8_lossy(&req.body);
         let raw_domain = req_path
@@ -1678,7 +1706,8 @@ where
                     r#"{{"ok":false,"error":"Dosya silinemedi: {}"}}"#,
                     json_escape(&e.to_string())
                 );
-                send_json_response(socket, 500, "Internal Server Error", &cors_origin, &err).await?;
+                send_json_response(socket, 500, "Internal Server Error", &cors_origin, &err)
+                    .await?;
                 return Ok(true);
             }
             let count = reload_runtime_state(state).await.unwrap_or(0);
@@ -1705,8 +1734,14 @@ mod tests {
     #[test]
     fn test_json_extractors() {
         let body = r#"{"domain":"site.com","document_root":"www/site","php_enabled":true,"cache_expire":600,"aliases":["www.site.com","m.site.com"]}"#;
-        assert_eq!(extract_json_string(body, "domain").as_deref(), Some("site.com"));
-        assert_eq!(extract_json_string(body, "document_root").as_deref(), Some("www/site"));
+        assert_eq!(
+            extract_json_string(body, "domain").as_deref(),
+            Some("site.com")
+        );
+        assert_eq!(
+            extract_json_string(body, "document_root").as_deref(),
+            Some("www/site")
+        );
         assert_eq!(extract_json_bool(body, "php_enabled"), Some(true));
         assert_eq!(extract_json_u64(body, "cache_expire"), Some(600));
         assert_eq!(
@@ -1819,7 +1854,9 @@ token = "api-secret-token"
                 vhosts_dir: PathBuf::from("conf/vhosts"),
                 modules_dir: PathBuf::from("modules"),
             }),
-            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(PathBuf::from("."))),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(PathBuf::from(
+                ".",
+            ))),
             tls: Arc::new(zmax_tls::SniResolver::new()),
             admin_tls: Arc::new(zmax_tls::SniResolver::new()),
             api_tls: Arc::new(zmax_tls::SniResolver::new()),
@@ -1880,10 +1917,16 @@ token = "api-secret-token"
         let (handled_unauth, resp_unauth) =
             call_route(&state, true, "GET", "/metrics", Vec::new()).await;
         assert!(handled_unauth);
-        assert!(resp_unauth.starts_with("HTTP/1.1 401 Unauthorized"), "{resp_unauth}");
+        assert!(
+            resp_unauth.starts_with("HTTP/1.1 401 Unauthorized"),
+            "{resp_unauth}"
+        );
 
         // Ön ek soyulmuş Prometheus /metrics (API dinleyici)
-        let api_auth = vec![("Authorization".to_string(), "Bearer api-secret-token".to_string())];
+        let api_auth = vec![(
+            "Authorization".to_string(),
+            "Bearer api-secret-token".to_string(),
+        )];
         let (handled_metrics, resp_metrics) = call_route(
             &state,
             true,
@@ -1893,18 +1936,42 @@ token = "api-secret-token"
         )
         .await;
         assert!(handled_metrics);
-        assert!(resp_metrics.starts_with("HTTP/1.1 200 OK"), "{resp_metrics}");
+        assert!(
+            resp_metrics.starts_with("HTTP/1.1 200 OK"),
+            "{resp_metrics}"
+        );
         assert!(
             resp_metrics.contains("Content-Type: text/plain; version=0.0.4; charset=utf-8"),
             "{resp_metrics}"
         );
-        assert!(resp_metrics.contains("zmax_uptime_seconds "), "{resp_metrics}");
-        assert!(resp_metrics.contains("zmax_requests_total 17\n"), "{resp_metrics}");
-        assert!(resp_metrics.contains("zmax_cache_hits_total 11\n"), "{resp_metrics}");
-        assert!(resp_metrics.contains("zmax_cache_misses_total 6\n"), "{resp_metrics}");
-        assert!(resp_metrics.contains("zmax_vhosts_loaded 0\n"), "{resp_metrics}");
-        assert!(resp_metrics.contains("zmax_modules_loaded 0\n"), "{resp_metrics}");
-        assert!(resp_metrics.contains("zmax_banned_ips 1\n"), "{resp_metrics}");
+        assert!(
+            resp_metrics.contains("zmax_uptime_seconds "),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_requests_total 17\n"),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_cache_hits_total 11\n"),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_cache_misses_total 6\n"),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_vhosts_loaded 0\n"),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_modules_loaded 0\n"),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_banned_ips 1\n"),
+            "{resp_metrics}"
+        );
 
         // Panel taraması için /api/v1/metrics (Admin dinleyici + ön ek soyma)
         let adm_auth = vec![("X-ZMax-Token".to_string(), "adm-secret-token".to_string())];
@@ -1961,7 +2028,10 @@ token = "api-secret-token"
         let (handled_api_root, resp_api_root) =
             call_route(&state, true, "GET", "/v1/zmax/api", Vec::new()).await;
         assert!(handled_api_root);
-        assert!(resp_api_root.contains(r#""status":"ok""#), "{resp_api_root}");
+        assert!(
+            resp_api_root.contains(r#""status":"ok""#),
+            "{resp_api_root}"
+        );
     }
 
     #[tokio::test]
@@ -1972,7 +2042,8 @@ token = "api-secret-token"
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let test_dir = std::env::temp_dir().join(format!("zmax_test_crud_{}_{}", std::process::id(), nanos));
+        let test_dir =
+            std::env::temp_dir().join(format!("zmax_test_crud_{}_{}", std::process::id(), nanos));
         let conf_dir = test_dir.join("conf");
         let vhosts_dir = conf_dir.join("vhosts");
         let modules_dir = test_dir.join("modules");
@@ -2018,7 +2089,9 @@ path = "conf/vhosts"
                 vhosts_dir: vhosts_dir.clone(),
                 modules_dir: modules_dir.clone(),
             }),
-            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(test_dir.clone())),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(
+                test_dir.clone(),
+            )),
             tls: Arc::new(zmax_tls::SniResolver::new()),
             admin_tls: Arc::new(zmax_tls::SniResolver::new()),
             api_tls: Arc::new(zmax_tls::SniResolver::new()),
@@ -2059,7 +2132,9 @@ path = "conf/vhosts"
             };
             let st = Arc::clone(state);
             let task = tokio::spawn(async move {
-                let handled = handle_api_route(&mut server, &req, &st, true).await.unwrap();
+                let handled = handle_api_route(&mut server, &req, &st, true)
+                    .await
+                    .unwrap();
                 let _ = server.shutdown().await;
                 handled
             });
@@ -2112,17 +2187,27 @@ path = "conf/vhosts"
             "tls_min_version": "1.3"
         }"#;
 
-        let (handled, resp) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", put_body.as_bytes()).await;
+        let (handled, resp) = run_api_req(
+            &state,
+            "PUT",
+            "/api/v1/vhosts/crud.test",
+            put_body.as_bytes(),
+        )
+        .await;
         assert!(handled);
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "{resp}");
         assert!(resp.contains(r#""status":"saved""#), "{resp}");
-        assert!(toml_file.exists(), "vHost TOML dosyası diske yazılmış olmalıdır");
+        assert!(
+            toml_file.exists(),
+            "vHost TOML dosyası diske yazılmış olmalıdır"
+        );
 
         let original_toml = std::fs::read_to_string(&toml_file).unwrap();
         assert!(!original_toml.is_empty());
 
         // 2. GET /api/v1/vhosts/crud.test - Geri okuma ve birebir eşitlik
-        let (handled_get, resp_get) = run_api_req(&state, "GET", "/api/v1/vhosts/crud.test", &[]).await;
+        let (handled_get, resp_get) =
+            run_api_req(&state, "GET", "/api/v1/vhosts/crud.test", &[]).await;
         assert!(handled_get);
         assert!(resp_get.starts_with("HTTP/1.1 200 OK"), "{resp_get}");
 
@@ -2136,7 +2221,10 @@ path = "conf/vhosts"
         assert_eq!(vhost["hotlink_protection"], true);
         assert_eq!(vhost["security"]["hotlink_protection"], true);
         assert_eq!(vhost["allow_ips"], serde_json::json!(["10.0.0.1/32"]));
-        assert_eq!(vhost["security"]["allow_ips"], serde_json::json!(["10.0.0.1/32"]));
+        assert_eq!(
+            vhost["security"]["allow_ips"],
+            serde_json::json!(["10.0.0.1/32"])
+        );
         assert_eq!(vhost["deny_ips"], serde_json::json!(["192.168.1.100"]));
         assert_eq!(vhost["waf_enabled"], true);
         assert_eq!(vhost["security"]["waf_enabled"], true);
@@ -2164,44 +2252,90 @@ path = "conf/vhosts"
         // Aktif çalışma zamanındaki nesne eşitliği
         {
             let rt = state.runtime.read().await;
-            let loaded = rt.vhosts.iter().find(|x| x.entry.name == "crud.test").expect("vHost runtime'da bulunmalıdır");
+            let loaded = rt
+                .vhosts
+                .iter()
+                .find(|x| x.entry.name == "crud.test")
+                .expect("vHost runtime'da bulunmalıdır");
             assert!(loaded.entry.security.hotlink_protection);
             assert_eq!(loaded.entry.security.allow_ips, vec!["10.0.0.1/32"]);
             assert_eq!(loaded.entry.security.waf_exclude_paths, vec!["/muaf/yol"]);
             assert_eq!(loaded.entry.rewrite.rules.len(), 1);
-            assert_eq!(loaded.entry.error_docs.pages.get(&404).map(String::as_str), Some("404.html"));
+            assert_eq!(
+                loaded.entry.error_docs.pages.get(&404).map(String::as_str),
+                Some("404.html")
+            );
         }
 
         // 3. Bozuk JSON durumunda 400 Bad Request ve dosyanın DEĞİŞMEMESİ
-        let (handled_bad, resp_bad) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", b"{bozuk_json:").await;
+        let (handled_bad, resp_bad) =
+            run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", b"{bozuk_json:").await;
         assert!(handled_bad);
-        assert!(resp_bad.starts_with("HTTP/1.1 400 Bad Request"), "{resp_bad}");
+        assert!(
+            resp_bad.starts_with("HTTP/1.1 400 Bad Request"),
+            "{resp_bad}"
+        );
         let after_bad_toml = std::fs::read_to_string(&toml_file).unwrap();
-        assert_eq!(after_bad_toml, original_toml, "Bozuk JSON sonrası TOML dosyası asla değişmemelidir");
+        assert_eq!(
+            after_bad_toml, original_toml,
+            "Bozuk JSON sonrası TOML dosyası asla değişmemelidir"
+        );
 
         // 4. Geçersiz alan (geçersiz IP ACL) durumunda 400 Bad Request ve dosyanın DEĞİŞMEMESİ
-        let (handled_inv, resp_inv) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", br#"{"allow_ips":["gecersiz_ip_degeri"]}"#).await;
+        let (handled_inv, resp_inv) = run_api_req(
+            &state,
+            "PUT",
+            "/api/v1/vhosts/crud.test",
+            br#"{"allow_ips":["gecersiz_ip_degeri"]}"#,
+        )
+        .await;
         assert!(handled_inv);
-        assert!(resp_inv.starts_with("HTTP/1.1 400 Bad Request"), "{resp_inv}");
+        assert!(
+            resp_inv.starts_with("HTTP/1.1 400 Bad Request"),
+            "{resp_inv}"
+        );
         let after_inv_toml = std::fs::read_to_string(&toml_file).unwrap();
-        assert_eq!(after_inv_toml, original_toml, "Geçersiz alan sonrası TOML dosyası asla değişmemelidir");
+        assert_eq!(
+            after_inv_toml, original_toml,
+            "Geçersiz alan sonrası TOML dosyası asla değişmemelidir"
+        );
 
         // 5. Path traversal durumunda 400 Bad Request ve dosyanın DEĞİŞMEMESİ
-        let (handled_trav, resp_trav) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", br#"{"document_root":"../../../etc/passwd"}"#).await;
+        let (handled_trav, resp_trav) = run_api_req(
+            &state,
+            "PUT",
+            "/api/v1/vhosts/crud.test",
+            br#"{"document_root":"../../../etc/passwd"}"#,
+        )
+        .await;
         assert!(handled_trav);
-        assert!(resp_trav.starts_with("HTTP/1.1 400 Bad Request"), "{resp_trav}");
+        assert!(
+            resp_trav.starts_with("HTTP/1.1 400 Bad Request"),
+            "{resp_trav}"
+        );
         let after_trav_toml = std::fs::read_to_string(&toml_file).unwrap();
-        assert_eq!(after_trav_toml, original_toml, "Traversal saldırısı sonrası TOML dosyası asla değişmemelidir");
+        assert_eq!(
+            after_trav_toml, original_toml,
+            "Traversal saldırısı sonrası TOML dosyası asla değişmemelidir"
+        );
 
         // 6. Kısmi Alan Güncellemesi (Patch)
         let patch_body = r#"{"hotlink_protection": false, "security": {"waf_enabled": false}}"#;
-        let (handled_patch, resp_patch) = run_api_req(&state, "PUT", "/api/v1/vhosts/crud.test", patch_body.as_bytes()).await;
+        let (handled_patch, resp_patch) = run_api_req(
+            &state,
+            "PUT",
+            "/api/v1/vhosts/crud.test",
+            patch_body.as_bytes(),
+        )
+        .await;
         assert!(handled_patch);
         assert!(resp_patch.starts_with("HTTP/1.1 200 OK"), "{resp_patch}");
 
-        let (handled_patch_get, resp_patch_get) = run_api_req(&state, "GET", "/api/v1/vhosts/crud.test", &[]).await;
+        let (handled_patch_get, resp_patch_get) =
+            run_api_req(&state, "GET", "/api/v1/vhosts/crud.test", &[]).await;
         assert!(handled_patch_get);
-        let patch_json: serde_json::Value = serde_json::from_str(resp_patch_get.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let patch_json: serde_json::Value =
+            serde_json::from_str(resp_patch_get.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         let patch_vhost = &patch_json["vhost"];
         assert_eq!(patch_vhost["hotlink_protection"], false);
         assert_eq!(patch_vhost["security"]["waf_enabled"], false);
