@@ -1036,8 +1036,10 @@ where
                 vhost_ctx.auto_avif,
                 vhost_ctx.auto_webp,
             );
+            let has_req_bypass = request_has_bypass_cookie_or_auth(&req.headers);
             let can_use_cache = vhost_ctx.cache_enabled
                 && req.method.eq_ignore_ascii_case("GET")
+                && !has_req_bypass
                 && !has_range
                 && !has_if_none_match
                 && !is_acme_challenge(&static_path);
@@ -1694,6 +1696,11 @@ where
     }
 
     let sent_len = final_bytes.len();
+    let cache_status = if can_use_cache {
+        Some("MISS")
+    } else {
+        Some("BYPASS")
+    };
     write_http_response(
         socket,
         200,
@@ -1706,7 +1713,7 @@ where
         keep_alive,
         keep_alive_timeout_sec,
         sec_ref,
-        Some("MISS"),
+        cache_status,
     )
     .await?;
     Ok((200, sent_len))
@@ -1852,6 +1859,16 @@ async fn execute_and_prepare_php(
     if cache_eligible {
         let mut tags = Vec::new();
         append_domain_and_uri_cache_tags(&mut tags, &vhost_ctx.vhost_name, &req.path);
+        for (k, v) in &out_headers {
+            if k.eq_ignore_ascii_case("x-litespeed-tag") {
+                for t in v.split(',') {
+                    let trimmed = t.trim();
+                    if !trimmed.is_empty() && !tags.iter().any(|existing| existing == trimmed) {
+                        tags.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
         if applied_gzip {
             tags.push("__enc:gzip".to_string());
         }
@@ -1977,6 +1994,11 @@ where
             } else {
                 prep.body.len()
             };
+            let cache_status = if !php_cacheable_req || response_forbids_cache(&prep.headers) {
+                Some("BYPASS")
+            } else {
+                Some("MISS")
+            };
             write_http_response(
                 socket,
                 status,
@@ -1989,11 +2011,7 @@ where
                 keep_alive,
                 keep_alive_timeout_sec,
                 sec_ref,
-                if php_cacheable_req {
-                    Some("MISS")
-                } else {
-                    Some("BYPASS")
-                },
+                cache_status,
             )
             .await?;
             Ok((status, body_len))
@@ -2522,6 +2540,24 @@ fn request_has_bypass_cookie_or_auth(headers: &[(String, String)]) -> bool {
         if k.eq_ignore_ascii_case("authorization") {
             return true;
         }
+        if k.eq_ignore_ascii_case("cache-control") {
+            let lower = v.to_ascii_lowercase();
+            if lower.contains("no-cache") || lower.contains("no-store") || lower.contains("private") {
+                return true;
+            }
+        }
+        if k.eq_ignore_ascii_case("pragma") {
+            let lower = v.to_ascii_lowercase();
+            if lower.contains("no-cache") {
+                return true;
+            }
+        }
+        if k.eq_ignore_ascii_case("x-litespeed-cache-control") {
+            let lower = v.to_ascii_lowercase();
+            if lower.contains("no-cache") || lower.contains("no-store") || lower.contains("private") {
+                return true;
+            }
+        }
         if k.eq_ignore_ascii_case("cookie") {
             let lower = v.to_ascii_lowercase();
             if lower.contains("wordpress_logged_in")
@@ -2544,6 +2580,16 @@ fn response_forbids_cache(headers: &[(String, String)]) -> bool {
             return true;
         }
         if k.eq_ignore_ascii_case("cache-control") {
+            let lower = v.to_ascii_lowercase();
+            if lower.contains("no-store")
+                || lower.contains("no-cache")
+                || lower.contains("private")
+                || lower.contains("max-age=0")
+            {
+                return true;
+            }
+        }
+        if k.eq_ignore_ascii_case("x-litespeed-cache-control") {
             let lower = v.to_ascii_lowercase();
             if lower.contains("no-store")
                 || lower.contains("no-cache")
@@ -3300,6 +3346,9 @@ pub async fn handle_h2_dispatched_request(
     // 6. FastCGI (PHP) veya Statik Dosya Yonlendirme
     if is_php_route && vhost_ctx.php_enabled {
         let is_head = req.method.eq_ignore_ascii_case("HEAD");
+        let php_cacheable_req = vhost_ctx.cache_enabled
+            && req.method.eq_ignore_ascii_case("GET")
+            && !request_has_bypass_cookie_or_auth(&req.headers);
         let prep_res = execute_and_prepare_php(
             state,
             req,
@@ -3313,7 +3362,7 @@ pub async fn handle_h2_dispatched_request(
             &eff_query,
             false,
             &policies.gzip,
-            vhost_ctx.cache_enabled,
+            php_cacheable_req,
             &format!("{}:{}", effective_host, effective_path),
             MAX_STATIC_CACHE_BYTES,
             is_head,
@@ -3323,6 +3372,12 @@ pub async fn handle_h2_dispatched_request(
         match prep_res {
             Ok(Some(prep)) => {
                 let mut resp_headers = prep.headers;
+                let cache_status = if !php_cacheable_req || response_forbids_cache(&resp_headers) {
+                    "BYPASS"
+                } else {
+                    "MISS"
+                };
+                resp_headers.push(("x-cache".into(), cache_status.to_string()));
                 resp_headers.push(("x-request-id".into(), req_id.to_string()));
                 return Ok((
                     prep.status,
