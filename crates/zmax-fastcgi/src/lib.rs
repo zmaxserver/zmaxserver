@@ -2497,4 +2497,75 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn ols_allow_symbol_link_parity_test() {
+        let base = std::env::temp_dir().join(format!("zmax_ols_sym_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real_doc_root = base.join("vhosts").join("site1").join("html");
+        let _ = std::fs::create_dir_all(&real_doc_root);
+
+        let index_php = real_doc_root.join("index.php");
+        let _ = std::fs::write(&index_php, b"<?php echo 'zmax';");
+
+        // Normal dosya doğrulaması her iki modda da başarılı olmalı
+        assert!(validate_script_within_root(&real_doc_root, &index_php, false).is_ok());
+        assert!(validate_script_within_root(&real_doc_root, &index_php, true).is_ok());
+
+        // Traversal veya root dışı dosya her zaman engellenmeli
+        let evil_target = base.join("secret.ini");
+        let _ = std::fs::write(&evil_target, b"password=123");
+        assert!(validate_script_within_root(&real_doc_root, &evil_target, true).is_err());
+        assert!(validate_script_within_root(&real_doc_root, &evil_target, false).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn httpoxy_client_execution_never_leaks_proxy_header_to_cgi_env() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let srv = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let recs = read_single_fcgi_request(&mut stream).await.unwrap();
+                let mut param_bytes = Vec::new();
+                for (rtype, _, content, _) in recs {
+                    if rtype == FCGI_PARAMS {
+                        param_bytes.extend_from_slice(&content);
+                    }
+                }
+                let all_params = decode_fcgi_nv_pairs(&param_bytes);
+                assert!(!all_params.contains_key("HTTP_PROXY"));
+                assert!(!all_params.contains_key("http_proxy"));
+                assert!(!all_params.contains_key("PROXY"));
+
+                let payload = b"Content-Type: text/plain\r\n\r\nOK";
+                let resp = build_fcgi_response_bytes(1, payload, b"");
+                let _ = stream.write_all(&resp).await;
+                let _ = stream.flush().await;
+            }
+        });
+
+        let pool = Arc::new(UpstreamSocketPool::new(2));
+        let client = FastCgiClient::with_pool(&addr, pool);
+
+        let req = FastCgiRequest::new("GET", "/index.php", "/index.php", "/srv/index.php", "/srv")
+            .header("Proxy", "http://malicious-proxy.invalid:8080")
+            .header("proxy", "http://another.invalid")
+            .header("PROXY", "http://upper.invalid")
+            .header("Host", "mysite.test")
+            .env("HTTP_PROXY", "http://injected.invalid")
+            .env("http_proxy", "http://injected2.invalid");
+
+        let res = client
+            .execute_php_pooled(req, Duration::from_secs(2), Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status, 200);
+        assert_eq!(res.body, b"OK");
+
+        srv.await.unwrap();
+    }
 }

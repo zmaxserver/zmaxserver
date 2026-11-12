@@ -1177,8 +1177,15 @@ pub fn try_sendfile_chunk(
     if sent < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    *offset = off as u64;
-    Ok(sent as usize)
+    *offset = u64::try_from(off).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "Negatif sendfile ofseti")
+    })?;
+    usize::try_from(sent).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Negatif sendfile bayt sayısı",
+        )
+    })
 }
 
 /// Linux dışındaki Unix sistemlerde temiz `Unsupported` hatası döndüren `sendfile` sarmalayıcısı.
@@ -1234,6 +1241,80 @@ pub fn copy_file_chunk_fallback(
         *offset += n as u64;
     }
     Ok(total_written)
+}
+
+/// Genel `Write` çıkışına `copy_file_chunk_fallback` ile tamponlu dosya parçası aktarımı yapar.
+/// Çekirdek içi sıfır-kopya (`sendfile(2)`) için Linux üzerinde dosya tanımlayıcısı alan
+/// [`try_sendfile_chunk`] veya [`stream_sendfile_fd_or_fallback`] kullanılır.
+pub fn stream_sendfile_or_fallback(
+    file: &mut std::fs::File,
+    out: &mut impl Write,
+    mut offset: u64,
+    count: usize,
+) -> std::io::Result<usize> {
+    if count == 0 {
+        return Ok(0);
+    }
+    copy_file_chunk_fallback(file, out, &mut offset, count)
+}
+
+/// Unix üzerinde çıktı `AsRawFd` desteğiyle Linux `sendfile(2)` sıfır-kopya aktarımını dener;
+/// `Unsupported` / `EINVAL` / `ENOSYS` durumunda (ör. TLS soketi, düzenli dosya veya Linux dışı
+/// Unix) otomatik olarak [`copy_file_chunk_fallback`] ile kaldığı ofsetten tamamlar.
+#[cfg(unix)]
+pub fn stream_sendfile_fd_or_fallback<W: Write + std::os::unix::io::AsRawFd>(
+    file: &mut std::fs::File,
+    out: &mut W,
+    mut offset: u64,
+    mut count: usize,
+) -> std::io::Result<usize> {
+    use std::os::unix::io::AsRawFd;
+
+    if count == 0 {
+        return Ok(0);
+    }
+    let out_fd = out.as_raw_fd();
+    let in_fd = file.as_raw_fd();
+    let mut total_sent = 0usize;
+
+    while count > 0 {
+        match try_sendfile_chunk(out_fd, in_fd, &mut offset, count) {
+            Ok(0) => break,
+            Ok(n) => {
+                total_sent += n;
+                count -= n;
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                let fallback = copy_file_chunk_fallback(file, out, &mut offset, count)?;
+                total_sent += fallback;
+                break;
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+                ) || matches!(
+                    err.raw_os_error(),
+                    Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSOCK)
+                ) =>
+            {
+                let fallback = copy_file_chunk_fallback(file, out, &mut offset, count)?;
+                total_sent += fallback;
+                break;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(total_sent)
 }
 
 #[cfg(test)]
@@ -1795,6 +1876,23 @@ mod tests {
         assert_eq!(copied, 6);
         assert_eq!(offset, 10);
         assert_eq!(&out, b"456789");
+
+        let mut out2 = Vec::new();
+        let streamed = stream_sendfile_or_fallback(&mut file, &mut out2, 0, 5).unwrap();
+        assert_eq!(streamed, 5);
+        assert_eq!(&out2, b"01234");
+
+        #[cfg(unix)]
+        {
+            // Düzenli dosyada sendfile(2) ENOTSOCK/EINVAL dönerse stream_sendfile_fd_or_fallback
+            // otomatik olarak copy_file_chunk_fallback ile kalan kısmı tamamlamalıdır.
+            let out_fd_path = root.join("out_copy.bin");
+            let mut out_file = std::fs::File::create(&out_fd_path).unwrap();
+            let streamed_fd =
+                stream_sendfile_fd_or_fallback(&mut file, &mut out_file, 2, 8).unwrap();
+            assert_eq!(streamed_fd, 8);
+            assert_eq!(std::fs::read(&out_fd_path).unwrap(), b"23456789");
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

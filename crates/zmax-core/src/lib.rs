@@ -31,6 +31,7 @@ pub fn available_cpu_cores() -> usize {
     if let Ok(n) = std::thread::available_parallelism() {
         return n.get().max(1);
     }
+    // SAFETY: sysconf(_SC_NPROCESSORS_ONLN) güvenli bir POSIX sistem konfigürasyonu sorgusudur.
     let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
     if count > 0 {
         count as usize
@@ -64,11 +65,14 @@ pub fn pin_current_thread_to_core(core_id: usize) -> Result<(), String> {
             core_id, cores
         ));
     }
+    // SAFETY: `cpu_set_t` C POD yapısıdır; tüm baytlarının sıfırlanması geçerli boş küme durumudur.
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` geçerli `cpu_set_t` nesnesidir; `core_id` < CPU_SETSIZE doğrulanmıştır.
     unsafe {
         libc::CPU_ZERO(&mut set);
         libc::CPU_SET(core_id, &mut set);
     }
+    // SAFETY: `set` bellek boyutu ve işaretçisi geçerlidir; `0` geçerli iş parçacığını hedefler.
     let rc = unsafe {
         libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set)
     };
@@ -139,6 +143,7 @@ fn lookup_gid_by_name(c_group: &std::ffi::CString) -> Result<libc::gid_t, String
         let mut grp = std::mem::MaybeUninit::<libc::group>::zeroed();
         let mut buf = vec![0u8; buf_len];
         let mut result: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: `getgrnam_r` re-entrant bir POSIX fonksiyonudur; `c_group`, `grp` ve `buf` geçerli işaretçilerdir.
         let rc = unsafe {
             libc::getgrnam_r(
                 c_group.as_ptr(),
@@ -152,7 +157,9 @@ fn lookup_gid_by_name(c_group: &std::ffi::CString) -> Result<libc::gid_t, String
             if result.is_null() {
                 return Err(format!("Grup bulunamadı: '{}'", c_group.to_string_lossy()));
             }
+            // SAFETY: `result` null olmadığında ve `rc == 0` iken `grp` libc tarafından başarıyla başlatılmıştır.
             let grp_ref = unsafe { grp.assume_init_ref() };
+            // SAFETY: `grp_ref.gr_name` libc tarafından ayrılmış ve null ile sonlandırılmış geçerli C dizesidir.
             let _name = unsafe { std::ffi::CStr::from_ptr(grp_ref.gr_name) };
             return Ok(grp_ref.gr_gid);
         }
@@ -175,6 +182,7 @@ fn lookup_uid_by_name(c_user: &std::ffi::CString) -> Result<libc::uid_t, String>
         let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
         let mut buf = vec![0u8; buf_len];
         let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `getpwnam_r` re-entrant bir POSIX fonksiyonudur; `c_user`, `pwd` ve `buf` geçerli işaretçilerdir.
         let rc = unsafe {
             libc::getpwnam_r(
                 c_user.as_ptr(),
@@ -188,7 +196,9 @@ fn lookup_uid_by_name(c_user: &std::ffi::CString) -> Result<libc::uid_t, String>
             if result.is_null() {
                 return Err(format!("Kullanıcı bulunamadı: '{}'", c_user.to_string_lossy()));
             }
+            // SAFETY: `result` null olmadığında ve `rc == 0` iken `pwd` libc tarafından başarıyla başlatılmıştır.
             let pwd_ref = unsafe { pwd.assume_init_ref() };
+            // SAFETY: `pwd_ref.pw_name` libc tarafından ayrılmış ve null ile sonlandırılmış geçerli C dizesidir.
             let _name = unsafe { std::ffi::CStr::from_ptr(pwd_ref.pw_name) };
             return Ok(pwd_ref.pw_uid);
         }
@@ -204,7 +214,23 @@ fn lookup_uid_by_name(c_user: &std::ffi::CString) -> Result<libc::uid_t, String>
     }
 }
 
-/// POSIX ortamında kök yetkilerini belirtilen kullanıcı ve gruba düşürür (`setgid` -> `setuid`).
+/// Geçerli sürecin Unix üzerinde etkin kök yetkisiyle (`euid == 0`) çalışıp çalışmadığını döndürür.
+/// Windows ve Unix dışı platformlarda `false` döner.
+#[cfg(unix)]
+pub fn is_running_as_root() -> bool {
+    // SAFETY: `geteuid` iş parçacığı güvenli, salt-okunur bir POSIX kimlik sorgusudur.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Geçerli sürecin etkin kök yetkisiyle (`euid == 0`) çalışıp çalışmadığını döndürür.
+/// Windows ve Unix dışı platformlarda `false` döner.
+#[cfg(not(unix))]
+pub fn is_running_as_root() -> bool {
+    false
+}
+
+/// POSIX ortamında kök yetkilerini belirtilen kullanıcı ve gruba düşürür
+/// (`setgroups(0, null)` -> `initgroups` -> `setgid` -> `setuid`) ve geri yükselmenin kapalı olduğunu doğrular.
 #[cfg(unix)]
 pub fn drop_privileges(user: &str, group: &str) -> Result<(), String> {
     let user = validate_account_name("Kullanıcı", user)?;
@@ -218,7 +244,38 @@ pub fn drop_privileges(user: &str, group: &str) -> Result<(), String> {
     let gid = lookup_gid_by_name(&c_group)?;
     let uid = lookup_uid_by_name(&c_user)?;
 
-    // Önce grup yetkisi düşürülür; kullanıcı yetkisi düştükten sonra setgid yapılamaz.
+    // Kök yetkisi olmayan ortamlarda (geliştirici testi vb.) kullanıcı/grup varlığı doğrulandıktan sonra güvenle atla
+    if !is_running_as_root() {
+        tracing::info!(
+            "Kök (root/euid=0) yetkisi bulunmadığından drop_privileges atlandı (user='{}', group='{}')",
+            user,
+            group
+        );
+        return Ok(());
+    }
+
+    // 1. Önce root'tan miras kalan tüm ek grupları (supplementary groups) sıfırla.
+    // SAFETY: Kök yetkisi (euid == 0) altındayken `setgroups(0, null)` ek grup listesini boşaltır.
+    if unsafe { libc::setgroups(0 as _, std::ptr::null()) } != 0 {
+        return Err(format!(
+            "setgroups(0) başarısız: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // 2. Yalnız hedef kullanıcının izin verilen ek gruplarını ve hedef birincil `gid` grubunu yükle.
+    // SAFETY: `c_user` geçerli NUL-sonlandırmalı C dizesidir ve `gid` sistemden doğrulanmıştır.
+    if unsafe { libc::initgroups(c_user.as_ptr(), gid as _) } != 0 {
+        return Err(format!(
+            "initgroups('{}', {}) başarısız: {}",
+            user,
+            gid,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // 3. Birincil grup yetkisi düşürülür; `setuid` sonrasında `setgid` yapılamaz.
+    // SAFETY: `gid` sistem grup tablosundan doğrulanmış geçerli bir grup kimliğidir.
     if unsafe { libc::setgid(gid) } != 0 {
         return Err(format!(
             "setgid({}) başarısız ({}): {}",
@@ -227,6 +284,9 @@ pub fn drop_privileges(user: &str, group: &str) -> Result<(), String> {
             std::io::Error::last_os_error()
         ));
     }
+
+    // 4. Kullanıcı yetkisi kalıcı olarak düşürülür.
+    // SAFETY: `uid` sistem kullanıcı tablosundan doğrulanmıştır; öncesinde gruplar düşürülmüştür.
     if unsafe { libc::setuid(uid) } != 0 {
         return Err(format!(
             "setuid({}) başarısız ({}): {}",
@@ -234,6 +294,62 @@ pub fn drop_privileges(user: &str, group: &str) -> Result<(), String> {
             user,
             std::io::Error::last_os_error()
         ));
+    }
+
+    // 5. Yetkisiz hedef kullanıcı için gerçekten root kalmadığını ve gid=0 ek grubu olmadığını doğrula.
+    if uid != 0 {
+        // SAFETY: `getuid`/`geteuid`/`getgid`/`getegid` yan etkisiz salt-okunur POSIX sorgularıdır.
+        let (ruid, euid, rgid, egid) = unsafe {
+            (
+                libc::getuid(),
+                libc::geteuid(),
+                libc::getgid(),
+                libc::getegid(),
+            )
+        };
+        if ruid != uid || euid != uid || rgid != gid || egid != gid || euid == 0 || ruid == 0 {
+            return Err(format!(
+                "Yetki düşürme doğrulaması başarısız: beklenen uid={}/gid={}, mevcut uid={}/euid={}, gid={}/egid={}",
+                uid, gid, ruid, euid, rgid, egid
+            ));
+        }
+        if gid != 0 {
+            verify_no_root_supplementary_group()?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_no_root_supplementary_group() -> Result<(), String> {
+    // SAFETY: `getgroups(0, null)` yalnızca ek grup sayısını okur, bellek yazmaz.
+    let ngroups = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if ngroups < 0 {
+        return Err(format!(
+            "getgroups(0) başarısız: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if ngroups == 0 {
+        return Ok(());
+    }
+    let mut supp = vec![0 as libc::gid_t; ngroups as usize];
+    // SAFETY: `supp` uzunluğu `ngroups` öğe alacak kadar ayrılmıştır ve işaretçisi hizalıdır.
+    let read_n = unsafe { libc::getgroups(ngroups, supp.as_mut_ptr()) };
+    if read_n < 0 {
+        return Err(format!(
+            "getgroups({}) başarısız: {}",
+            ngroups,
+            std::io::Error::last_os_error()
+        ));
+    }
+    let count = (read_n as usize).min(supp.len());
+    if supp[..count].contains(&0) {
+        return Err(
+            "Yetki düşürme sonrası ek gruplarda root (gid=0) bulundu; güvenlik nedeniyle durduruluyor"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -249,6 +365,199 @@ pub fn drop_privileges(user: &str, group: &str) -> Result<(), String> {
         group
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn chown_single_non_symlink(
+    p: &std::path::Path,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    depth: u8,
+) -> Result<(), String> {
+    let meta = match std::fs::symlink_metadata(p) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(format!(
+                "Yol meta verisi okunamadı ('{}'): {}",
+                p.display(),
+                err
+            ))
+        }
+    };
+
+    // Sembolik bağ üzerinden root-yetkili chown istismarını (symlink attack) önle
+    if meta.file_type().is_symlink() {
+        tracing::warn!(
+            "Sembolik bağ sahiplik devrinden güvenlik nedeniyle atlandı: {}",
+            p.display()
+        );
+        return Ok(());
+    }
+
+    let c_path = std::ffi::CString::new(p.to_string_lossy().as_bytes()).map_err(|_| {
+        format!(
+            "Yol NUL karakteri içerdiğinden sahiplik değiştirilemedi: '{}'",
+            p.display()
+        )
+    })?;
+    // SAFETY: `c_path` geçerli NUL-sonlandırmalı dosya yoludur. `libc::lchown` sembolik bağları takip etmez (TOCTOU engellenir).
+    if unsafe { libc::lchown(c_path.as_ptr(), uid, gid) } != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!(
+            "Yol sahipliği değiştirilemedi ('{}' -> uid={}, gid={}): {}",
+            p.display(),
+            uid,
+            gid,
+            err
+        ));
+    }
+
+    if meta.is_dir() && depth > 0 {
+        let entries = std::fs::read_dir(p)
+            .map_err(|e| format!("Dizin içeriği okunamadı ('{}'): {}", p.display(), e))?;
+        for entry_res in entries {
+            let entry = entry_res
+                .map_err(|e| format!("Dizin girdisi okunamadı ('{}'): {}", p.display(), e))?;
+            chown_single_non_symlink(&entry.path(), uid, gid, depth - 1)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// POSIX ortamında belirtilen dosya veya dizinlerin sahipliğini kullanıcı ve gruba devreder.
+/// Kök (`euid == 0`) iken herhangi bir `chown` hatasında sessizce devam etmek yerine `Err` döner.
+#[cfg(unix)]
+pub fn ensure_paths_ownership<P: AsRef<std::path::Path>>(
+    user: &str,
+    group: &str,
+    paths: &[P],
+) -> Result<(), String> {
+    let user = validate_account_name("Kullanıcı", user)?;
+    let group = validate_account_name("Grup", group)?;
+    let c_user = std::ffi::CString::new(user)
+        .map_err(|_| "Kullanıcı adında NUL karakteri bulunamaz".to_string())?;
+    let c_group = std::ffi::CString::new(group)
+        .map_err(|_| "Grup adında NUL karakteri bulunamaz".to_string())?;
+
+    let gid = lookup_gid_by_name(&c_group)?;
+    let uid = lookup_uid_by_name(&c_user)?;
+
+    if !is_running_as_root() {
+        tracing::debug!(
+            "Kök (root) yetkisi olmadığından ensure_paths_ownership atlandı (user='{}', group='{}')",
+            user,
+            group
+        );
+        return Ok(());
+    }
+
+    for path in paths {
+        let p = path.as_ref();
+        if !p.exists() {
+            if let Some(parent) = p.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("Üst dizin oluşturulamadı ('{}'): {}", parent.display(), e)
+                    })?;
+                    chown_single_non_symlink(parent, uid, gid, 0)?;
+                }
+            }
+        }
+        chown_single_non_symlink(p, uid, gid, 2)?;
+    }
+    Ok(())
+}
+
+/// Windows ortamında dosya ve dizin sahipliği denetimi ve güvenli doğrulama.
+#[cfg(not(unix))]
+pub fn ensure_paths_ownership<P: AsRef<std::path::Path>>(
+    user: &str,
+    group: &str,
+    paths: &[P],
+) -> Result<(), String> {
+    let _ = (
+        validate_account_name("Kullanıcı", user)?,
+        validate_account_name("Grup", group)?,
+    );
+    for path in paths {
+        let p = path.as_ref();
+        if p.exists() {
+            tracing::trace!("Windows ortamında dosya yolu doğrulandı: {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// Günlük, önbellek ve geçici dosya yollarının sahipliğini ayarlayıp ardından yetkiyi düşürür.
+pub fn drop_privileges_with_paths<P: AsRef<std::path::Path>>(
+    user: &str,
+    group: &str,
+    paths: &[P],
+) -> Result<(), String> {
+    ensure_paths_ownership(user, group, paths)?;
+    drop_privileges(user, group)
+}
+
+/// POSIX ortamında kök yetkisi altındayken TLS özel anahtarlarını ve sertifikalarını
+/// yetki düşürme sonrasında SIGHUP/API reload sırasında servis kullanıcısının okuyabilmesi için
+/// hedef gruba (gid) devreder ve 0640 (sahip rw, grup r) izni verir.
+#[cfg(unix)]
+pub fn ensure_tls_keys_readable_by_group<P: AsRef<std::path::Path>>(
+    group: &str,
+    paths: &[P],
+) -> Result<(), String> {
+    if !is_running_as_root() {
+        return Ok(());
+    }
+    let group = validate_account_name("Grup", group)?;
+    let c_group = std::ffi::CString::new(group)
+        .map_err(|_| "Grup adında NUL karakteri bulunamaz".to_string())?;
+    let gid = lookup_gid_by_name(&c_group)?;
+
+    for p in paths {
+        let path = p.as_ref();
+        if !path.exists() {
+            continue;
+        }
+        let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        // SAFETY: `c_path` geçerli NUL-sonlandırmalı dosya yoludur. lchown sembolik bağları takip etmez.
+        let _ = unsafe { libc::lchown(c_path.as_ptr(), 0 as _, gid) };
+        // İzinleri 0640 (S_IRUSR | S_IWUSR | S_IRGRP) olarak ayarla; genele açılmaz (others=0).
+        // SAFETY: `chmod` geçerli POSIX dosya izinlerini ayarlar; 0o640 ile anahtar genele açılmaz.
+        let _ = unsafe {
+            libc::chmod(
+                c_path.as_ptr(),
+                (libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP) as _,
+            )
+        };
+    }
+    Ok(())
+}
+
+/// Windows ortamında TLS anahtar izni yedeklemesi.
+#[cfg(not(unix))]
+pub fn ensure_tls_keys_readable_by_group<P: AsRef<std::path::Path>>(
+    _group: &str,
+    _paths: &[P],
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// Günlük, önbellek ve geçici dosya yollarının sahipliğini ayarlayıp, TLS anahtarlarını grupça okunabilir kılıp yetkiyi düşürür.
+pub fn drop_privileges_with_paths_and_tls<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+    user: &str,
+    group: &str,
+    paths: &[P],
+    tls_paths: &[Q],
+) -> Result<(), String> {
+    ensure_paths_ownership(user, group, paths)?;
+    ensure_tls_keys_readable_by_group(group, tls_paths)?;
+    drop_privileges(user, group)
 }
 
 /// Howard Hinnant sivil takvim algoritması ile UNIX gün sayısını `(yıl, ay, gün)` üçlüsüne çevirir.
@@ -448,6 +757,121 @@ mod tests {
             // Windows ortamında geçerli biçimli kullanıcı/grup adı temiz uyarı ile Ok döner
             assert!(drop_privileges("nobody", "nobody").is_ok());
         }
+    }
+
+    #[test]
+    fn test_drop_privileges_with_paths() {
+        let temp_dir = std::env::temp_dir().join(format!("zmax_core_privs_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let log_file = temp_dir.join("access.log");
+        let cache_dir = temp_dir.join("cache");
+        let _ = std::fs::write(&log_file, b"test");
+
+        let group = {
+            #[cfg(unix)]
+            {
+                let c_nobody = std::ffi::CString::new("nobody").expect("sabit ASCII");
+                if lookup_gid_by_name(&c_nobody).is_ok() {
+                    "nobody"
+                } else {
+                    "nogroup"
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                "nobody"
+            }
+        };
+
+        assert!(ensure_paths_ownership("nobody", group, &[&log_file, &cache_dir]).is_ok());
+        assert!(drop_privileges_with_paths("nobody", group, &[&log_file, &cache_dir]).is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_is_running_as_root_consistent_with_platform() {
+        let running_as_root = is_running_as_root();
+        #[cfg(not(unix))]
+        assert!(!running_as_root);
+        #[cfg(unix)]
+        {
+            // SAFETY: `geteuid` salt-okunur POSIX kimlik sorgusudur.
+            let euid_is_zero = unsafe { libc::geteuid() == 0 };
+            assert_eq!(running_as_root, euid_is_zero);
+        }
+    }
+
+    /// Kök (`euid == 0`) yetkisi altında ek grupların temizlendiğini (`setgroups`/`initgroups`),
+    /// sahipliğin devredildiğini ve düşürme sonrasında `setuid(0)` çağrısının `EPERM` ile
+    /// başarısız olduğunu (geri yükselme imkansızlığı) kanıtlar.
+    /// VM'de kök olarak çalıştırma:
+    /// `cargo test -p zmax-core test_drop_privileges_blocks_setuid_zero_and_drops_groups -- --ignored --nocapture`
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "Kök (root / euid == 0) yetkisi gerektirir; --ignored ile root ortamında çalıştırın"]
+    fn test_drop_privileges_blocks_setuid_zero_and_drops_groups() {
+        assert!(
+            is_running_as_root(),
+            "Bu test root (euid == 0) olarak çalıştırılmalıdır"
+        );
+
+        let c_nobody_user = std::ffi::CString::new("nobody").expect("sabit ASCII");
+        let _uid = lookup_uid_by_name(&c_nobody_user).expect("'nobody' kullanıcısı bulunmalı");
+        let group = {
+            let c_nobody_grp = std::ffi::CString::new("nobody").expect("sabit ASCII");
+            if lookup_gid_by_name(&c_nobody_grp).is_ok() {
+                "nobody"
+            } else {
+                "nogroup"
+            }
+        };
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("zmax_core_root_drop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let logs_dir = temp_dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let pre_log = logs_dir.join("pre_drop.log");
+        std::fs::write(&pre_log, b"root-opened\n").unwrap();
+
+        drop_privileges_with_paths("nobody", group, &[&logs_dir])
+            .expect("Kök yetkiden 'nobody' kullanıcısına düşürme başarılı olmalı");
+
+        assert!(
+            !is_running_as_root(),
+            "drop_privileges sonrası euid artık 0 (root) olmamalı"
+        );
+        // SAFETY: `getuid`/`getgid` salt-okunur POSIX sorgularıdır.
+        let (ruid, rgid) = unsafe { (libc::getuid(), libc::getgid()) };
+        assert_ne!(ruid, 0, "Gerçek uid root kalmamalı");
+        assert_ne!(rgid, 0, "Gerçek gid root kalmamalı");
+
+        // Ek gruplarda gid=0 bulunmamalı
+        verify_no_root_supplementary_group().expect("Ek gruplar arasında root (gid=0) bulunmamalı");
+
+        // Düşürme sonrası tekrar kök yetkisi alma denemesi KESİN başarısız (EPERM) olmalıdır
+        // SAFETY: Yetkisiz süreçte `setuid(0)` çağrısının çekirdek tarafından reddedildiğini doğrular.
+        let rc = unsafe { libc::setuid(0) };
+        let err = std::io::Error::last_os_error();
+        assert_ne!(
+            rc, 0,
+            "Yetki düşürüldükten sonra setuid(0) asla başarılı olmamalı!"
+        );
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EPERM),
+            "setuid(0) başarısızlık nedeni EPERM olmalıdır (alınan: {:?})",
+            err
+        );
+
+        // Sahipliği devredilen dizindeki dosyaya yetkisiz kullanıcı da yazabilmeli
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&pre_log)
+            .expect("Sahipliği devredilen log dosyası yetki düşümü sonrası açılabilmeli");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

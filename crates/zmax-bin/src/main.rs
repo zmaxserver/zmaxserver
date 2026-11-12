@@ -612,6 +612,146 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // [kart-8] drop_privileges bağlama: dinleyiciler bağlandıktan sonra kök yetkilerini yapılandırılan kullanıcıya düşür
+    {
+        let (priv_user, priv_group, access_log_cfg, error_log_cfg, disk_cache_cfg, tls_paths) = {
+            let rt = state.runtime.read().await;
+            let mut paths = Vec::new();
+            if !rt.config.listeners.admin.tls_key.trim().is_empty() {
+                paths.push(resolve_path(
+                    &state.base_dir,
+                    &rt.config.listeners.admin.tls_key,
+                ));
+            }
+            if !rt.config.listeners.admin.tls_cert.trim().is_empty() {
+                paths.push(resolve_path(
+                    &state.base_dir,
+                    &rt.config.listeners.admin.tls_cert,
+                ));
+            }
+            if !rt.config.listeners.api.tls_key.trim().is_empty() {
+                paths.push(resolve_path(
+                    &state.base_dir,
+                    &rt.config.listeners.api.tls_key,
+                ));
+            }
+            if !rt.config.listeners.api.tls_cert.trim().is_empty() {
+                paths.push(resolve_path(
+                    &state.base_dir,
+                    &rt.config.listeners.api.tls_cert,
+                ));
+            }
+            for vh in &rt.vhosts {
+                if !vh.entry.ssl.key.trim().is_empty() {
+                    paths.push(resolve_path(&state.base_dir, &vh.entry.ssl.key));
+                }
+                if !vh.entry.ssl.certificate.trim().is_empty() {
+                    paths.push(resolve_path(&state.base_dir, &vh.entry.ssl.certificate));
+                }
+            }
+            (
+                rt.config.server.user.clone(),
+                rt.config.server.group.clone(),
+                rt.config.logging.access_log.clone(),
+                rt.config.logging.error_log.clone(),
+                rt.config.cache.disk_cache_dir.clone(),
+                paths,
+            )
+        };
+        let log_path = state.base_dir.join("logs");
+        let vhost_logs_path = log_path.join("vhosts");
+        let cache_path = state.base_dir.join("cache");
+        let disk_cache_path = resolve_path(&state.base_dir, &disk_cache_cfg);
+        let access_log_path = resolve_path(&state.base_dir, &access_log_cfg);
+        let error_log_path = resolve_path(&state.base_dir, &error_log_cfg);
+        let tmp_path = std::env::temp_dir().join("zmax");
+
+        for dir in [
+            &log_path,
+            &vhost_logs_path,
+            &cache_path,
+            &disk_cache_path,
+            &tmp_path,
+        ] {
+            if let Err(err) = tokio::fs::create_dir_all(dir).await {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "[KRİTİK GÜVENLİK HATASI] Yetki düşürme öncesi dizin oluşturulamadı ('{}'): {}",
+                        dir.display(),
+                        err
+                    ),
+                )
+                .into());
+            }
+        }
+        for log_file in [&access_log_path, &error_log_path] {
+            if let Some(parent) = log_file.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                        return Err(std::io::Error::new(
+                            err.kind(),
+                            format!(
+                                "[KRİTİK GÜVENLİK HATASI] Günlük dizini oluşturulamadı ('{}'): {}",
+                                parent.display(),
+                                err
+                            ),
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+
+        let acme_path = state.base_dir.join("acme");
+        let ssl_path = state.base_dir.join("ssl");
+        let _ = tokio::fs::create_dir_all(&acme_path).await;
+        let _ = tokio::fs::create_dir_all(&ssl_path).await;
+
+        let base_ownership_paths = vec![
+            log_path,
+            vhost_logs_path,
+            cache_path,
+            disk_cache_path,
+            access_log_path,
+            error_log_path,
+            tmp_path,
+            acme_path,
+            ssl_path,
+        ];
+
+        #[cfg(unix)]
+        let ownership_paths: Vec<PathBuf> = {
+            let mut paths = base_ownership_paths;
+            if !unix_api_sock.trim().is_empty() {
+                paths.push(PathBuf::from(unix_api_sock.trim()));
+            }
+            paths
+        };
+        #[cfg(not(unix))]
+        let ownership_paths: Vec<PathBuf> = base_ownership_paths;
+
+        if let Err(err) = zmax_core::drop_privileges_with_paths_and_tls(
+            &priv_user,
+            &priv_group,
+            &ownership_paths,
+            &tls_paths,
+        ) {
+            eprintln!(
+                "[KRİTİK GÜVENLİK HATASI] Yetki düşürme başarısız (root={}, user='{}', group='{}'): {}",
+                zmax_core::is_running_as_root(),
+                priv_user,
+                priv_group,
+                err
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Yetki düşürme başarısız (fail-closed): {}", err),
+            )
+            .into());
+        }
+    }
+
     #[cfg(unix)]
     {
         let state_sighup = Arc::clone(&state);

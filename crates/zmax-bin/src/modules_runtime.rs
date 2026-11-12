@@ -107,7 +107,7 @@ impl Default for FastCgiModulePolicy {
             default_upstream: "127.0.0.1:9000".to_string(),
             timeout_sec: 60,
             pool_size: 64,
-            dial_timeout_ms: 3000,
+            dial_timeout_ms: 5000,
             keep_conn: true,
         }
     }
@@ -300,7 +300,7 @@ pub fn compile_policies(config: &ZMaxConfig, modules: &LoadedModules) -> Compile
                 .to_string(),
             timeout_sec: m.get_u64("connection_timeout_sec").unwrap_or(60),
             pool_size: m.get_u64("keep_alive_pool_size").unwrap_or(64) as usize,
-            dial_timeout_ms: m.get_u64("dial_timeout_ms").unwrap_or(3000),
+            dial_timeout_ms: m.get_u64("dial_timeout_ms").unwrap_or(5000),
             keep_conn: m.get_bool("keep_conn").unwrap_or(true),
         },
         None => FastCgiModulePolicy::default(),
