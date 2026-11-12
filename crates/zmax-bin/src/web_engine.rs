@@ -14,14 +14,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 use zmax_cache::{build_cache_key, CacheLookup, CachedResponse, StampedeSlot};
 use zmax_compress::{gzip_compress, is_compressible_mime, negotiate_encoding, ContentEncoding};
 use zmax_config::match_vhost;
 use zmax_fastcgi::{FastCgiClient, FastCgiParamsBuilder};
 use zmax_header::SecurityHeadersPolicy;
 use zmax_httpparser::{extract_header, resolve_real_ip, HttpReadLimits};
-use zmax_proxy::{rewrite_request_head_with_options, ProxyRewriteOptions, ReverseProxy};
+use zmax_proxy::{ProxyError, ReverseProxy};
 use zmax_rewrite::{HtAccessResolver, RewriteEngine, RouteOutcome, RouteRequest};
 use zmax_security::IpAccessList;
 use zmax_static::{
@@ -71,6 +70,8 @@ pub struct ResolvedVHostContext {
     pub proxy_path_prefix: String,
     pub proxy_preserve_host: bool,
     pub proxy_websocket: bool,
+    // [kart-10] Ters vekil genisletilmis ayarları (initTimeout, keep-alive, respBuffer)
+    pub proxy_ext: zmax_config::ProxyExtConfig,
     auto_webp: bool,
     auto_avif: bool,
     etag_enabled: bool,
@@ -302,6 +303,8 @@ where
                     proxy_preserve_host: vh.entry.proxy.preserve_host
                         && policies.proxy.preserve_host,
                     proxy_websocket: vh.entry.proxy.websocket && policies.proxy.websocket_upgrade,
+                    // [kart-10]
+                    proxy_ext: vh.entry.proxy_ext.clone(),
                     auto_webp: policies.static_policy.auto_webp,
                     auto_avif: policies.static_policy.auto_avif,
                     etag_enabled: policies.static_policy.etag_enabled,
@@ -351,6 +354,8 @@ where
                 proxy_path_prefix: "/".to_string(),
                 proxy_preserve_host: true,
                 proxy_websocket: true,
+                // [kart-10]
+                proxy_ext: zmax_config::ProxyExtConfig::default(),
                 auto_webp: policies.static_policy.auto_webp,
                 auto_avif: policies.static_policy.auto_avif,
                 etag_enabled: policies.static_policy.etag_enabled,
@@ -2096,85 +2101,68 @@ where
             .map(|u| u.eq_ignore_ascii_case("websocket"))
             .unwrap_or(false);
 
-    let conn_dur = Duration::from_secs(connect_timeout_sec.max(2));
-
-    if is_ws {
-        let opts = ProxyRewriteOptions {
-            preserve_host: vhost_ctx.proxy_preserve_host,
-            upstream_host: if vhost_ctx.proxy_preserve_host {
-                None
-            } else {
-                Some(vhost_ctx.proxy_upstream.as_str())
-            },
-        };
-        let is_head = req.method.eq_ignore_ascii_case("HEAD");
-        let Some(rewritten_head) =
-            rewrite_request_head_with_options(raw_head.as_bytes(), real_ip, is_https, &opts)
-        else {
-            let err_body = b"400 Bad Request";
-            write_http_response(
-                socket,
-                400,
-                "Bad Request",
-                &[("Content-Type".into(), "text/plain".into())],
-                err_body,
-                None,
-                is_head,
-                is_https,
-                false,
-                0,
-                vhost_ctx.headers_policy.as_ref(),
-                None,
-            )
-            .await?;
-            let sent_err_bytes = if is_head { 0 } else { err_body.len() };
-            return Ok((400, false, sent_err_bytes));
-        };
-
-        let mut upstream =
-            match tokio::time::timeout(conn_dur, TcpStream::connect(&vhost_ctx.proxy_upstream))
-                .await
-            {
-                Ok(Ok(s)) => s,
-                _ => {
-                    let err_body = b"502 Bad Gateway - Upstream Unavailable";
-                    write_http_response(
-                        socket,
-                        502,
-                        "Bad Gateway",
-                        &[("Content-Type".into(), "text/plain".into())],
-                        err_body,
-                        None,
-                        is_head,
-                        is_https,
-                        false,
-                        0,
-                        vhost_ctx.headers_policy.as_ref(),
-                        None,
-                    )
-                    .await?;
-                    let sent_err_bytes = if is_head { 0 } else { err_body.len() };
-                    return Ok((502, false, sent_err_bytes));
-                }
-            };
-        let _ = upstream.set_nodelay(true);
-        upstream.write_all(&rewritten_head).await?;
-        if !req.body.is_empty() {
-            upstream.write_all(&req.body).await?;
-        }
-        let _ = tokio::io::copy_bidirectional(socket, &mut upstream).await;
-        return Ok((101, false, 0));
-    }
-
-    let mut raw_full = raw_head.into_bytes();
-    raw_full.extend_from_slice(&req.body);
-
+    // [kart-10] initTimeout, pcKeepAliveTimeout ve tamponsuz akış (respBuffer 0) bağlaması
+    let conn_sec = if vhost_ctx.proxy_ext.connect_timeout_sec != 10 {
+        vhost_ctx.proxy_ext.connect_timeout_sec
+    } else {
+        connect_timeout_sec
+    };
+    let conn_dur = Duration::from_secs(conn_sec.max(1));
+    let init_dur = Duration::from_secs(vhost_ctx.proxy_ext.init_timeout_sec.max(1));
+    let ka_dur = Duration::from_secs(vhost_ctx.proxy_ext.keep_alive_timeout_sec.max(1));
     let proxy = ReverseProxy::new(&vhost_ctx.proxy_upstream)
-        .with_timeouts(conn_dur, Duration::from_secs(30))
+        .with_timeouts(conn_dur, init_dur)
+        .with_init_timeout(init_dur)
+        .with_keep_alive_timeout(ka_dur)
+        .with_resp_buffer(vhost_ctx.proxy_ext.resp_buffer)
         .with_preserve_host(vhost_ctx.proxy_preserve_host)
         .with_https(is_https);
-
     let is_head = req.method.eq_ignore_ascii_case("HEAD");
+
+    if is_ws {
+        match proxy
+            .tunnel_websocket_request(
+                socket,
+                raw_head.as_bytes(),
+                &req.body,
+                SocketAddr::new(real_ip, 0),
+            )
+            .await
+        {
+            Ok((status, body_bytes)) => return Ok((status, false, body_bytes)),
+            Err(err) => {
+                if err.headers_sent {
+                    let _ = socket.shutdown().await;
+                    return Ok((err.status.unwrap_or(502), false, err.body_bytes_sent));
+                }
+                let (code, reason, err_body): (u16, &str, &[u8]) = match &err.error {
+                    ProxyError::BadRequest => (400, "Bad Request", b"400 Bad Request"),
+                    ProxyError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out")
+                    }
+                    _ => (502, "Bad Gateway", b"502 Bad Gateway - Upstream Unavailable"),
+                };
+                write_http_response(
+                    socket,
+                    code,
+                    reason,
+                    &[("Content-Type".into(), "text/plain".into())],
+                    err_body,
+                    Some(err_body.len()),
+                    is_head,
+                    is_https,
+                    false,
+                    0,
+                    vhost_ctx.headers_policy.as_ref(),
+                    None,
+                )
+                .await?;
+                let sent_err_bytes = if is_head { 0 } else { err_body.len() };
+                return Ok((code, false, sent_err_bytes));
+            }
+        }
+    }
+
     let mut upstream_stream = match state
         .upstream_pool
         .acquire(&vhost_ctx.proxy_upstream, conn_dur)
@@ -2204,40 +2192,43 @@ where
     };
 
     match proxy
-        .forward_http_on_stream(&mut upstream_stream, &raw_full, SocketAddr::new(real_ip, 0))
+        .forward_streaming_on_stream(
+            &mut upstream_stream,
+            socket,
+            raw_head.as_bytes(),
+            &req.body,
+            SocketAddr::new(real_ip, 0),
+            keep_alive,
+        )
         .await
     {
-        Ok((resp_bytes, reusable)) => {
-            if reusable {
+        Ok(res) => {
+            if res.upstream_reusable {
                 state
                     .upstream_pool
                     .release(&vhost_ctx.proxy_upstream, upstream_stream);
             }
-            let status = parse_response_status(&resp_bytes).unwrap_or(200);
-            // [kart-2] Ters vekil yanitinda HTTP basliklari haric gercek gonderilen govde bayti hesaplanir
-            let body_len = if is_head || status == 204 || status == 304 {
-                0
-            } else if let Some(pos) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                resp_bytes.len().saturating_sub(pos + 4)
-            } else if let Some(pos) = resp_bytes.windows(2).position(|w| w == b"\n\n") {
-                resp_bytes.len().saturating_sub(pos + 2)
-            } else {
-                0
-            };
-            socket.write_all(&resp_bytes).await?;
-            let _ = socket.flush().await;
-            let client_keep = keep_alive && reusable && !response_has_connection_close(&resp_bytes);
-            if !client_keep {
+            if !res.client_keep_alive {
                 let _ = socket.shutdown().await;
             }
-            Ok((status, client_keep, body_len))
+            Ok((res.status, res.client_keep_alive, res.body_bytes))
         }
-        Err(_) => {
-            let err_body = b"502 Bad Gateway - Proxy Upstream Unavailable";
+        Err(err) => {
+            if err.headers_sent {
+                let _ = socket.shutdown().await;
+                return Ok((err.status.unwrap_or(502), false, err.body_bytes_sent));
+            }
+            let (code, reason, err_body): (u16, &str, &[u8]) = match &err.error {
+                ProxyError::BadRequest => (400, "Bad Request", b"400 Bad Request"),
+                ProxyError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    (504, "Gateway Timeout", b"504 Gateway Timeout - Proxy Upstream Timed Out")
+                }
+                _ => (502, "Bad Gateway", b"502 Bad Gateway - Proxy Upstream Unavailable"),
+            };
             write_http_response(
                 socket,
-                502,
-                "Bad Gateway",
+                code,
+                reason,
                 &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
                 err_body,
                 Some(err_body.len()),
@@ -2250,11 +2241,12 @@ where
             )
             .await?;
             let sent_err_bytes = if is_head { 0 } else { err_body.len() };
-            Ok((502, false, sent_err_bytes))
+            Ok((code, false, sent_err_bytes))
         }
     }
 }
 
+#[allow(dead_code)]
 fn response_has_connection_close(raw: &[u8]) -> bool {
     let head_end = raw
         .windows(4)
@@ -2527,6 +2519,7 @@ where
     res
 }
 
+#[allow(dead_code)]
 fn parse_response_status(raw: &[u8]) -> Option<u16> {
     let end = raw.windows(2).position(|w| w == b"\r\n")?;
     let line = std::str::from_utf8(&raw[..end]).ok()?;
@@ -3110,6 +3103,8 @@ pub async fn handle_h2_dispatched_request(
                 },
                 proxy_preserve_host: vh.entry.proxy.preserve_host && policies.proxy.preserve_host,
                 proxy_websocket: vh.entry.proxy.websocket && policies.proxy.websocket_upgrade,
+                // [kart-10]
+                proxy_ext: vh.entry.proxy_ext.clone(),
                 auto_webp: policies.static_policy.auto_webp,
                 auto_avif: policies.static_policy.auto_avif,
                 etag_enabled: policies.static_policy.etag_enabled,
@@ -3154,6 +3149,8 @@ pub async fn handle_h2_dispatched_request(
                 proxy_path_prefix: "/".to_string(),
                 proxy_preserve_host: true,
                 proxy_websocket: true,
+                // [kart-10]
+                proxy_ext: zmax_config::ProxyExtConfig::default(),
                 auto_webp: policies.static_policy.auto_webp,
                 auto_avif: policies.static_policy.auto_avif,
                 etag_enabled: policies.static_policy.etag_enabled,
