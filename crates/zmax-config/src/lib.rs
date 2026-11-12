@@ -616,6 +616,8 @@ impl VHostEntry {
         self.tls.validate()?;
         self.php.validate()?;
         self.proxy_ext.validate("vhost.proxy_ext")?;
+        // [kart-9] Basic Authentication bölüm doğrulaması
+        self.auth.validate(&format!("vHost '{}'", self.name))?;
         Ok(())
     }
 }

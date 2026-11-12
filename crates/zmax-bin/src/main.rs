@@ -325,6 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limiter: RwLock::new(zmax_security::RateLimiter::new(rate_max)),
         ban_manager: Arc::new(zmax_security::IpBanManager::new()),
         wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
+        basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
         buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
         upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::new(fastcgi_pool_size)),
         runtime: RwLock::new(RuntimeState {
@@ -959,6 +960,7 @@ mod tests {
             limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {
@@ -2135,6 +2137,7 @@ mod tests {
             limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {
@@ -2539,6 +2542,7 @@ mod tests {
             limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {
@@ -2989,6 +2993,7 @@ mod tests {
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             limiter: tokio::sync::RwLock::new(zmax_security::RateLimiter::new(1000)),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(10, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {

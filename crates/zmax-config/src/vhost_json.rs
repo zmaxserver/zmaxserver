@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::{LoadedVHost, VHostAuthSection, VHostEntry, VHostRewriteRule};
+use crate::{LoadedVHost, VHostEntry, VHostRewriteRule};
 
 /// Bir JSON değerini metin (String) olarak doğrular ve döndürür.
 pub fn val_as_str(v: &Value, field: &str) -> Result<String, String> {
@@ -225,9 +225,12 @@ pub fn merge_vhost_json_patch(
         "error_docs",
         "tls",
         "static",
+<<<<<<< HEAD
         // [kart-3b] Kart 5 ile eklenen hotlink ve acl bölümleri
         "hotlink",
         "acl",
+=======
+        "auth",
     ] {
         if let Some(patch) = obj.get(section) {
             merge_section_object(&mut base_map, section, patch)?;
@@ -461,17 +464,16 @@ pub fn merge_vhost_json_patch(
         entry.proxy.websocket = val_as_bool(v, "websocket")?;
     }
 
-    // Auth (Parola Korumalı Dizinler)
-    if let Some(v) = obj.get("auth") {
-        if let Ok(sec) = serde_json::from_value::<VHostAuthSection>(v.clone()) {
-            entry.auth = sec;
-        }
-    }
+    // Auth (Parola Korumalı Dizinler - bölüm birleştirme yukarıdaki 'auth' üzerinden yapılmıştır)
     if let Some(v) = obj.get("auth_enabled") {
         entry.auth.enabled = val_as_bool(v, "auth_enabled")?;
     }
     if let Some(v) = obj.get("auth_realm") {
         entry.auth.realm = val_as_str(v, "auth_realm")?;
+    }
+    if let Some(v) = obj.get("auth_path_prefix") {
+        let p = val_as_str(v, "auth_path_prefix")?;
+        entry.auth.path_prefix = if p.trim().is_empty() { None } else { Some(p) };
     }
     if let Some(v) = obj.get("htpasswd_path") {
         let p = val_as_str(v, "htpasswd_path")?;
@@ -1116,6 +1118,44 @@ mod tests {
         let payload = r#"{"tls_min_version": "1.0"}"#;
         let err = merge_vhost_json_patch(&base, "test.local", payload.as_bytes()).unwrap_err();
         assert!(err.contains("tls.min_version") || err.contains("min_version"));
+
+        // 10. Geçersiz auth yapısı reddedilmeli (sessizce yutulmamalı)
+        let payload = r#"{"auth": "bozuk"}"#;
+        assert!(merge_vhost_json_patch(&base, "test.local", payload.as_bytes()).is_err());
+
+        // 11. Auth realm header enjeksiyonu reddedilmeli
+        let payload = r#"{"auth_enabled": true, "auth_realm": "Kotu\nX:1"}"#;
+        assert!(merge_vhost_json_patch(&base, "test.local", payload.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn test_merge_vhost_json_auth_roundtrip() {
+        let base = VHostEntry::default();
+        let payload = r#"{
+            "auth": {
+                "enabled": true,
+                "realm": "Ozel Alan",
+                "path_prefix": "/gizli",
+                "htpasswd_path": "conf/auth/ozel.htpasswd",
+                "directories": [
+                    {
+                        "path": "/admin",
+                        "realm": "Yonetim"
+                    }
+                ]
+            }
+        }"#;
+        let entry = merge_vhost_json_patch(&base, "auth.test", payload.as_bytes())
+            .expect("Auth JSON patch başarılı olmalı");
+        assert!(entry.auth.enabled);
+        assert_eq!(entry.auth.realm, "Ozel Alan");
+        assert_eq!(entry.auth.path_prefix.as_deref(), Some("/gizli"));
+        assert_eq!(entry.auth.directories.len(), 1);
+        assert_eq!(entry.auth.directories[0].path, "/admin");
+
+        let toml_str = serialize_vhost_toml(&entry).unwrap();
+        let reloaded: crate::VHostFileDocument = toml::from_str(&toml_str).unwrap();
+        assert!(vhost_entry_eq(&entry, &reloaded.vhost));
     }
 
     #[test]

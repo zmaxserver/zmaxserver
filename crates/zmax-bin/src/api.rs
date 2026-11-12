@@ -63,6 +63,7 @@ pub struct ServerState {
     pub limiter: RwLock<zmax_security::RateLimiter>,
     pub ban_manager: Arc<zmax_security::IpBanManager>,
     pub wp_guard: Arc<zmax_security::WpBruteForceGuard>,
+    pub basic_auth: Arc<zmax_security::BasicAuthManager>, // [kart-9]
     pub buffer_pool: Arc<zmax_pool::BufferPool>,
     pub upstream_pool: Arc<zmax_pool::UpstreamSocketPool>,
     pub runtime: RwLock<RuntimeState>,
@@ -1870,6 +1871,7 @@ token = "api-secret-token"
             limiter: RwLock::new(zmax_security::RateLimiter::new(1000)),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {
@@ -2105,6 +2107,7 @@ path = "conf/vhosts"
             limiter: RwLock::new(zmax_security::RateLimiter::new(1000)),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {

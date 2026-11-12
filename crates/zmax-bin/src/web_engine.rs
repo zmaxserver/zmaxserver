@@ -87,6 +87,7 @@ pub struct ResolvedVHostContext {
     pub logging: zmax_config::VHostLoggingSection,
     pub tls_http2: bool,
     pub acme_root: Option<PathBuf>,
+    pub auth: zmax_config::VHostAuthSection, // [kart-9]
 }
 
 /// [kart-cache-1] Önbellek etiketlerine alan adı varyantlarını ve ham URI etiketlerini ekler.
@@ -325,6 +326,7 @@ where
                         Some(&vh.entry),
                         &state.base_dir,
                     ),
+                    auth: vh.entry.auth.clone(),
                 }
             }
             None => ResolvedVHostContext {
@@ -377,6 +379,7 @@ where
                 logging: zmax_config::VHostLoggingSection::default(),
                 tls_http2: true,
                 acme_root: None,
+                auth: zmax_config::VHostAuthSection::default(),
             },
         };
         (policies, redis_client, ctx)
@@ -595,6 +598,52 @@ where
             return Ok(keep_alive);
         }
         crate::security_pipeline::SecurityVerdict::Allowed => {}
+    }
+
+    // 4.5. [kart-9] Basic Authentication ($apr1$ & Argon2id)
+    if let zmax_security::AuthDecision::Unauthorized { realm } =
+        crate::security_pipeline::evaluate_basic_auth(
+            &vhost_ctx,
+            &req.path,
+            &req.headers,
+            &state.basic_auth,
+            &state.base_dir,
+        )
+    {
+        let (auth_headers, auth_body) =
+            crate::security_pipeline::build_unauthorized_response(&vhost_ctx, &realm, None);
+        let written_bytes = if is_head { 0 } else { auth_body.len() };
+        write_http_response(
+            socket,
+            401,
+            "Unauthorized",
+            &auth_headers,
+            &auth_body,
+            Some(auth_body.len()),
+            is_head,
+            is_https,
+            keep_alive,
+            keep_alive_timeout_sec,
+            sec_ref,
+            None,
+        )
+        .await?;
+        record_and_log(
+            state,
+            &real_ip_str,
+            &req.method,
+            &req.path,
+            401,
+            started,
+            Some(&vhost_ctx),
+            written_bytes,
+            referer_hdr,
+            ua_hdr,
+            "HTTP/1.1",
+            &req_id,
+        )
+        .await;
+        return Ok(keep_alive);
     }
 
     // 5. Ters Proxy & WebSocket Yönlendirmesi (zmax-proxy + UpstreamSocketPool)
@@ -3714,6 +3763,7 @@ pub async fn handle_h2_dispatched_request(
                     Some(&vh.entry),
                     &state.base_dir,
                 ),
+                auth: vh.entry.auth.clone(),
             },
             None => ResolvedVHostContext {
                 doc_root: state.base_dir.join("www").join("html"),
@@ -3757,6 +3807,7 @@ pub async fn handle_h2_dispatched_request(
                 logging: zmax_config::VHostLoggingSection::default(),
                 tls_http2: true,
                 acme_root: None,
+                auth: zmax_config::VHostAuthSection::default(),
             },
         };
         (policies, ctx)
@@ -3858,6 +3909,22 @@ pub async fn handle_h2_dispatched_request(
             return Ok((301, headers, bytes::Bytes::new(), log_meta));
         }
         crate::security_pipeline::SecurityVerdict::Allowed => {}
+    }
+
+    // 4. [kart-9] Basic Authentication ($apr1$ & Argon2id)
+    if let zmax_security::AuthDecision::Unauthorized { realm } =
+        crate::security_pipeline::evaluate_basic_auth(
+            &vhost_ctx,
+            &req.path,
+            &req.headers,
+            &state.basic_auth,
+            &state.base_dir,
+        )
+    {
+        let req_id_opt = (!req_id.is_empty()).then_some(req_id);
+        let (headers, body) =
+            crate::security_pipeline::build_unauthorized_response(&vhost_ctx, &realm, req_id_opt);
+        return Ok((401, headers, bytes::Bytes::from(body), log_meta));
     }
 
     // 4b. [matris-cache-tags] PURGE metodu / X-LiteSpeed-Purge istek basligi (HTTP/1.1 ile ayni yetki denetimi)

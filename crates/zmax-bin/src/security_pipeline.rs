@@ -149,6 +149,69 @@ pub fn is_request_hotlink_blocked(
     )
 }
 
+// [kart-9] Basic Authentication ortak denetim ve 401 yanit yardimcilari
+/// Hem HTTP/1.1 hem HTTP/2 boru hattında çalıştırılan ortak Basic Auth kapısı (ACME HTTP-01 muaftır).
+pub fn evaluate_basic_auth(
+    vhost_ctx: &ResolvedVHostContext,
+    request_path: &str,
+    headers: &[(String, String)],
+    basic_auth: &zmax_security::BasicAuthManager,
+    base_dir: &std::path::Path,
+) -> zmax_security::AuthDecision {
+    if !vhost_ctx.auth.enabled || is_acme_challenge(request_path) {
+        return zmax_security::AuthDecision::Allowed;
+    }
+    let auth_header = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v.as_str());
+    basic_auth.check_request_with_base(auth_header, request_path, &vhost_ctx.auth, Some(base_dir))
+}
+
+/// 401 Unauthorized yanıtı için `WWW-Authenticate: Basic realm="..."` başlıklarını ve gövdeyi oluşturur.
+pub fn build_unauthorized_response(
+    vhost_ctx: &ResolvedVHostContext,
+    realm: &str,
+    req_id: Option<&str>,
+) -> (Vec<(String, String)>, Vec<u8>) {
+    let default_body = b"401 Unauthorized - Authentication Required\n";
+    let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&401) {
+        let custom_dir = if vhost_ctx.error_docs.dir.trim().is_empty() {
+            None
+        } else {
+            Some(std::path::Path::new(vhost_ctx.error_docs.dir.trim()))
+        };
+        let handler = zmax_static::StaticFileHandler::new(&vhost_ctx.doc_root);
+        handler
+            .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+            .unwrap_or_else(|_| default_body.to_vec())
+    } else {
+        default_body.to_vec()
+    };
+
+    let content_type = if body.starts_with(b"<!DOCTYPE") || body.starts_with(b"<html") {
+        "text/html; charset=utf-8"
+    } else {
+        "text/plain; charset=utf-8"
+    };
+
+    let mut headers = vec![
+        (
+            "WWW-Authenticate".to_string(),
+            zmax_security::format_www_authenticate_header(realm),
+        ),
+        ("Cache-Control".to_string(), "no-store".to_string()),
+        ("Content-Type".to_string(), content_type.to_string()),
+    ];
+    if let Some(id) = req_id {
+        if !id.is_empty() {
+            headers.push(("x-request-id".to_string(), id.to_string()));
+        }
+    }
+
+    (headers, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_merged_vhost_acl;
@@ -205,4 +268,5 @@ mod tests {
         assert!(!acl2.is_allowed("203.0.113.44".parse().unwrap()));
         assert!(acl2.is_allowed("127.0.0.1".parse().unwrap()));
     }
+}
 }
