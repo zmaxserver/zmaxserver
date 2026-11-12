@@ -990,7 +990,7 @@ max_conns = 128
     assert_eq!(vh.proxy.upstream, "127.0.0.1:8026");
     assert_eq!(vh.proxy_ext.init_timeout_sec, 300);
     assert_eq!(vh.proxy_ext.keep_alive_timeout_sec, 60);
-    assert_eq!(vh.proxy_ext.connect_timeout_sec, 10);
+    assert_eq!(vh.proxy_ext.connect_timeout_sec, Some(10));
     assert!(!vh.proxy_ext.resp_buffer);
     assert_eq!(vh.proxy_ext.max_conns, 128);
     assert!(vh.validate().is_ok());

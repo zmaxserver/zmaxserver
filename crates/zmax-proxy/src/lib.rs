@@ -5,11 +5,13 @@
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
@@ -69,6 +71,7 @@ pub struct ReverseProxy {
     preserve_host: bool,
     https: bool,
     max_conns: usize,
+    ws_idle_timeout: Duration,
 }
 
 impl ReverseProxy {
@@ -83,6 +86,7 @@ impl ReverseProxy {
             preserve_host: true,
             https: false,
             max_conns: 0,
+            ws_idle_timeout: DEFAULT_WS_IDLE_TIMEOUT,
         }
     }
 
@@ -121,6 +125,12 @@ impl ReverseProxy {
 
     pub fn with_max_conns(mut self, max_conns: usize) -> Self {
         self.max_conns = max_conns;
+        self
+    }
+
+    /// WebSocket tünelinde iki yönde de bayt akmadığında tünelin kapatıldığı boşta süre.
+    pub fn with_ws_idle_timeout(mut self, ws_idle_timeout: Duration) -> Self {
+        self.ws_idle_timeout = ws_idle_timeout;
         self
     }
 
@@ -635,6 +645,141 @@ impl ReverseProxy {
         })
     }
 
+    /// İsteği `UpstreamSocketPool` soketine yazar, yanıt başını `init_timeout` içinde okur ve
+    /// `(baş, gövde_okuyucu)` döner. Gövde `DecodedBodyReader::next_chunk` ile ARTIMLI olarak
+    /// (Content-Length / chunked / EOF çerçevesi çözülmüş, tamponlamadan) okunur; HTTP/2 gibi
+    /// `Transfer-Encoding` taşımayan istemci protokolleri için uygundur. Hata, başlık istemciye
+    /// gitmeden önce döndüğü için çağıran 400/502/504 yazabilir.
+    pub async fn begin_decoded_response(
+        &self,
+        upstream_stream: &mut TcpStream,
+        request_head: &[u8],
+        request_body: &[u8],
+        client_ip: SocketAddr,
+    ) -> Result<(UpstreamResponseHead, DecodedBodyReader), StreamForwardError> {
+        let before_headers = |error: ProxyError| StreamForwardError {
+            error,
+            headers_sent: false,
+            status: None,
+            body_bytes_sent: 0,
+        };
+        let opts = self.rewrite_options();
+        let (is_head, rewritten_head) =
+            rewrite_head_with_method(request_head, client_ip.ip(), self.https, &opts, true)
+                .ok_or_else(|| before_headers(ProxyError::BadRequest))?;
+
+        let _ = upstream_stream.set_nodelay(true);
+        upstream_stream
+            .write_all(&rewritten_head)
+            .await
+            .map_err(|e| before_headers(ProxyError::Io(e)))?;
+        if !request_body.is_empty() {
+            upstream_stream
+                .write_all(request_body)
+                .await
+                .map_err(|e| before_headers(ProxyError::Io(e)))?;
+        }
+        upstream_stream
+            .flush()
+            .await
+            .map_err(|e| before_headers(ProxyError::Io(e)))?;
+
+        let mut head_buf = Vec::with_capacity(4096);
+        let mut buf = [0u8; STREAM_BUF_BYTES];
+        let header_deadline = tokio::time::Instant::now() + self.init_timeout;
+        let (header_end, head_info) = loop {
+            if let Some(end) = find_header_end(&head_buf) {
+                let info =
+                    inspect_response_framing(&head_buf[..end], is_head).map_err(before_headers)?;
+                if info.status == 100 {
+                    head_buf.drain(..end);
+                    continue;
+                }
+                break (end, info);
+            }
+            if head_buf.len() >= MAX_RESPONSE_HEADER_BYTES {
+                return Err(before_headers(ProxyError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Arka uc yanit basligi maksimum boyutu asti",
+                ))));
+            }
+            let n = read_with_deadline(
+                upstream_stream,
+                &mut buf,
+                header_deadline,
+                "Arka uc yanit okuma zaman asimina ugradi",
+            )
+            .await
+            .map_err(before_headers)?;
+            if n == 0 {
+                return Err(before_headers(ProxyError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Arka uc yanit gondermeden baglantiyi kapatti",
+                ))));
+            }
+            head_buf.extend_from_slice(&buf[..n]);
+        };
+
+        let mut hs = [httparse::EMPTY_HEADER; 128];
+        let mut parsed = httparse::Response::new(&mut hs);
+        if !matches!(
+            parsed.parse(&head_buf[..header_end]),
+            Ok(httparse::Status::Complete(_))
+        ) {
+            return Err(before_headers(ProxyError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Arka uc gecersiz HTTP yanit basligi dondu",
+            ))));
+        }
+        let mut headers = Vec::with_capacity(parsed.headers.len());
+        for h in parsed.headers.iter() {
+            let name = h.name.to_ascii_lowercase();
+            if is_response_hop_by_hop(&name) {
+                continue;
+            }
+            headers.push((name, String::from_utf8_lossy(h.value).into_owned()));
+        }
+
+        let pending = head_buf.split_off(header_end);
+        let mut reader = DecodedBodyReader {
+            framing: head_info.framing,
+            tracker: ChunkedStreamTracker::new(),
+            remaining: 0,
+            pending,
+            finished: false,
+            reusable: head_info.header_allows_keep_alive,
+            idle_timeout: self.init_timeout,
+        };
+        match reader.framing {
+            ResponseFraming::NoBody => {
+                if !reader.pending.is_empty() {
+                    reader.reusable = false;
+                    reader.pending.clear();
+                }
+                reader.finished = true;
+            }
+            ResponseFraming::ContentLength(len) => {
+                reader.remaining = len;
+                if len == 0 {
+                    if !reader.pending.is_empty() {
+                        reader.reusable = false;
+                        reader.pending.clear();
+                    }
+                    reader.finished = true;
+                }
+            }
+            ResponseFraming::Chunked | ResponseFraming::UntilEof => {}
+        }
+        Ok((
+            UpstreamResponseHead {
+                status: head_info.status,
+                headers,
+                is_sse: head_info.is_sse,
+            },
+            reader,
+        ))
+    }
+
     /// WebSocket `Upgrade` isteğini `X-Forwarded-*` başlıklarıyla arka uca iletir, ilk el sıkışma
     /// (`101 Switching Protocols` vb.) yanıtını `init_timeout` içinde bekler ve çift yönlü tünel kurar.
     pub async fn tunnel_websocket_request<S>(
@@ -787,10 +932,15 @@ impl ReverseProxy {
         let initial_extra_len = head_buf.len().saturating_sub(header_end);
 
         if head_info.status == 101 {
-            let copied = tokio::io::copy_bidirectional(client, &mut upstream).await;
+            let copied = copy_bidirectional_idle(client, &mut upstream, self.ws_idle_timeout).await;
             let tunneled_bytes = match copied {
-                Ok((_, u2c)) => initial_extra_len.saturating_add(u2c as usize),
-                Err(_) => initial_extra_len,
+                Ok((_, u2c)) => {
+                    initial_extra_len.saturating_add(usize::try_from(u2c).unwrap_or(usize::MAX))
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "websocket tuneli sonlandi");
+                    initial_extra_len
+                }
             };
             return Ok((101, tunneled_bytes));
         }
@@ -813,7 +963,15 @@ impl ReverseProxy {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut upstream_stream = TcpStream::connect(&self.upstream_addr).await?;
         let _ = upstream_stream.set_nodelay(true);
-        let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut upstream_stream).await;
+        if let Err(e) = copy_bidirectional_idle(
+            &mut client_stream,
+            &mut upstream_stream,
+            self.ws_idle_timeout,
+        )
+        .await
+        {
+            tracing::debug!(error = %e, "websocket tuneli sonlandi");
+        }
         Ok(())
     }
 }
@@ -839,6 +997,228 @@ impl fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
+/// Arka uç yanıtının HTTP/2 gibi hop-by-hop alanları taşımayan istemci protokolüne uygun başı.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamResponseHead {
+    pub status: u16,
+    /// Küçük harfli ad + değer; hop-by-hop alanlar (`transfer-encoding` dahil) çıkarılmıştır.
+    pub headers: Vec<(String, String)>,
+    pub is_sse: bool,
+}
+
+fn is_response_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+/// Arka uç yanıt gövdesini artımlı okuyup çerçevesini (Content-Length / chunked / EOF) çözen okuyucu.
+/// Bellekte yalnız tek bir okuma tamponu (8 KiB) ve başlıkla birlikte gelen ilk gövde baytları tutulur.
+#[derive(Debug)]
+pub struct DecodedBodyReader {
+    framing: ResponseFraming,
+    tracker: ChunkedStreamTracker,
+    remaining: usize,
+    pending: Vec<u8>,
+    finished: bool,
+    reusable: bool,
+    idle_timeout: Duration,
+}
+
+impl DecodedBodyReader {
+    /// Gövdenin tamamı okunduysa `true`.
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Gövde eksiksiz ve fazladan bayt olmadan bittiyse arka uç soketi yeniden kullanılabilir.
+    pub fn upstream_reusable(&self) -> bool {
+        self.finished && self.reusable
+    }
+
+    /// Sıradaki çözülmüş gövde parçasını verir; gövde bitince `Ok(None)`. İki okuma arasındaki
+    /// bekleme `init_timeout` ile sınırlıdır (zaman aşımı `ErrorKind::TimedOut`).
+    pub async fn next_chunk(
+        &mut self,
+        upstream_stream: &mut TcpStream,
+    ) -> Result<Option<Vec<u8>>, ProxyError> {
+        let mut buf = [0u8; STREAM_BUF_BYTES];
+        loop {
+            if self.finished {
+                return Ok(None);
+            }
+            let out = if !self.pending.is_empty() {
+                let data = std::mem::take(&mut self.pending);
+                self.consume(&data)?
+            } else {
+                let n = read_with_idle_timeout(
+                    upstream_stream,
+                    &mut buf,
+                    self.idle_timeout,
+                    "Arka uc govde okuma zaman asimina ugradi",
+                )
+                .await?;
+                if n == 0 {
+                    if matches!(self.framing, ResponseFraming::UntilEof) {
+                        self.finished = true;
+                        return Ok(None);
+                    }
+                    return Err(ProxyError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Arka uc yanit govdesi tamamlanmadan baglantiyi kapatti",
+                    )));
+                }
+                self.consume(&buf[..n])?
+            };
+            if !out.is_empty() {
+                return Ok(Some(out));
+            }
+        }
+    }
+
+    fn consume(&mut self, data: &[u8]) -> Result<Vec<u8>, ProxyError> {
+        match self.framing {
+            ResponseFraming::NoBody => Ok(Vec::new()),
+            ResponseFraming::ContentLength(_) => {
+                let take = self.remaining.min(data.len());
+                if take < data.len() {
+                    self.reusable = false;
+                }
+                self.remaining -= take;
+                if self.remaining == 0 {
+                    self.finished = true;
+                }
+                Ok(data[..take].to_vec())
+            }
+            ResponseFraming::Chunked => {
+                let mut out = Vec::with_capacity(data.len());
+                let (consumed, finished) = self.tracker.feed_decode(data, &mut out)?;
+                if finished {
+                    self.finished = true;
+                    if consumed < data.len() {
+                        self.reusable = false;
+                    }
+                }
+                Ok(out)
+            }
+            ResponseFraming::UntilEof => {
+                self.reusable = false;
+                Ok(data.to_vec())
+            }
+        }
+    }
+}
+
+/// `Connection` listesinde çerçeveleme/yönlendirme alanı (`content-length`, `host`,
+/// `transfer-encoding`) adlandıran istek RFC 9110 §7.6.1 gereği reddedilmelidir: bu alanları
+/// sessizce soymak vekil ile arka uç arasında istek çerçevesi ayrışmasına (smuggling) yol açar.
+pub fn connection_names_protected_field<'a, I>(headers: I) -> bool
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    headers
+        .into_iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, value)| value.split(','))
+        .any(|token| {
+            let t = token.trim();
+            t.eq_ignore_ascii_case("content-length")
+                || t.eq_ignore_ascii_case("host")
+                || t.eq_ignore_ascii_case("transfer-encoding")
+        })
+}
+
+fn request_connection_rejected(req: &httparse::Request<'_, '_>) -> bool {
+    req.headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("connection"))
+        .any(|h| {
+            let value = String::from_utf8_lossy(h.value).into_owned();
+            connection_names_protected_field([("connection", value.as_str())])
+        })
+}
+
+/// İki yönlü kopyalama (WebSocket tüneli). İki yönde de `idle` süresi boyunca hiç bayt akmazsa
+/// `ErrorKind::TimedOut` döner ve iki uç da kapanır. Dönen çift: `(a -> b, b -> a)` bayt sayısı.
+pub async fn copy_bidirectional_idle<A, B>(
+    a: &mut A,
+    b: &mut B,
+    idle: Duration,
+) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let start = tokio::time::Instant::now();
+    let activity = AtomicU64::new(0);
+    let (mut a_read, mut a_write) = tokio::io::split(a);
+    let (mut b_read, mut b_write) = tokio::io::split(b);
+
+    let copy_both = async {
+        tokio::try_join!(
+            pump_with_activity(&mut a_read, &mut b_write, &activity, start),
+            pump_with_activity(&mut b_read, &mut a_write, &activity, start)
+        )
+    };
+    let idle_watch = async {
+        loop {
+            let last = activity.load(Ordering::Acquire);
+            tokio::time::sleep_until(start + Duration::from_millis(last) + idle).await;
+            if activity.load(Ordering::Acquire) == last {
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        res = copy_both => res,
+        _ = idle_watch => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "tunel bosta sure asimina ugradi",
+        )),
+    }
+}
+
+async fn pump_with_activity<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    activity: &AtomicU64,
+    start: tokio::time::Instant,
+) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = [0u8; STREAM_BUF_BYTES];
+    let mut total = 0u64;
+    let stamp = || {
+        let ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        activity.fetch_max(ms, Ordering::AcqRel);
+    };
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            writer.shutdown().await?;
+            return Ok(total);
+        }
+        stamp();
+        writer.write_all(&buf[..n]).await?;
+        writer.flush().await?;
+        stamp();
+        total += n as u64;
+    }
+}
+
+
 /// İstek başını arka uç için yeniden yazar: mevcut `X-Forwarded-For` değerlerini koruyup
 /// gerçek istemci IP adresini **sonuna** ekler (yoksa doğrudan yazar), `X-Real-IP` ve
 /// `X-Forwarded-Proto` (`http`/`https`) ile `X-Forwarded-Host` başlıklarını ekler;
@@ -860,6 +1240,9 @@ pub fn rewrite_request_head_with_options(
         httparse::Status::Complete(_) => {}
         httparse::Status::Partial => return None,
     }
+    if request_connection_rejected(&req) {
+        return None;
+    }
     Some(build_rewritten_head(&req, client_ip, https, options))
 }
 
@@ -875,6 +1258,9 @@ fn rewrite_head_with_method(
     match req.parse(head).ok()? {
         httparse::Status::Complete(_) => {}
         httparse::Status::Partial => return None,
+    }
+    if request_connection_rejected(&req) {
+        return None;
     }
     let is_head = req
         .method
@@ -897,6 +1283,9 @@ fn rewrite_full_request(
         httparse::Status::Complete(offset) => offset,
         httparse::Status::Partial => return None,
     };
+    if request_connection_rejected(&req) {
+        return None;
+    }
     let is_head = req
         .method
         .map(|m| m.eq_ignore_ascii_case("HEAD"))
@@ -1043,6 +1432,7 @@ fn build_rewritten_head_internal(
     out
 }
 
+#[derive(Debug, Clone, Copy)]
 enum ResponseFraming {
     NoBody,
     ContentLength(usize),
@@ -1196,11 +1586,13 @@ fn is_chunked_complete(body: &[u8]) -> Result<Option<usize>, ProxyError> {
 
 /// Parça parça gelen HTTP chunked akışını bellekte tamponlamadan tarayarak
 /// son chunk (`0\r\n\r\n`) sınırını tespit eder.
+#[derive(Debug)]
 struct ChunkedStreamTracker {
     state: ChunkTrackState,
     line_buf: Vec<u8>,
 }
 
+#[derive(Debug)]
 enum ChunkTrackState {
     SizeLine,
     ChunkData(usize),
@@ -1220,6 +1612,20 @@ impl ChunkedStreamTracker {
     }
 
     fn feed(&mut self, data: &[u8]) -> Result<(usize, bool), ProxyError> {
+        self.feed_inner(data, None)
+    }
+
+    /// `feed` ile aynı çerçeve taraması; ek olarak chunk VERİ baytlarını `out`'a ekler
+    /// (boyut satırları, CRLF ve trailer atılır).
+    fn feed_decode(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<(usize, bool), ProxyError> {
+        self.feed_inner(data, Some(out))
+    }
+
+    fn feed_inner(
+        &mut self,
+        data: &[u8],
+        mut out: Option<&mut Vec<u8>>,
+    ) -> Result<(usize, bool), ProxyError> {
         let mut i = 0usize;
         while i < data.len() {
             match self.state {
@@ -1263,6 +1669,9 @@ impl ChunkedStreamTracker {
                 ChunkTrackState::ChunkData(rem) => {
                     let avail = data.len() - i;
                     let take = rem.min(avail);
+                    if let Some(o) = out.as_deref_mut() {
+                        o.extend_from_slice(&data[i..i + take]);
+                    }
                     i += take;
                     let left = rem - take;
                     if left == 0 {
@@ -2497,5 +2906,216 @@ mod tests {
         assert!(!s.contains("Trailers:"), "Trailers dusmeli");
         assert!(!s.contains("Transfer-Encoding:"), "Transfer-Encoding dusmeli");
         assert!(!s.contains("Upgrade:"), "Upgrade dusmeli");
+    }
+
+    #[test]
+    fn connection_header_naming_protected_field_is_detected() {
+        for v in [
+            "content-length",
+            "Content-Length",
+            "keep-alive, content-length",
+            " host ",
+            "close,Transfer-Encoding",
+        ] {
+            assert!(
+                connection_names_protected_field([("Connection", v)]),
+                "reddedilmeliydi: {v}"
+            );
+        }
+        for v in ["keep-alive", "close", "upgrade", "x-custom-token"] {
+            assert!(
+                !connection_names_protected_field([("Connection", v)]),
+                "reddedilmemeliydi: {v}"
+            );
+        }
+        // Connection olmayan baslik adi bu denetimi tetiklemez
+        assert!(!connection_names_protected_field([("X-Note", "host")]));
+        // Iki ayri Connection basligindan biri yeter
+        assert!(connection_names_protected_field([
+            ("Connection", "close"),
+            ("connection", "Content-Length"),
+        ]));
+    }
+
+    #[test]
+    fn rewrite_rejects_connection_naming_framing_field() {
+        let head = b"POST / HTTP/1.1\r\nHost: a\r\nConnection: Content-Length\r\nContent-Length: 3\r\n\r\n";
+        assert!(rewrite_request_head(head, "10.0.0.1".parse().unwrap(), false).is_none());
+        let ok =
+            b"POST / HTTP/1.1\r\nHost: a\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\n";
+        assert!(rewrite_request_head(ok, "10.0.0.1".parse().unwrap(), false).is_some());
+    }
+
+    #[test]
+    fn chunked_tracker_decode_emits_only_data_bytes_byte_by_byte() {
+        let wire: &[u8] = b"5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\nX-T: 1\r\n\r\nEXTRA";
+        let mut t = ChunkedStreamTracker::new();
+        let mut out = Vec::new();
+        let mut done_at = None;
+        for (i, b) in wire.iter().enumerate() {
+            let (consumed, fin) = t.feed_decode(std::slice::from_ref(b), &mut out).unwrap();
+            if fin {
+                assert_eq!(consumed, 1);
+                done_at = Some(i);
+                break;
+            }
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), "hello world");
+        assert_eq!(done_at, Some(wire.len() - "EXTRA".len() - 1));
+    }
+
+    #[test]
+    fn chunked_tracker_decode_rejects_bad_framing() {
+        let mut t = ChunkedStreamTracker::new();
+        let mut out = Vec::new();
+        assert!(t.feed_decode(b"zz\r\nabc\r\n", &mut out).is_err());
+        let mut t = ChunkedStreamTracker::new();
+        assert!(t.feed_decode(b"3\r\nabcXX", &mut out).is_err());
+    }
+
+    async fn serve_once(response: &'static [u8], part_len: usize, gap: Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut tmp = [0u8; 2048];
+            let _ = s.read(&mut tmp).await.unwrap();
+            for part in response.chunks(part_len) {
+                s.write_all(part).await.unwrap();
+                s.flush().await.unwrap();
+                tokio::time::sleep(gap).await;
+            }
+            // baglanti acik kalir (keep-alive); gorev test bitince sonlanir
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        addr
+    }
+
+    async fn drain_body(
+        proxy: &ReverseProxy,
+        upstream: &str,
+    ) -> (UpstreamResponseHead, Vec<u8>, bool) {
+        let mut s = TcpStream::connect(upstream).await.unwrap();
+        let (head, mut reader) = proxy
+            .begin_decoded_response(
+                &mut s,
+                b"GET /x HTTP/1.1\r\nHost: a\r\n\r\n",
+                b"",
+                "10.0.0.1:0".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = Vec::new();
+        while let Some(c) = reader.next_chunk(&mut s).await.unwrap() {
+            assert!(!c.is_empty());
+            body.extend_from_slice(&c);
+        }
+        (head, body, reader.upstream_reusable())
+    }
+
+    #[tokio::test]
+    async fn begin_decoded_response_decodes_chunked_and_strips_hop_by_hop() {
+        let addr = serve_once(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+            7,
+            Duration::from_millis(2),
+        )
+        .await;
+        let proxy =
+            ReverseProxy::new(&addr).with_timeouts(Duration::from_secs(2), Duration::from_secs(2));
+        let (head, body, reusable) = drain_body(&proxy, &addr).await;
+        assert_eq!(head.status, 200);
+        assert_eq!(String::from_utf8(body).unwrap(), "hello world");
+        assert!(
+            reusable,
+            "tam bitmis chunked yanit baglantiyi yeniden kullanilabilir birakmali"
+        );
+        assert!(head
+            .headers
+            .iter()
+            .any(|(k, v)| k == "content-type" && v == "text/plain"));
+        assert!(!head
+            .headers
+            .iter()
+            .any(|(k, _)| k == "transfer-encoding" || k == "connection"));
+    }
+
+    #[tokio::test]
+    async fn begin_decoded_response_content_length_and_extra_bytes_disable_reuse() {
+        let addr = serve_once(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcdSMUGGLED",
+            usize::MAX,
+            Duration::from_millis(1),
+        )
+        .await;
+        let proxy =
+            ReverseProxy::new(&addr).with_timeouts(Duration::from_secs(2), Duration::from_secs(2));
+        let (head, body, reusable) = drain_body(&proxy, &addr).await;
+        assert_eq!(head.status, 200);
+        assert_eq!(body, b"abcd");
+        assert!(
+            !reusable,
+            "govdeden fazla bayt gelen baglanti havuza donmemeli"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_decoded_response_truncated_body_is_error_and_idle_times_out() {
+        let addr = serve_once(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc",
+            7,
+            Duration::from_millis(1),
+        )
+        .await;
+        let proxy = ReverseProxy::new(&addr)
+            .with_timeouts(Duration::from_secs(2), Duration::from_millis(300));
+        let mut s = TcpStream::connect(&addr).await.unwrap();
+        let (_, mut reader) = proxy
+            .begin_decoded_response(
+                &mut s,
+                b"GET / HTTP/1.1\r\nHost: a\r\n\r\n",
+                b"",
+                "10.0.0.1:0".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reader.next_chunk(&mut s).await.unwrap().unwrap(), b"abc");
+        match reader.next_chunk(&mut s).await {
+            Err(ProxyError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
+            other => panic!("zaman asimi bekleniyordu: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_bidirectional_idle_closes_silent_pair_and_keeps_active_pair() {
+        use tokio::io::duplex;
+        // Sessiz cift: bosta sure dolunca TimedOut
+        let (_a_local, mut a_remote) = duplex(1024);
+        let (mut b_local, _b_remote) = duplex(1024);
+        let t0 = tokio::time::Instant::now();
+        let r =
+            copy_bidirectional_idle(&mut a_remote, &mut b_local, Duration::from_millis(200)).await;
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(t0.elapsed() >= Duration::from_millis(190));
+
+        // Etkin cift: bosta sureden kisa araliklarla trafik tuneli acik tutar, EOF temiz biter
+        let (mut client, mut proxy_a) = duplex(1024);
+        let (mut proxy_b, mut server) = duplex(1024);
+        let tunnel = tokio::spawn(async move {
+            copy_bidirectional_idle(&mut proxy_a, &mut proxy_b, Duration::from_millis(300)).await
+        });
+        for i in 0..5u8 {
+            client.write_all(&[i]).await.unwrap();
+            let mut got = [0u8; 1];
+            server.read_exact(&mut got).await.unwrap();
+            assert_eq!(got[0], i);
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        client.shutdown().await.unwrap();
+        let mut rest = Vec::new();
+        server.read_to_end(&mut rest).await.unwrap();
+        server.shutdown().await.unwrap();
+        let (a_to_b, _) = tunnel.await.unwrap().unwrap();
+        assert_eq!(a_to_b, 5);
     }
 }
