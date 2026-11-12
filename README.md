@@ -23,7 +23,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 ### Son gelişmeler
 
 - Sanal konak REST API'si hotlink ve IP erişim listesi alanlarını destekliyor.
-- Önbellek temizleme (purge) alan adı ve URI bazında çalışıyor; vhost izolasyonu korunuyor.
+- Önbellek temizleme (purge) alan adı, URI ve etiket bazında çalışıyor; yetkilendirme (IP/anahtar) ve vhost izolasyonu korunuyor.
 - ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
 - HTTP/1.1 ve HTTP/2 aynı güvenlik denetim hattından geçiyor (`[vhost.acl]` dahil).
 - Ters vekil, Basic Auth, WAF olay günlüğü ve ayrıcalık düşürme güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
