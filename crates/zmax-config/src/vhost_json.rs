@@ -225,11 +225,9 @@ pub fn merge_vhost_json_patch(
         "error_docs",
         "tls",
         "static",
-<<<<<<< HEAD
         // [kart-3b] Kart 5 ile eklenen hotlink ve acl bölümleri
         "hotlink",
         "acl",
-=======
         "auth",
     ] {
         if let Some(patch) = obj.get(section) {
