@@ -8,6 +8,7 @@ license.workspace = true
 tokio = { version = "1.38", features = ["net", "io-util", "time", "macros"] }
 bytes = "1.6"
 httparse = "1.10.1"
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.38", features = ["full"] }

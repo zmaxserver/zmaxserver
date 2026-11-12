@@ -16,6 +16,10 @@ pub use security_ext::{default_hotlink_extensions, HotlinkConfig, VhostAclConfig
 pub mod acme;
 pub use acme::AcmeConfig;
 
+// [kart-10] Sanal konak ters vekil zaman aşımı, keep-alive ve tamponsuz akış şeması
+pub mod proxy_ext;
+pub use proxy_ext::ProxyExtConfig;
+
 /// Popüler paneller (cPanel, Plesk, DirectAdmin, CyberPanel, HestiaCP, aaPanel, zPanel vb.)
 /// ve OS ephemeral aralıkları (Linux 32768-60999, Windows 49152-65535) ile çakışmayan
 /// ZMax Server standart port bloğu (IANA Unassigned).
@@ -470,6 +474,9 @@ pub struct VHostEntry {
     pub acl: VhostAclConfig,
     #[serde(default)]
     pub acme: AcmeConfig,
+    // [kart-10] Ters vekil genişletilmiş ayarları (initTimeout, keep-alive, respBuffer)
+    #[serde(default)]
+    pub proxy_ext: ProxyExtConfig,
 }
 
 impl Default for VHostEntry {
@@ -497,6 +504,7 @@ impl Default for VHostEntry {
             hotlink: HotlinkConfig::default(),
             acl: VhostAclConfig::default(),
             acme: AcmeConfig::default(),
+            proxy_ext: ProxyExtConfig::default(),
         }
     }
 }
@@ -600,6 +608,7 @@ impl VHostEntry {
         self.logging.validate()?;
         self.tls.validate()?;
         self.php.validate()?;
+        self.proxy_ext.validate("vhost.proxy_ext")?;
         Ok(())
     }
 }

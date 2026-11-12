@@ -60,6 +60,7 @@ impl Default for BufferPool {
 struct PooledStream {
     stream: TcpStream,
     last_used: Instant,
+    ttl: Duration,
 }
 
 /// Soket havuzunun anlık durum istatistikleri.
@@ -75,6 +76,7 @@ pub struct PoolStats {
 #[derive(Debug)]
 pub struct UpstreamSocketPool {
     pools: Mutex<HashMap<String, VecDeque<PooledStream>>>,
+    active_conns: Mutex<HashMap<String, usize>>,
     max_idle_per_upstream: usize,
     idle_ttl: Duration,
 }
@@ -93,9 +95,43 @@ impl UpstreamSocketPool {
     pub fn with_idle_ttl(max_idle_per_upstream: usize, idle_ttl: Duration) -> Self {
         Self {
             pools: Mutex::new(HashMap::new()),
+            active_conns: Mutex::new(HashMap::new()),
             max_idle_per_upstream,
             idle_ttl,
         }
+    }
+
+    /// Belirtilen upstream için aktif bağlantı yuvası almaya çalışır.
+    /// `max_conns > 0` ise ve mevcut aktif bağlantı sayısı >= `max_conns` ise `false` döner.
+    pub fn try_acquire_conns_slot(&self, addr: &str, max_conns: usize) -> bool {
+        if max_conns == 0 {
+            return true;
+        }
+        let mut map = self.active_conns.lock().unwrap_or_else(|e| e.into_inner());
+        let count = map.entry(addr.to_string()).or_insert(0);
+        if *count >= max_conns {
+            false
+        } else {
+            *count += 1;
+            true
+        }
+    }
+
+    /// Aktif bağlantı yuvasını serbest bırakır.
+    pub fn release_conns_slot(&self, addr: &str) {
+        let mut map = self.active_conns.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(addr) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(addr);
+            }
+        }
+    }
+
+    /// Belirli bir upstream için aktif bağlantı sayısını döndürür.
+    pub fn active_count(&self, addr: &str) -> usize {
+        let map = self.active_conns.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(addr).copied().unwrap_or(0)
     }
 
     /// Boşta bekleyen sağlıklı bir soket verir; yoksa `timeout` süresi içinde yeni TCP bağlantısı açar.
@@ -127,7 +163,7 @@ impl UpstreamSocketPool {
                 };
                 let mut picked = None;
                 while let Some(entry) = queue.pop_back() {
-                    if entry.last_used.elapsed() < self.idle_ttl {
+                    if entry.last_used.elapsed() < entry.ttl {
                         picked = Some(entry.stream);
                         break;
                     }
@@ -165,8 +201,8 @@ impl UpstreamSocketPool {
         Ok(stream)
     }
 
-    /// Kullanımı biten sağlıklı soketi tekrar kullanılmak üzere havuza geri alır.
-    pub fn release(&self, addr: &str, stream: TcpStream) {
+    /// Kullanımı biten sağlıklı soketi belirtilen TTL ile tekrar kullanılmak üzere havuza geri alır.
+    pub fn release_with_ttl(&self, addr: &str, stream: TcpStream, ttl: Duration) {
         if self.max_idle_per_upstream == 0 || !is_stream_healthy(&stream) {
             return;
         }
@@ -176,7 +212,7 @@ impl UpstreamSocketPool {
         let queue = map.entry(addr.to_string()).or_default();
 
         while let Some(front) = queue.front() {
-            if now.duration_since(front.last_used) >= self.idle_ttl {
+            if now.duration_since(front.last_used) >= front.ttl {
                 queue.pop_front();
             } else {
                 break;
@@ -187,8 +223,14 @@ impl UpstreamSocketPool {
             queue.push_back(PooledStream {
                 stream,
                 last_used: now,
+                ttl,
             });
         }
+    }
+
+    /// Kullanımı biten sağlıklı soketi tekrar kullanılmak üzere havuza geri alır.
+    pub fn release(&self, addr: &str, stream: TcpStream) {
+        self.release_with_ttl(addr, stream, self.idle_ttl);
     }
 
     /// Hatalı veya yarıda kalan soketi havuza iade etmeden kapatır.
@@ -214,7 +256,7 @@ impl UpstreamSocketPool {
         let mut map = self.pools.lock().unwrap_or_else(|e| e.into_inner());
         let mut active_idle = 0usize;
         map.retain(|_, queue| {
-            queue.retain(|e| now.duration_since(e.last_used) < self.idle_ttl);
+            queue.retain(|e| now.duration_since(e.last_used) < e.ttl);
             active_idle += queue.len();
             !queue.is_empty()
         });
@@ -231,7 +273,7 @@ impl UpstreamSocketPool {
         let mut removed = 0usize;
         map.retain(|_, queue| {
             let before = queue.len();
-            queue.retain(|e| now.duration_since(e.last_used) < self.idle_ttl);
+            queue.retain(|e| now.duration_since(e.last_used) < e.ttl);
             removed += before.saturating_sub(queue.len());
             !queue.is_empty()
         });

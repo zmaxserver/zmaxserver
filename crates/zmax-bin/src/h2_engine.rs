@@ -4,7 +4,7 @@
 
 use bytes::{Bytes, BytesMut};
 use h2::server::{self, SendResponse};
-use h2::RecvStream;
+use h2::{RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -13,7 +13,7 @@ use tracing::{debug, error};
 
 use crate::api::ServerState;
 use crate::logger::AccessLogEntry;
-use crate::web_engine::{self, ParsedHttpRequest};
+use crate::web_engine::{self, H2BodyReceiver, ParsedHttpRequest};
 
 const DEFAULT_H2_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_H2_BODY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -234,6 +234,7 @@ async fn process_h2_stream(
         keep_alive: true,
     };
 
+    let mut proxy_stream: Option<H2BodyReceiver> = None;
     let dispatch_res = web_engine::handle_h2_dispatched_request(
         &parsed_req,
         peer_addr.ip(),
@@ -242,6 +243,7 @@ async fn process_h2_stream(
         listen_port,
         tls_sni.as_deref(),
         &req_id,
+        &mut proxy_stream,
     )
     .await;
 
@@ -323,14 +325,19 @@ async fn process_h2_stream(
     let has_body = !is_no_body && !body_bytes.is_empty();
 
     let resp = response_builder.body(())?;
-    let mut send_stream = respond.send_response(resp, !has_body)?;
-
-    let bytes_sent = if has_body {
-        let len = body_bytes.len();
-        send_stream.send_data(body_bytes, true)?;
-        len
+    let bytes_sent = if let Some(body_rx) = proxy_stream {
+        // Ters vekil yanıtı: gövde arka uçtan geldikçe DATA çerçevesi olarak akıtılır.
+        let mut send_stream = respond.send_response(resp, false)?;
+        stream_body_to_h2(&mut send_stream, body_rx).await
     } else {
-        0
+        let mut send_stream = respond.send_response(resp, !has_body)?;
+        if has_body {
+            let len = body_bytes.len();
+            send_stream.send_data(body_bytes, true)?;
+            len
+        } else {
+            0
+        }
     };
 
     let domain_str = log_meta
@@ -376,4 +383,54 @@ async fn process_h2_stream(
     });
 
     Ok(())
+}
+
+/// Kanal kapanana dek gelen gövde parçalarını h2 akış denetimine (flow control) uyarak yazar ve
+/// akışı bitirir. Arka uç hatasında akış `INTERNAL_ERROR` ile sıfırlanır; istemci akışı sıfırlarsa
+/// bırakılır (alıcı düşünce arka uç okuyucu görevi de biter). Yazılan bayt sayısını döner.
+async fn stream_body_to_h2(send: &mut SendStream<Bytes>, mut rx: H2BodyReceiver) -> usize {
+    enum Event {
+        Item(Option<Result<Bytes, std::io::Error>>),
+        ClientReset,
+    }
+    let mut sent = 0usize;
+    loop {
+        let event = tokio::select! {
+            item = rx.recv() => Event::Item(item),
+            _ = std::future::poll_fn(|cx| send.poll_reset(cx)) => Event::ClientReset,
+        };
+        match event {
+            Event::ClientReset => {
+                debug!("HTTP/2 istemcisi akisi sifirladi; vekil govdesi birakildi");
+                return sent;
+            }
+            Event::Item(None) => {
+                if let Err(e) = send.send_data(Bytes::new(), true) {
+                    debug!(error = %e, "HTTP/2 akis sonu yazilamadi");
+                }
+                return sent;
+            }
+            Event::Item(Some(Err(e))) => {
+                debug!(error = %e, "vekil govdesi yarida kesildi; akis sifirlaniyor");
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
+                return sent;
+            }
+            Event::Item(Some(Ok(mut data))) => {
+                while !data.is_empty() {
+                    send.reserve_capacity(data.len());
+                    let cap = match std::future::poll_fn(|cx| send.poll_capacity(cx)).await {
+                        Some(Ok(c)) if c > 0 => c,
+                        _ => return sent,
+                    };
+                    let piece = data.split_to(cap.min(data.len()));
+                    let piece_len = piece.len();
+                    if let Err(e) = send.send_data(piece, false) {
+                        debug!(error = %e, "HTTP/2 veri cercevesi yazilamadi");
+                        return sent;
+                    }
+                    sent += piece_len;
+                }
+            }
+        }
+    }
 }
