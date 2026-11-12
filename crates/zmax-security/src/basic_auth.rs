@@ -7,9 +7,11 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
-use std::time::SystemTime;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime};
+use dashmap::DashMap;
 use zmax_config::VHostAuthSection;
 
 // ============================================================================
@@ -947,22 +949,26 @@ pub fn verify_argon2id(phc_hash: &str, candidate_password: &str) -> bool {
 // 4. Genel Parola Doğrulama ($argon2id$, $apr1$, SHA-1, plain:)
 // ============================================================================
 
-/// htpasswd veya config formatındaki parolayı doğrular (`$argon2id$`, `$apr1$`, `{SHA}` veya düz metin).
+/// htpasswd veya config formatındaki parolayı doğrular (`$argon2id$`, `$apr1$`, `{SHA}`, `{PLAIN}` veya `plain:`).
+///
+/// GÜVENLİK (P2): DES crypt hash'leri (`abJnggxhB/yWI`) veya işaretsiz düz metinler
+/// ASLA parola olarak kabul edilmez; düz metin parolalar yalnızca `{PLAIN}` veya `plain:`
+/// öneki açıkça belirtildiğinde kabul edilir.
 pub fn verify_password(stored_hash: &str, candidate_password: &str) -> bool {
     let hash = stored_hash.trim();
     if hash.starts_with("$argon2id$") {
         verify_argon2id(hash, candidate_password)
     } else if hash.starts_with("$apr1$") {
         verify_apr1(hash, candidate_password)
+    } else if let Some(plain) = hash.strip_prefix("{PLAIN}") {
+        constant_time_eq(plain.as_bytes(), candidate_password.as_bytes())
     } else if let Some(plain) = hash.strip_prefix("plain:") {
         constant_time_eq(plain.as_bytes(), candidate_password.as_bytes())
     } else if hash.starts_with("{SHA}") {
         // Apache standart {SHA} formatı (SHA-1 base64)
         verify_sha1_htpasswd(hash, candidate_password)
-    } else if !hash.contains('$') && !hash.is_empty() {
-        // Doğrudan düz metin hash (yalnızca açık test/htpasswd -p yapılandırmaları için)
-        constant_time_eq(hash.as_bytes(), candidate_password.as_bytes())
     } else {
+        // GÜVENLİK (P2): DES crypt hash'i (örn: abJnggxhB/yWI) veya öneksiz metinler reddedilir
         false
     }
 }
@@ -1288,18 +1294,102 @@ pub enum AuthDecision {
     Unauthorized { realm: String },
 }
 
-type CachedUsers = (SystemTime, u64, HashMap<String, String>);
+// ============================================================================
+// 6.5. Basic Auth Brute-Force Kalkanı ve Sahte Özet (Zamanlama Saldırısı Koruması)
+// ============================================================================
 
-/// htpasswd dosyalarını diskten okuyup `(mtime, boyut)` denetimi ile önbellekleyen yönetici.
-#[derive(Default)]
+/// Bilinmeyen kullanıcı adı sorgularında süre farkını eşitlemek (user enumeration önleme)
+/// için çalıştırılan resmi RFC 9106 Argon2id sahte hash sabiti.
+pub const DUMMY_ARGON2_HASH: &str =
+    "$argon2id$v=19$m=65536,t=3,p=1$aDVMNW9MV3FjUE5xY3h4Lw$VC9wtT1yZVDrE7wkPALDM3Mupw+dSW/ACmdVxL8uuro";
+
+/// Basic Authentication başarısız denemelerini IP bazında takip edip kaba kuvvet saldırılarını
+/// otomatik tespit ederek IP'yi `IpBanManager` ile banlayan koruma kalkanı.
+pub struct BasicAuthBruteForceGuard {
+    pub max_attempts: u32,
+    pub window_secs: u64,
+    pub ban_duration_secs: u64,
+    attempts: DashMap<IpAddr, (u32, std::time::Instant)>,
+}
+
+impl Default for BasicAuthBruteForceGuard {
+    fn default() -> Self {
+        Self::new(5, 60, 300)
+    }
+}
+
+impl BasicAuthBruteForceGuard {
+    pub fn new(max_attempts: u32, window_secs: u64, ban_duration_secs: u64) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+            window_secs: window_secs.max(1),
+            ban_duration_secs: ban_duration_secs.max(1),
+            attempts: DashMap::new(),
+        }
+    }
+
+    /// Başarısız kimlik doğrulama denemesini kaydeder. Eşik aşılırsa IP banlanır ve true döner.
+    pub fn record_failure(&self, ip: IpAddr, ban_manager: &crate::IpBanManager) -> bool {
+        let now = std::time::Instant::now();
+        let mut entry = self.attempts.entry(ip).or_insert((0, now));
+        let (count, start_time) = entry.value_mut();
+
+        if now.duration_since(*start_time).as_secs() >= self.window_secs {
+            *count = 1;
+            *start_time = now;
+            false
+        } else {
+            *count += 1;
+            if *count >= self.max_attempts {
+                ban_manager.ban(
+                    ip,
+                    format!("Basic Auth brute-force engellendi ({} basarisiz deneme)", *count),
+                    self.ban_duration_secs,
+                );
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Başarılı girişte IP'nin başarısız deneme sayacını sıfırlar.
+    pub fn record_success(&self, ip: IpAddr) {
+        self.attempts.remove(&ip);
+    }
+}
+
+#[derive(Clone)]
+struct CachedUsersEntry {
+    mtime: SystemTime,
+    len: u64,
+    last_checked: std::time::Instant,
+    users: HashMap<String, String>,
+}
+
+/// htpasswd dosyalarını diskten okuyup `(mtime, boyut, TTL)` denetimi ile önbellekleyen yönetici.
 pub struct BasicAuthManager {
-    file_cache: RwLock<HashMap<PathBuf, CachedUsers>>,
+    file_cache: RwLock<HashMap<PathBuf, CachedUsersEntry>>,
+    pub semaphore: Arc<tokio::sync::Semaphore>,
+    pub brute_force_guard: BasicAuthBruteForceGuard,
+}
+
+impl Default for BasicAuthManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BasicAuthManager {
     pub fn new() -> Self {
+        Self::with_max_concurrent_hashes(4)
+    }
+
+    pub fn with_max_concurrent_hashes(max_concurrent: usize) -> Self {
         Self {
             file_cache: RwLock::new(HashMap::new()),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1))),
+            brute_force_guard: BasicAuthBruteForceGuard::default(),
         }
     }
 
@@ -1314,17 +1404,28 @@ impl BasicAuthManager {
         }
     }
 
-    /// Bir htpasswd dosyasını `(mtime, boyut)` önbellekli okur. Parola içeriği asla hataya yazılmaz.
+    /// Bir htpasswd dosyasını `(mtime, boyut, TTL)` önbellekli okur.
+    /// Saniyede 1 kereden fazla disk metadata sorgusu yapmaz.
     pub fn get_users_from_file(&self, path: &Path) -> Result<HashMap<String, String>, String> {
+        let now = std::time::Instant::now();
+        if let Ok(cache) = self.file_cache.read() {
+            if let Some(entry) = cache.get(path) {
+                if now.duration_since(entry.last_checked) < Duration::from_millis(1000) {
+                    return Ok(entry.users.clone());
+                }
+            }
+        }
+
         let meta = fs::metadata(path)
             .map_err(|e| format!("htpasswd dosyası okunamadı ({}): {}", path.display(), e))?;
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let len = meta.len();
 
-        if let Ok(cache) = self.file_cache.read() {
-            if let Some((cached_mtime, cached_len, users)) = cache.get(path) {
-                if *cached_mtime == mtime && *cached_len == len {
-                    return Ok(users.clone());
+        if let Ok(mut cache) = self.file_cache.write() {
+            if let Some(entry) = cache.get_mut(path) {
+                if entry.mtime == mtime && entry.len == len {
+                    entry.last_checked = now;
+                    return Ok(entry.users.clone());
                 }
             }
         }
@@ -1334,39 +1435,85 @@ impl BasicAuthManager {
         let users = parse_htpasswd_content(&content);
 
         if let Ok(mut cache) = self.file_cache.write() {
-            cache.insert(path.to_path_buf(), (mtime, len, users.clone()));
+            cache.insert(
+                path.to_path_buf(),
+                CachedUsersEntry {
+                    mtime,
+                    len,
+                    last_checked: now,
+                    users: users.clone(),
+                },
+            );
         }
 
         Ok(users)
     }
 
-    fn verify_against_entries(
-        entries: &[zmax_config::AuthUserEntry],
+    fn resolve_user_hash<'a>(
+        &'a self,
+        matched_dir: Option<&'a zmax_config::VHostAuthDirectory>,
+        vhost_auth: &'a VHostAuthSection,
+        base_dir: Option<&Path>,
         user: &str,
-        pass: &str,
-    ) -> bool {
-        let mut verified = false;
-        for entry in entries {
-            if constant_time_eq(entry.username.as_bytes(), user.as_bytes())
-                && verify_password(&entry.password_hash, pass)
-            {
-                verified = true;
-            }
-        }
-        verified
-    }
+    ) -> (Option<String>, bool) {
+        if let Some(dir) = matched_dir {
+            let has_own_users = !dir.users.is_empty();
+            let has_own_file = dir
+                .htpasswd_path
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty());
 
-    fn verify_against_file(&self, path: &Path, user: &str, pass: &str) -> bool {
-        let Ok(file_users) = self.get_users_from_file(path) else {
-            return false;
-        };
-        let mut verified = false;
-        for (uname, hash) in &file_users {
-            if constant_time_eq(uname.as_bytes(), user.as_bytes()) && verify_password(hash, pass) {
-                verified = true;
+            if has_own_users {
+                for entry in &dir.users {
+                    if constant_time_eq(entry.username.as_bytes(), user.as_bytes()) {
+                        return (Some(entry.password_hash.clone()), false);
+                    }
+                }
+            }
+            if has_own_file {
+                if let Some(ref path_str) = dir.htpasswd_path {
+                    let resolved = Self::resolve_htpasswd_path(base_dir, path_str);
+                    match self.get_users_from_file(&resolved) {
+                        Ok(file_users) => {
+                            for (uname, hash) in file_users {
+                                if constant_time_eq(uname.as_bytes(), user.as_bytes()) {
+                                    return (Some(hash), false);
+                                }
+                            }
+                        }
+                        Err(_) => return (None, true),
+                    }
+                }
+            }
+            if has_own_users || has_own_file {
+                return (None, false);
             }
         }
-        verified
+
+        if !vhost_auth.users.is_empty() {
+            for entry in &vhost_auth.users {
+                if constant_time_eq(entry.username.as_bytes(), user.as_bytes()) {
+                    return (Some(entry.password_hash.clone()), false);
+                }
+            }
+        }
+        if let Some(ref path_str) = vhost_auth.htpasswd_path {
+            if !path_str.trim().is_empty() {
+                let resolved = Self::resolve_htpasswd_path(base_dir, path_str);
+                match self.get_users_from_file(&resolved) {
+                    Ok(file_users) => {
+                        for (uname, hash) in file_users {
+                            if constant_time_eq(uname.as_bytes(), user.as_bytes()) {
+                                return (Some(hash), false);
+                            }
+                        }
+                    }
+                    Err(_) => return (None, true),
+                }
+            }
+        }
+
+        (None, false)
     }
 
     /// Göreceli `htpasswd_path` çözümlemesi destekli yetkilendirme kararı üretir.
@@ -1418,45 +1565,18 @@ impl BasicAuthManager {
             };
         };
 
-        // 3. Kullanıcı doğrulama
-        let mut user_verified = false;
-        let mut allow_vhost_fallback = true;
-
-        if let Some(dir) = matched_dir {
-            let has_own_users = !dir.users.is_empty();
-            let has_own_file = dir
-                .htpasswd_path
-                .as_deref()
-                .is_some_and(|p| !p.trim().is_empty());
-
-            if has_own_users {
-                user_verified = Self::verify_against_entries(&dir.users, &user, &pass);
-            }
-            if !user_verified && has_own_file {
-                if let Some(ref path_str) = dir.htpasswd_path {
-                    let resolved = Self::resolve_htpasswd_path(base_dir, path_str);
-                    user_verified = self.verify_against_file(&resolved, &user, &pass);
-                }
-            }
-            // Dizin kendi kullanıcı listesini veya htpasswd dosyasını tanımladıysa vhost geneline düşme
-            if has_own_users || has_own_file {
-                allow_vhost_fallback = false;
-            }
-        }
-
-        if !user_verified && allow_vhost_fallback {
-            if !vhost_auth.users.is_empty() {
-                user_verified = Self::verify_against_entries(&vhost_auth.users, &user, &pass);
-            }
-            if !user_verified {
-                if let Some(ref path_str) = vhost_auth.htpasswd_path {
-                    if !path_str.trim().is_empty() {
-                        let resolved = Self::resolve_htpasswd_path(base_dir, path_str);
-                        user_verified = self.verify_against_file(&resolved, &user, &pass);
-                    }
-                }
-            }
-        }
+        // 3. Kullanıcı doğrulama ve Zamanlama Saldırısı (Timing Attack) Koruması
+        let (found_hash, file_err) = self.resolve_user_hash(matched_dir, vhost_auth, base_dir, &user);
+        let user_verified = if file_err {
+            let _ = verify_password(DUMMY_ARGON2_HASH, &pass);
+            false
+        } else if let Some(hash) = found_hash {
+            verify_password(&hash, &pass)
+        } else {
+            // Bilinmeyen kullanıcı: sahte hash hesaplanarak süre bilinen kullanıcı ile eşitlenir
+            let _ = verify_password(DUMMY_ARGON2_HASH, &pass);
+            false
+        };
 
         if user_verified {
             AuthDecision::Allowed
@@ -1475,6 +1595,107 @@ impl BasicAuthManager {
         vhost_auth: &VHostAuthSection,
     ) -> AuthDecision {
         self.check_request_with_base(auth_header, request_path, vhost_auth, None)
+    }
+
+    /// Asenkron tokio işleyicilerini bloklamamak için CPU-yoğun hash hesaplamalarını
+    /// `spawn_blocking` ve eşzamanlı `Semaphore` koruması altında yürütür.
+    /// Başarısız denemeleri IP bazında takip ederek kaba kuvvet eşiğinde IP'yi otomatik banlar.
+    pub async fn check_request_async(
+        self: &Arc<Self>,
+        client_ip: IpAddr,
+        auth_header: Option<&str>,
+        request_path: &str,
+        vhost_auth: &VHostAuthSection,
+        base_dir: Option<&Path>,
+        ban_manager: &crate::IpBanManager,
+    ) -> AuthDecision {
+        if !vhost_auth.enabled {
+            return AuthDecision::Allowed;
+        }
+
+        let normalized_path = normalize_auth_path(request_path);
+
+        let matched_dir = vhost_auth
+            .directories
+            .iter()
+            .filter(|dir| matches_path_prefix(&normalized_path, &dir.path))
+            .max_by_key(|dir| normalize_auth_path(&dir.path).len());
+
+        if matched_dir.is_none() {
+            if let Some(ref prefix) = vhost_auth.path_prefix {
+                if !prefix.trim().is_empty() && !matches_path_prefix(&normalized_path, prefix) {
+                    return AuthDecision::Allowed;
+                }
+            } else if !vhost_auth.directories.is_empty() {
+                return AuthDecision::Allowed;
+            }
+        }
+
+        let raw_realm = matched_dir
+            .map(|d| {
+                if d.realm.trim().is_empty() {
+                    vhost_auth.realm.as_str()
+                } else {
+                    d.realm.as_str()
+                }
+            })
+            .unwrap_or(vhost_auth.realm.as_str());
+        let active_realm = sanitize_realm(raw_realm);
+
+        let Some(auth_str) = auth_header else {
+            return AuthDecision::Unauthorized {
+                realm: active_realm,
+            };
+        };
+
+        if parse_basic_auth_header(auth_str).is_none() {
+            self.brute_force_guard.record_failure(client_ip, ban_manager);
+            return AuthDecision::Unauthorized {
+                realm: active_realm,
+            };
+        }
+
+        // P1: Eşzamanlı hash sınırı (Semaphore)
+        let permit = match self.semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                return AuthDecision::Unauthorized {
+                    realm: active_realm,
+                };
+            }
+        };
+
+        // P1: CPU-yoğun hash hesaplaması tokio worker thread'lerinden izole edilir
+        let this = self.clone();
+        let auth_hdr_owned = auth_str.to_string();
+        let path_owned = request_path.to_string();
+        let vhost_auth_owned = vhost_auth.clone();
+        let base_dir_owned = base_dir.map(|p| p.to_path_buf());
+
+        let decision = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            this.check_request_with_base(
+                Some(&auth_hdr_owned),
+                &path_owned,
+                &vhost_auth_owned,
+                base_dir_owned.as_deref(),
+            )
+        })
+        .await
+        .unwrap_or_else(|_| AuthDecision::Unauthorized {
+            realm: active_realm.clone(),
+        });
+
+        match &decision {
+            AuthDecision::Allowed => {
+                self.brute_force_guard.record_success(client_ip);
+            }
+            AuthDecision::Unauthorized { .. } => {
+                self.brute_force_guard.record_failure(client_ip, ban_manager);
+            }
+        }
+
+        decision
     }
 }
 
@@ -1802,5 +2023,119 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn test_des_crypt_hash_rejected_as_password_and_plain_prefix() {
+        // GÜVENLİK (P2): htpasswd -d ile üretilen DES crypt hash'i (örn: abJnggxhB/yWI)
+        // ASLA parola olarak kabul edilmemelidir.
+        let des_hash = "abJnggxhB/yWI";
+        assert!(
+            !verify_password(des_hash, des_hash),
+            "DES crypt hash'i asla parola olarak kabul edilmemeli!"
+        );
+        assert!(!verify_password(des_hash, "password"));
+        assert!(!verify_password(des_hash, "gizli"));
+
+        // Düz metin parolalar yalnızca açıkça {PLAIN} veya plain: önekiyle kabul edilir
+        assert!(verify_password("{PLAIN}acikparola", "acikparola"));
+        assert!(verify_password("plain:acikparola", "acikparola"));
+        assert!(!verify_password("{PLAIN}acikparola", "yanlis"));
+        assert!(!verify_password("plain:acikparola", "yanlis"));
+
+        // Öneksiz düz metinler güvenlik gereği reddedilir
+        assert!(!verify_password("rastgeleparola", "rastgeleparola"));
+    }
+
+    #[test]
+    fn test_brute_force_guard_and_ban_manager_integration() {
+        use std::net::IpAddr;
+        let ban_mgr = crate::IpBanManager::new();
+        let guard = BasicAuthBruteForceGuard::new(3, 60, 300);
+        let test_ip: IpAddr = "192.168.10.50".parse().unwrap();
+
+        assert!(!ban_mgr.is_banned(test_ip));
+
+        // 1. ve 2. başarısız denemede henüz banlanmaz
+        assert!(!guard.record_failure(test_ip, &ban_mgr));
+        assert!(!ban_mgr.is_banned(test_ip));
+        assert!(!guard.record_failure(test_ip, &ban_mgr));
+        assert!(!ban_mgr.is_banned(test_ip));
+
+        // 3. başarısız denemede eşik aşılır ve banlanır!
+        assert!(guard.record_failure(test_ip, &ban_mgr));
+        assert!(ban_mgr.is_banned(test_ip));
+
+        // Başarılı giriş ile sayaç sıfırlanabilir
+        let other_ip: IpAddr = "192.168.10.51".parse().unwrap();
+        guard.record_failure(other_ip, &ban_mgr);
+        guard.record_success(other_ip);
+        // Sıfırlandıktan sonra 1 deneme daha yapıldığında eşiğe ulaşmamalı
+        assert!(!guard.record_failure(other_ip, &ban_mgr));
+        assert!(!ban_mgr.is_banned(other_ip));
+    }
+
+    #[tokio::test]
+    async fn test_check_request_async_with_spawn_blocking_and_semaphore() {
+        use std::net::IpAddr;
+        let manager = Arc::new(BasicAuthManager::new());
+        let ban_mgr = crate::IpBanManager::new();
+        let test_ip: IpAddr = "10.0.5.5".parse().unwrap();
+
+        let mut vhost_auth = VHostAuthSection {
+            enabled: true,
+            realm: "Test Async".to_string(),
+            ..Default::default()
+        };
+        let hash = apr1_hash("testpass", "salt1234");
+        vhost_auth.users.push(AuthUserEntry {
+            username: "asyncuser".to_string(),
+            password_hash: hash,
+        });
+
+        // 1. Başlıksız -> 401 Unauthorized
+        let res = manager
+            .check_request_async(test_ip, None, "/guvenli", &vhost_auth, None, &ban_mgr)
+            .await;
+        assert_eq!(
+            res,
+            AuthDecision::Unauthorized {
+                realm: "Test Async".to_string()
+            }
+        );
+        assert!(!ban_mgr.is_banned(test_ip));
+
+        // 2. Doğru parola -> Allowed (ve IP banlanmaz)
+        let token = "Basic ".to_string() + &std_base64_encode(b"asyncuser:testpass");
+        let res = manager
+            .check_request_async(
+                test_ip,
+                Some(&token),
+                "/guvenli",
+                &vhost_auth,
+                None,
+                &ban_mgr,
+            )
+            .await;
+        assert_eq!(res, AuthDecision::Allowed);
+
+        // 3. Bilinmeyen kullanıcı adı (Timing attack sahte hash testi) -> 401
+        let bad_user_token = "Basic ".to_string() + &std_base64_encode(b"bilinmeyen:parola");
+        let res = manager
+            .check_request_async(
+                test_ip,
+                Some(&bad_user_token),
+                "/guvenli",
+                &vhost_auth,
+                None,
+                &ban_mgr,
+            )
+            .await;
+        assert_eq!(
+            res,
+            AuthDecision::Unauthorized {
+                realm: "Test Async".to_string()
+            }
+        );
     }
 }

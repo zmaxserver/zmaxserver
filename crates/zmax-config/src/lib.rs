@@ -476,7 +476,6 @@ pub struct VHostEntry {
     #[serde(default)]
     pub acl: VhostAclConfig,
     #[serde(default)]
-    #[serde(default)]
     pub acme: AcmeConfig,
     // [kart-10] Ters vekil genişletilmiş ayarları (initTimeout, keep-alive, respBuffer)
     #[serde(default)]

@@ -342,7 +342,10 @@ async fn kart9_basic_auth_real_zmax_http1_and_http2_end_to_end() {
 
     std::fs::write(
         auth_dir.join("site1.htpasswd"),
-        format!("apruser:{}\nargonuser:{}\n", apr1_hash_val, argon_hash_val),
+        format!(
+            "apruser:{}\nargonuser:{}\ndesuser:abJnggxhB/yWI\nplainuser:{{PLAIN}}AcikSifre123\n",
+            apr1_hash_val, argon_hash_val
+        ),
     )
     .unwrap();
 
@@ -542,6 +545,46 @@ password_hash = "{argon_hash_val}"
         "$argon2id$ dogru parola 200 olmali: {r}"
     );
     assert!(r.contains("GIZLI_ALAN_200"), "{r}");
+
+    // 1.6.1 GÜVENLİK (P2): DES crypt hash'i (abJnggxhB/yWI) asla parola olarak kabul edilmemeli -> 401
+    let des_token = encode_basic_token("desuser", "abJnggxhB/yWI");
+    let r = send_http1("auth.local", "/gizli/index.html", Some(&des_token)).await;
+    assert!(
+        r.starts_with("HTTP/1.1 401 Unauthorized"),
+        "DES crypt hash'i parola olarak kabul EDILMEMELI: {r}"
+    );
+
+    // 1.6.2 Açıkça {PLAIN} formatlı parola -> 200 OK
+    let plain_token = encode_basic_token("plainuser", "AcikSifre123");
+    let r = send_http1("auth.local", "/gizli/index.html", Some(&plain_token)).await;
+    assert!(
+        r.starts_with("HTTP/1.1 200 OK"),
+        "{{PLAIN}} formati basarili olmali: {r}"
+    );
+
+    // 1.6.3 Bilinmeyen Kullanıcı (Timing Attack / User Enumeration) Sahte Hash -> 401
+    let unknown_token = encode_basic_token("olmayankullanici", "RastgeleSifre123");
+    let r = send_http1("auth.local", "/gizli/index.html", Some(&unknown_token)).await;
+    assert!(
+        r.starts_with("HTTP/1.1 401 Unauthorized"),
+        "Bilinmeyen kullanici reddedilmeli: {r}"
+    );
+
+    // 1.6.4 P1 DoS ve Worker İzolasyonu: Ağır/yanlış Argon2id doğrulama sürerken paralel istek gecikmez
+    let bad_argon_tok = encode_basic_token("argonuser", "YanlisArgonParolasi999");
+    let h_bg = tokio::spawn(async move {
+        send_http1("auth.local", "/gizli/index.html", Some(&bad_argon_tok)).await
+    });
+    let t0 = std::time::Instant::now();
+    let r_fast = send_http1("auth.local", "/acik.html", None).await;
+    let fast_ms = t0.elapsed().as_millis();
+    assert!(r_fast.starts_with("HTTP/1.1 200 OK"));
+    assert!(
+        fast_ms < 400,
+        "Tokio worker tikanmamali, paralel istek hizlica yanit almali ({}ms)",
+        fast_ms
+    );
+    let _ = h_bg.await;
 
     // 1.7 En uzun dizin oneki (/gizli/super) kendi kullanicisini ister
     let r = send_http1("auth.local", "/gizli/super/ayar.html", Some(&ok_apr)).await;

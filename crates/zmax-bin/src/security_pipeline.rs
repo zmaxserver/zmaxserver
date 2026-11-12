@@ -149,14 +149,19 @@ pub fn is_request_hotlink_blocked(
     )
 }
 
-// [kart-9] Basic Authentication ortak denetim ve 401 yanit yardimcilari
+// [kart-9] Basic Authentication ortak asenkron denetim ve 401 yanit yardimcilari
 /// Hem HTTP/1.1 hem HTTP/2 boru hattında çalıştırılan ortak Basic Auth kapısı (ACME HTTP-01 muaftır).
-pub fn evaluate_basic_auth(
+/// CPU-yoğun hash hesaplamaları `BasicAuthManager::check_request_async` aracılığıyla
+/// `tokio::task::spawn_blocking` ve `Semaphore` koruması altında yürütülür.
+/// Başarısız denemeler IP bazında sayılıp eşik aşımında IP otomatik banlanır.
+pub async fn evaluate_basic_auth(
     vhost_ctx: &ResolvedVHostContext,
+    client_ip: std::net::IpAddr,
     request_path: &str,
     headers: &[(String, String)],
-    basic_auth: &zmax_security::BasicAuthManager,
+    basic_auth: &std::sync::Arc<zmax_security::BasicAuthManager>,
     base_dir: &std::path::Path,
+    ban_manager: &zmax_security::IpBanManager,
 ) -> zmax_security::AuthDecision {
     if !vhost_ctx.auth.enabled || is_acme_challenge(request_path) {
         return zmax_security::AuthDecision::Allowed;
@@ -165,7 +170,16 @@ pub fn evaluate_basic_auth(
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         .map(|(_, v)| v.as_str());
-    basic_auth.check_request_with_base(auth_header, request_path, &vhost_ctx.auth, Some(base_dir))
+    basic_auth
+        .check_request_async(
+            client_ip,
+            auth_header,
+            request_path,
+            &vhost_ctx.auth,
+            Some(base_dir),
+            ban_manager,
+        )
+        .await
 }
 
 /// 401 Unauthorized yanıtı için `WWW-Authenticate: Basic realm="..."` başlıklarını ve gövdeyi oluşturur.
@@ -268,5 +282,4 @@ mod tests {
         assert!(!acl2.is_allowed("203.0.113.44".parse().unwrap()));
         assert!(acl2.is_allowed("127.0.0.1".parse().unwrap()));
     }
-}
 }

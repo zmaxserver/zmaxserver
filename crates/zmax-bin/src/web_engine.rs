@@ -604,11 +604,14 @@ where
     if let zmax_security::AuthDecision::Unauthorized { realm } =
         crate::security_pipeline::evaluate_basic_auth(
             &vhost_ctx,
+            real_ip,
             &req.path,
             &req.headers,
             &state.basic_auth,
             &state.base_dir,
+            &state.ban_manager,
         )
+        .await
     {
         let (auth_headers, auth_body) =
             crate::security_pipeline::build_unauthorized_response(&vhost_ctx, &realm, None);
@@ -3915,11 +3918,14 @@ pub async fn handle_h2_dispatched_request(
     if let zmax_security::AuthDecision::Unauthorized { realm } =
         crate::security_pipeline::evaluate_basic_auth(
             &vhost_ctx,
+            real_ip,
             &req.path,
             &req.headers,
             &state.basic_auth,
             &state.base_dir,
+            &state.ban_manager,
         )
+        .await
     {
         let req_id_opt = (!req_id.is_empty()).then_some(req_id);
         let (headers, body) =
