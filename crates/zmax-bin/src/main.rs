@@ -1827,7 +1827,43 @@ mod tests {
         assert!(stale_resp.contains("X-Cache: STALE"), "{stale_resp}");
         assert!(stale_resp.contains("BAYAT_YANIT"), "{stale_resp}");
 
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        // Sabit sleep yerine arka plan yenileme liderinin StampedeGuard (Notify) sinyaliyle bekle
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                state.cache.get_with_stale(&key).await,
+                zmax_cache::CacheLookup::Fresh(_)
+            ) {
+                break;
+            }
+            match state.cache.try_acquire_fill(&key) {
+                zmax_cache::StampedeSlot::Follower(notify) => {
+                    let notified = notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if matches!(
+                        state.cache.get_with_stale(&key).await,
+                        zmax_cache::CacheLookup::Fresh(_)
+                    ) {
+                        break;
+                    }
+                    tokio::time::timeout_at(deadline, notified)
+                        .await
+                        .expect("SWR arka plan yenilemesi zaman asimina ugradi");
+                }
+                zmax_cache::StampedeSlot::Leader(guard) => {
+                    drop(guard);
+                    assert!(
+                        matches!(
+                            state.cache.get_with_stale(&key).await,
+                            zmax_cache::CacheLookup::Fresh(_)
+                        ),
+                        "SWR yenileme lideri tamamlandigi halde onbellek taze olmaliydi"
+                    );
+                    break;
+                }
+            }
+        }
 
         let fresh_resp = run_request(
             &state,
