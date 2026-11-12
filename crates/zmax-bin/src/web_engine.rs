@@ -14,7 +14,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 use zmax_cache::{
     build_cache_key, parse_lscache_headers, CacheLookup, CachedResponse, StampedeSlot,
 };
@@ -3023,14 +3022,6 @@ where
 
     state.buffer_pool.release(buf);
     res
-}
-
-fn parse_response_status(raw: &[u8]) -> Option<u16> {
-    let end = raw.windows(2).position(|w| w == b"\r\n")?;
-    let line = std::str::from_utf8(&raw[..end]).ok()?;
-    let mut parts = line.split_whitespace();
-    let _http = parts.next()?;
-    parts.next()?.parse::<u16>().ok()
 }
 
 /// `[cache] respect_request_cache_control` (varsayılan KAPALI): istek `Cache-Control`/`Pragma` başlıkları önbelleği atlatır mı?

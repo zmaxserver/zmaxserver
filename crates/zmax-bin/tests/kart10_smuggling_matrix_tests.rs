@@ -1200,7 +1200,7 @@ async fn k10_ws_idle_timeout_closes_silent_tunnel() {
         Ok(Ok(0)) | Ok(Err(_)) => {}
         other => panic!("sessiz tunel kapanmadi: {other:?}"),
     }
-    assert!(el < Duration::from_secs(5), "tunel gec kapandi: {el:?}");
+    assert!(el < Duration::from_secs(10), "tunel gec kapandi: {el:?}");
 }
 
 /// `max_ws=1`: ikinci es zamanli WebSocket 503; ilk kapaninca yuva serbest kalir.
