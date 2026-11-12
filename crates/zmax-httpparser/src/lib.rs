@@ -92,10 +92,7 @@ fn validate_http_headers(
                 "Geçersiz veya kontrol karakteri içeren HTTP başlık adı",
             ));
         }
-        if h.value
-            .iter()
-            .any(|&b| matches!(b, b'\r' | b'\n' | b'\0'))
-        {
+        if h.value.iter().any(|&b| matches!(b, b'\r' | b'\n' | b'\0')) {
             return Err(HeaderValidationError::value(
                 "HTTP başlık değerinde yasaklı kontrol karakteri (CR/LF/NUL)",
             ));
@@ -117,9 +114,9 @@ fn validate_http_headers(
                     "Geçersiz Content-Length başlığı",
                 ));
             }
-            let parsed_len = trimmed.parse::<usize>().map_err(|_| {
-                HeaderValidationError::value("Content-Length sayısal sınırı aştı")
-            })?;
+            let parsed_len = trimmed
+                .parse::<usize>()
+                .map_err(|_| HeaderValidationError::value("Content-Length sayısal sınırı aştı"))?;
             if let Some(prev) = content_length {
                 if prev != parsed_len {
                     return Err(HeaderValidationError::value(
@@ -318,6 +315,7 @@ where
     S: AsyncRead + Unpin,
 {
     let mut tmp = [0u8; 8192];
+    let header_deadline = tokio::time::Instant::now() + limits.header_timeout;
 
     let header_end = loop {
         if let Some(pos) = find_header_end(leftover) {
@@ -331,7 +329,7 @@ where
             return Err(HttpReadError::HeadersTooLarge);
         }
 
-        let read_res = tokio::time::timeout(limits.header_timeout, stream.read(&mut tmp))
+        let read_res = tokio::time::timeout_at(header_deadline, stream.read(&mut tmp))
             .await
             .map_err(|_| HttpReadError::Timeout)?
             .map_err(HttpReadError::Io)?;
@@ -434,8 +432,9 @@ where
         if len == 0 {
             Vec::new()
         } else {
+            let body_deadline = tokio::time::Instant::now() + limits.body_timeout;
             while leftover.len() < len {
-                let n = tokio::time::timeout(limits.body_timeout, stream.read(&mut tmp))
+                let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                     .await
                     .map_err(|_| HttpReadError::Timeout)?
                     .map_err(HttpReadError::Io)?;
@@ -480,6 +479,7 @@ where
 
     let mut decoded = Vec::new();
     let mut tmp = [0u8; 8192];
+    let body_deadline = tokio::time::Instant::now() + body_timeout;
 
     loop {
         let line_end = loop {
@@ -496,7 +496,7 @@ where
                     "Chunk boyut satırında CRLF eksik".to_string(),
                 ));
             }
-            let n = tokio::time::timeout(body_timeout, stream.read(&mut tmp))
+            let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                 .await
                 .map_err(|_| HttpReadError::Timeout)?
                 .map_err(HttpReadError::Io)?;
@@ -522,7 +522,7 @@ where
                     if buf.len() + trailer_bytes > MAX_TRAILER_BYTES {
                         return Err(HttpReadError::HeadersTooLarge);
                     }
-                    let n = tokio::time::timeout(body_timeout, stream.read(&mut tmp))
+                    let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                         .await
                         .map_err(|_| HttpReadError::Timeout)?
                         .map_err(HttpReadError::Io)?;
@@ -555,7 +555,7 @@ where
             .checked_add(2)
             .ok_or(HttpReadError::PayloadTooLarge)?;
         while buf.len() < needed {
-            let n = tokio::time::timeout(body_timeout, stream.read(&mut tmp))
+            let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                 .await
                 .map_err(|_| HttpReadError::Timeout)?
                 .map_err(HttpReadError::Io)?;
@@ -659,10 +659,7 @@ pub fn extract_header<'a>(headers: &'a [(String, String)], name: &str) -> Option
 }
 
 /// Zero-copy başlık diliminden büyük/küçük harf duyarsız şekilde başlık değerini çıkarır.
-pub fn extract_header_bytes<'a>(
-    headers: &'a [(&'a str, &'a [u8])],
-    name: &str,
-) -> Option<&'a str> {
+pub fn extract_header_bytes<'a>(headers: &'a [(&'a str, &'a [u8])], name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -723,9 +720,7 @@ pub fn is_ip_in_cidr(ip: IpAddr, cidr_or_ip: &str) -> bool {
 }
 
 fn is_trusted_proxy(ip: IpAddr, trusted_proxies: &[String]) -> bool {
-    trusted_proxies
-        .iter()
-        .any(|cidr| is_ip_in_cidr(ip, cidr))
+    trusted_proxies.iter().any(|cidr| is_ip_in_cidr(ip, cidr))
 }
 
 fn parse_forwarded_ip(raw: &str) -> Option<IpAddr> {
@@ -739,9 +734,7 @@ fn parse_forwarded_ip(raw: &str) -> Option<IpAddr> {
     if let Ok(sock) = token.parse::<SocketAddr>() {
         return Some(canonicalize_ip(sock.ip()));
     }
-    let unbracketed = token
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'));
+    let unbracketed = token.strip_prefix('[').and_then(|s| s.strip_suffix(']'));
     unbracketed
         .and_then(|s| s.parse::<IpAddr>().ok())
         .map(canonicalize_ip)
@@ -847,9 +840,7 @@ fn parse_strict_port(raw: &str) -> Result<u16, ProxyProtocolError> {
 fn parse_proxy_v1(buf: &[u8]) -> Result<ProxyProtocolHeader, ProxyProtocolError> {
     let scan_len = buf.len().min(PROXY_V1_MAX_LEN);
     let Some(crlf_pos) = find_crlf(&buf[..scan_len]) else {
-        if buf[..scan_len].contains(&b'\n')
-            || buf[..scan_len.saturating_sub(1)].contains(&b'\r')
-        {
+        if buf[..scan_len].contains(&b'\n') || buf[..scan_len.saturating_sub(1)].contains(&b'\r') {
             return Err(ProxyProtocolError::InvalidHeader(
                 "PROXY v1 satırında CRLF zorunlu".to_string(),
             ));
@@ -861,10 +852,7 @@ fn parse_proxy_v1(buf: &[u8]) -> Result<ProxyProtocolHeader, ProxyProtocolError>
     };
 
     let line = &buf[..crlf_pos];
-    if line
-        .iter()
-        .any(|&b| matches!(b, b'\r' | b'\n' | b'\0'))
-    {
+    if line.iter().any(|&b| matches!(b, b'\r' | b'\n' | b'\0')) {
         return Err(ProxyProtocolError::InvalidHeader(
             "PROXY v1 satırında yasaklı kontrol karakteri".to_string(),
         ));
@@ -1155,7 +1143,10 @@ mod tests {
                 .unwrap();
             client.write_all(b"5;ext=1\r\nhello\r\n").await.unwrap();
             tokio::time::sleep(Duration::from_millis(10)).await;
-            client.write_all(b"6\r\n world\r\n0\r\nX-Checksum: abc\r\n\r\n").await.unwrap();
+            client
+                .write_all(b"6\r\n world\r\n0\r\nX-Checksum: abc\r\n\r\n")
+                .await
+                .unwrap();
         });
 
         let req = read_http1_request(&mut server, HttpReadLimits::default())
@@ -1330,7 +1321,13 @@ mod tests {
         assert_eq!(extract_header(&headers_spoof, "HOST"), Some("site.com"));
         let untrusted_peer: IpAddr = "203.0.113.45".parse().unwrap();
         assert_eq!(
-            resolve_real_ip(untrusted_peer, &headers_spoof, "CF-Connecting-IP", &trusted, true),
+            resolve_real_ip(
+                untrusted_peer,
+                &headers_spoof,
+                "CF-Connecting-IP",
+                &trusted,
+                true
+            ),
             untrusted_peer
         );
 
@@ -1371,7 +1368,8 @@ mod tests {
 
     #[test]
     fn test_proxy_v1_tcp4_valid_and_preserves_trailing_http() {
-        let raw = b"PROXY TCP4 192.168.1.10 10.0.0.1 54321 443\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        let raw =
+            b"PROXY TCP4 192.168.1.10 10.0.0.1 54321 443\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\n";
         let hdr = parse_proxy_protocol_prefix(raw).unwrap().unwrap();
         assert_eq!(hdr.version, 1);
         assert_eq!(
@@ -1382,7 +1380,10 @@ mod tests {
             hdr.dst_addr,
             Some("10.0.0.1:443".parse::<SocketAddr>().unwrap())
         );
-        assert_eq!(&raw[hdr.consumed_bytes..], b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert_eq!(
+            &raw[hdr.consumed_bytes..],
+            b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+        );
     }
 
     #[test]
@@ -1455,7 +1456,7 @@ mod tests {
         // IPv4 + 4 bayt TLV
         let mut payload4 = vec![
             198, 51, 100, 7, // src 198.51.100.7
-            10, 0, 0, 5,     // dst 10.0.0.5
+            10, 0, 0, 5, // dst 10.0.0.5
         ];
         payload4.extend_from_slice(&50000u16.to_be_bytes());
         payload4.extend_from_slice(&443u16.to_be_bytes());
@@ -1489,7 +1490,10 @@ mod tests {
 
         let hdr6 = parse_proxy_protocol_prefix(&pkt6).unwrap().unwrap();
         assert_eq!(hdr6.version, 2);
-        assert_eq!(hdr6.src_addr, Some(SocketAddr::new(IpAddr::V6(src6), 44444)));
+        assert_eq!(
+            hdr6.src_addr,
+            Some(SocketAddr::new(IpAddr::V6(src6), 44444))
+        );
         assert_eq!(hdr6.dst_addr, Some(SocketAddr::new(IpAddr::V6(dst6), 8443)));
         assert_eq!(hdr6.consumed_bytes, pkt6.len());
 
