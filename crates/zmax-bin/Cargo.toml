@@ -8,6 +8,10 @@ license.workspace = true
 name = "zmax"
 path = "src/main.rs"
 
+[[test]]
+name = "kart10_proxy_tests"
+path = "tests/kart10_proxy_tests.rs"
+
 [dependencies]
 zmax-core = { path = "../zmax-core" }
 zmax-runtime = { path = "../zmax-runtime" }

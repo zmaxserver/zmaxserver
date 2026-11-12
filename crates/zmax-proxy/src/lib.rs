@@ -987,6 +987,7 @@ fn build_rewritten_head_internal(
                 | "proxy-authorization"
                 | "te"
                 | "trailer"
+                | "trailers"
                 | "transfer-encoding"
         ) || n == "connection"
           || (n == "upgrade" && !is_ws_upgrade)
@@ -2364,5 +2365,137 @@ mod tests {
 
         close_gate.notify_one();
         srv.await.unwrap();
+    }
+
+    #[test]
+    fn test_build_rewritten_head_rfc9110_hop_by_hop_and_connection_tokens() {
+        let head = concat!(
+            "GET /api HTTP/1.1\r\n",
+            "Host: test.local\r\n",
+            "Connection: close, X-Custom-Hop, X-Another-Hop\r\n",
+            "X-Custom-Hop: foo\r\n",
+            "X-Another-Hop: bar\r\n",
+            "Keep-Alive: timeout=10\r\n",
+            "Proxy-Connection: keep-alive\r\n",
+            "Proxy-Authenticate: Basic\r\n",
+            "Proxy-Authorization: Secret\r\n",
+            "TE: trailers\r\n",
+            "Trailer: X-Checksum\r\n",
+            "Trailers: X-Checksum-2\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Upgrade: websocket-fake\r\n",
+            "Content-Length: 42\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let out = rewrite_request_head(head, "127.0.0.1".parse().unwrap(), false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(!s.contains("X-Custom-Hop:"));
+        assert!(!s.contains("X-Another-Hop:"));
+        assert!(!s.contains("Keep-Alive:"));
+        assert!(!s.contains("Proxy-Connection:"));
+        assert!(!s.contains("Proxy-Authenticate:"));
+        assert!(!s.contains("Proxy-Authorization:"));
+        assert!(!s.contains("TE:"));
+        assert!(!s.contains("Trailer:"));
+        assert!(!s.contains("Trailers:"));
+        assert!(!s.contains("Transfer-Encoding:"));
+        assert!(!s.contains("Upgrade:"));
+        assert!(s.contains("Content-Length: 42\r\n"));
+        assert!(s.contains("X-Forwarded-For: 127.0.0.1\r\n"));
+    }
+
+    #[test]
+    fn test_build_rewritten_head_strips_te_and_trailers() {
+        let head = concat!(
+            "POST /submit HTTP/1.1\r\n",
+            "Host: example.org\r\n",
+            "TE: gzip, trailers\r\n",
+            "Trailers: X-Sign\r\n",
+            "Trailer: X-Sum\r\n",
+            "Content-Length: 10\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let out = rewrite_request_head(head, "10.0.0.1".parse().unwrap(), true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(!s.contains("TE:"));
+        assert!(!s.contains("Trailers:"));
+        assert!(!s.contains("Trailer:"));
+        assert!(s.contains("Content-Length: 10\r\n"));
+        assert!(s.contains("X-Forwarded-Proto: https\r\n"));
+    }
+
+    #[test]
+    fn test_build_rewritten_head_strips_non_websocket_upgrade() {
+        let head = concat!(
+            "GET /h2c HTTP/1.1\r\n",
+            "Host: example.org\r\n",
+            "Upgrade: h2c\r\n",
+            "Connection: Upgrade\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let out = rewrite_request_head(head, "10.0.0.1".parse().unwrap(), false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(!s.contains("Upgrade:"));
+        assert!(s.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn request_smuggling_blocked() {
+        let head = concat!(
+            "POST /submit HTTP/1.1\r\n",
+            "Host: target.local\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Content-Length: 42\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let out = rewrite_request_head(head, "127.0.0.1".parse().unwrap(), false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(!s.to_ascii_lowercase().contains("transfer-encoding:"), "Transfer-Encoding upstream'e gitmemeli");
+        assert!(s.contains("Content-Length: 42\r\n"), "Content-Length korunmali");
+    }
+
+    #[test]
+    fn hop_by_hop_headers_stripped() {
+        let head = concat!(
+            "GET /api HTTP/1.1\r\n",
+            "Host: target.local\r\n",
+            "Connection: close, X-Custom-Token\r\n",
+            "X-Custom-Token: secret\r\n",
+            "Keep-Alive: timeout=5\r\n",
+            "Proxy-Authenticate: Basic\r\n",
+            "Proxy-Authorization: Bearer xyz\r\n",
+            "TE: trailers\r\n",
+            "Trailer: X-Checksum\r\n",
+            "Trailers: X-Checksum-2\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Upgrade: custom-proto\r\n",
+            "\r\n"
+        )
+        .as_bytes();
+
+        let out = rewrite_request_head(head, "10.0.0.1".parse().unwrap(), true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(!s.contains("X-Custom-Token:"), "Connection token dusmeli");
+        assert!(!s.contains("Keep-Alive:"), "Keep-Alive dusmeli");
+        assert!(!s.contains("Proxy-Authenticate:"), "Proxy-Authenticate dusmeli");
+        assert!(!s.contains("Proxy-Authorization:"), "Proxy-Authorization dusmeli");
+        assert!(!s.contains("TE:"), "TE dusmeli");
+        assert!(!s.contains("Trailer:"), "Trailer dusmeli");
+        assert!(!s.contains("Trailers:"), "Trailers dusmeli");
+        assert!(!s.contains("Transfer-Encoding:"), "Transfer-Encoding dusmeli");
+        assert!(!s.contains("Upgrade:"), "Upgrade dusmeli");
     }
 }

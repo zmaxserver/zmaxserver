@@ -2080,11 +2080,28 @@ async fn serve_proxy_request<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let is_ws = vhost_ctx.proxy_websocket
+        && extract_header(&req.headers, "upgrade")
+            .map(|u| u.eq_ignore_ascii_case("websocket"))
+            .unwrap_or(false);
+
     let raw_target = if req.query.is_empty() {
         req.path.clone()
     } else {
         format!("{}?{}", req.path, req.query)
     };
+    let mut connection_tokens = Vec::new();
+    for (k, v) in &req.headers {
+        if k.eq_ignore_ascii_case("connection") {
+            for tok in v.split(',') {
+                let t = tok.trim().to_ascii_lowercase();
+                if !t.is_empty() {
+                    connection_tokens.push(t);
+                }
+            }
+        }
+    }
+
     let mut raw_head = format!(
         "{} {} HTTP/1.{}\r\n",
         req.method,
@@ -2092,9 +2109,30 @@ where
         req.version.min(1)
     );
     for (k, v) in &req.headers {
-        // [kart-10: P0 request smuggling önleme]
+        let kl = k.to_ascii_lowercase();
+        // [kart-10: P0 request smuggling & RFC 9110 hop-by-hop temizliği]
+        // Connection başlığındaki özel belirteçler ve hop-by-hop alanları elenir.
+        // WebSocket durumunda Upgrade belirteci korunur.
+        if !(is_ws && kl == "upgrade") && connection_tokens.contains(&kl) {
+            continue;
+        }
         // Gövde decode_chunked_stream ile çözüldüğünden, transfer-encoding başlığı upstream'e aktarılmaz!
-        if k.eq_ignore_ascii_case("transfer-encoding") || k.eq_ignore_ascii_case("content-length") {
+        if matches!(
+            kl.as_str(),
+            "transfer-encoding"
+                | "content-length"
+                | "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "trailers"
+        ) {
+            continue;
+        }
+        if kl == "upgrade" && !is_ws {
             continue;
         }
         raw_head.push_str(&format!("{}: {}\r\n", k, v));
@@ -2108,11 +2146,6 @@ where
         raw_head.push_str(&format!("content-length: {}\r\n", req.body.len()));
     }
     raw_head.push_str("\r\n");
-
-    let is_ws = vhost_ctx.proxy_websocket
-        && extract_header(&req.headers, "upgrade")
-            .map(|u| u.eq_ignore_ascii_case("websocket"))
-            .unwrap_or(false);
 
     // [kart-10: sihirli sayı kaldırıldı]
     let conn_sec = if vhost_ctx.proxy_ext.connect_timeout_sec > 0 {
@@ -2324,9 +2357,39 @@ async fn serve_h2_proxy_request(
     } else {
         format!("{}?{}", req.path, req.query)
     };
+    let mut connection_tokens = Vec::new();
+    for (k, v) in &req.headers {
+        if k.eq_ignore_ascii_case("connection") {
+            for tok in v.split(',') {
+                let t = tok.trim().to_ascii_lowercase();
+                if !t.is_empty() {
+                    connection_tokens.push(t);
+                }
+            }
+        }
+    }
+
     let mut raw_head = format!("{} {} HTTP/1.1\r\n", req.method, raw_target);
     for (k, v) in &req.headers {
-        if k.eq_ignore_ascii_case("transfer-encoding") || k.eq_ignore_ascii_case("content-length") {
+        let kl = k.to_ascii_lowercase();
+        // [kart-10: RFC 9110 hop-by-hop ve smuggling temizliği]
+        if connection_tokens.contains(&kl) {
+            continue;
+        }
+        if matches!(
+            kl.as_str(),
+            "transfer-encoding"
+                | "content-length"
+                | "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "trailers"
+                | "upgrade"
+        ) {
             continue;
         }
         raw_head.push_str(&format!("{}: {}\r\n", k, v));
@@ -2493,6 +2556,11 @@ async fn serve_h2_proxy_request(
             "connection"
                 | "keep-alive"
                 | "proxy-connection"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "trailers"
                 | "transfer-encoding"
                 | "upgrade"
         ) {

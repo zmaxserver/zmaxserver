@@ -161,6 +161,27 @@ fn write_test_workspace(
     ws_upstream: &str,
     timeout_upstream: &str,
 ) -> rustls::pki_types::CertificateDer<'static> {
+    write_test_workspace_ports(
+        base_dir,
+        xff_upstream,
+        https_upstream,
+        sse_upstream,
+        ws_upstream,
+        timeout_upstream,
+        (TEST_HTTP_PORT, TEST_HTTPS_PORT, TEST_API_PORT, TEST_ADMIN_PORT),
+    )
+}
+
+fn write_test_workspace_ports(
+    base_dir: &Path,
+    xff_upstream: &str,
+    https_upstream: &str,
+    sse_upstream: &str,
+    ws_upstream: &str,
+    timeout_upstream: &str,
+    ports: (u16, u16, u16, u16),
+) -> rustls::pki_types::CertificateDer<'static> {
+    let (http_port, https_port, api_port, admin_port) = ports;
     std::fs::create_dir_all(base_dir.join("conf").join("vhosts")).unwrap();
     std::fs::create_dir_all(base_dir.join("modules")).unwrap();
     std::fs::create_dir_all(base_dir.join("admin")).unwrap();
@@ -197,23 +218,23 @@ workers = 2
 [listeners.http]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_HTTP_PORT}
+port = {http_port}
 
 [listeners.https]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_HTTPS_PORT}
+port = {https_port}
 ssl = true
 
 [listeners.api]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_API_PORT}
+port = {api_port}
 
 [listeners.admin]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_ADMIN_PORT}
+port = {admin_port}
 document_root = "admin"
 
 [security]
@@ -866,7 +887,9 @@ async fn kart10_e2e_reverse_proxy_xff_https_sse_websocket_and_timeout() {
             "Keep-Alive: timeout=5\r\n",
             "Proxy-Connection: keep-alive\r\n",
             "TE: trailers\r\n",
-            "Trailer: X-Checksum\r\n\r\n"
+            "Trailer: X-Checksum\r\n",
+            "Trailers: X-Checksum-2\r\n",
+            "Upgrade: custom-proto\r\n\r\n"
         );
         client.write_all(req.as_bytes()).await.unwrap();
         client.flush().await.unwrap();
@@ -878,6 +901,8 @@ async fn kart10_e2e_reverse_proxy_xff_https_sse_websocket_and_timeout() {
         assert!(!resp.contains("Proxy-Connection:"), "Proxy-Connection upstream'e gecmemeli: {resp}");
         assert!(!resp.contains("TE:"), "TE upstream'e gecmemeli: {resp}");
         assert!(!resp.contains("Trailer:"), "Trailer upstream'e gecmemeli: {resp}");
+        assert!(!resp.contains("Trailers:"), "Trailers upstream'e gecmemeli: {resp}");
+        assert!(!resp.contains("Upgrade:"), "Upgrade upstream'e gecmemeli: {resp}");
     }
 
     // --- Senaryo H: HTTP/2 TLS ALPN h2 Uzerinden Ters Vekil Istegi ---
@@ -982,4 +1007,233 @@ max_conns = 128
     assert_eq!(proxy.max_conns(), 128);
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn h2_client_reaches_proxy_vhost() {
+    let _guard = PORT_BLOCK_LOCK.lock().await;
+    let ports = (21110, 21111, 21112, 21113);
+
+    let https_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let https_addr = https_listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = https_listener.accept().await {
+            tokio::spawn(async move {
+                let req_bytes = read_http_head(&mut sock).await;
+                let req_str = String::from_utf8_lossy(&req_bytes);
+                let body = format!("OK-H2|{}", req_str.replace("\r\n", "|"));
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+
+    let dummy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dummy_addr = dummy_listener.local_addr().unwrap().to_string();
+
+    let base_dir = std::env::temp_dir().join(format!("zmax_kart10_h2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let cert_der = write_test_workspace_ports(
+        &base_dir,
+        &dummy_addr,
+        &https_addr,
+        &dummy_addr,
+        &dummy_addr,
+        &dummy_addr,
+        ports,
+    );
+
+    let _server = spawn_zmax_and_wait_ready(&base_dir).await;
+
+    let mut root_store = RootCertStore::empty();
+    root_store.add(cert_der).unwrap();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut h2_cfg = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    h2_cfg.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = TlsConnector::from(Arc::new(h2_cfg));
+
+    let tcp = TcpStream::connect(("127.0.0.1", ports.1)).await.unwrap();
+    let server_name = ServerName::try_from("https.kart10.test").unwrap();
+    let tls = connector.connect(server_name, tcp).await.unwrap();
+
+    let (mut client, h2_conn) = h2::client::handshake(tls).await.unwrap();
+    tokio::spawn(async move {
+        let _ = h2_conn.await;
+    });
+
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://https.kart10.test/h2-direct")
+        .header("Host", "https.kart10.test")
+        .body(())
+        .unwrap();
+    let (response, _send_stream) = client.send_request(req, true).unwrap();
+    let (head, mut body) = response.await.unwrap().into_parts();
+    assert_eq!(head.status, 200);
+
+    let mut body_bytes = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let data = chunk.unwrap();
+        body_bytes.extend_from_slice(&data);
+    }
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        body_str.contains("X-Forwarded-Proto: https"),
+        "H2 vekil isteginde X-Forwarded-Proto: https olmali: {body_str}"
+    );
+    assert!(
+        body_str.contains("X-Forwarded-Host: https.kart10.test"),
+        "H2 vekil isteginde X-Forwarded-Host olmali: {body_str}"
+    );
+}
+
+#[tokio::test]
+async fn request_smuggling_blocked() {
+    let _guard = PORT_BLOCK_LOCK.lock().await;
+    let ports = (21120, 21121, 21122, 21123);
+
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = upstream.accept().await {
+            tokio::spawn(async move {
+                loop {
+                    let mut buf = Vec::with_capacity(2048);
+                    let mut tmp = [0u8; 512];
+                    loop {
+                        let n = match sock.read(&mut tmp).await {
+                            Ok(0) => return,
+                            Ok(n) => n,
+                            Err(_) => return,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        if find_header_end(&buf).is_some() {
+                            break;
+                        }
+                    }
+                    let req_str = String::from_utf8_lossy(&buf);
+                    let body = format!("OK-SMUGGLING|{}", req_str.replace("\r\n", "|"));
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    if sock.write_all(resp.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = sock.flush().await;
+                }
+            });
+        }
+    });
+
+    let base_dir = std::env::temp_dir().join(format!("zmax_kart10_smug_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = write_test_workspace_ports(
+        &base_dir,
+        &upstream_addr,
+        &upstream_addr,
+        &upstream_addr,
+        &upstream_addr,
+        &upstream_addr,
+        ports,
+    );
+
+    let _server = spawn_zmax_and_wait_ready(&base_dir).await;
+
+    let mut client = TcpStream::connect(("127.0.0.1", ports.0)).await.unwrap();
+    let smuggled = "0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: xff.kart10.test\r\n\r\n";
+    let chunked = format!("{:x}\r\n{}\r\n0\r\n\r\n", smuggled.len(), smuggled);
+    let req = format!(
+        "POST /submit HTTP/1.1\r\nHost: xff.kart10.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}",
+        chunked
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    client.flush().await.unwrap();
+
+    let resp = read_http_response_complete(&mut client).await;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "{resp}");
+    assert!(!resp.contains("Transfer-Encoding:"), "TE upstream'e iletilmemeli: {resp}");
+    let expected_cl = format!("content-length: {}", smuggled.len());
+    let expected_cl_upper = format!("Content-Length: {}", smuggled.len());
+    assert!(
+        resp.contains(&expected_cl) || resp.contains(&expected_cl_upper),
+        "Upstream Content-Length gormeli: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn hop_by_hop_headers_stripped() {
+    let _guard = PORT_BLOCK_LOCK.lock().await;
+    let ports = (21130, 21131, 21132, 21133);
+
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = upstream.accept().await {
+            tokio::spawn(async move {
+                let req_bytes = read_http_head(&mut sock).await;
+                let req_str = String::from_utf8_lossy(&req_bytes);
+                let body = format!("OK-HOP|{}", req_str.replace("\r\n", "|"));
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+
+    let base_dir = std::env::temp_dir().join(format!("zmax_kart10_hop_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = write_test_workspace_ports(
+        &base_dir,
+        &upstream_addr,
+        &upstream_addr,
+        &upstream_addr,
+        &upstream_addr,
+        &upstream_addr,
+        ports,
+    );
+
+    let _server = spawn_zmax_and_wait_ready(&base_dir).await;
+
+    let mut client = TcpStream::connect(("127.0.0.1", ports.0)).await.unwrap();
+    let req = concat!(
+        "GET /hop-test HTTP/1.1\r\n",
+        "Host: xff.kart10.test\r\n",
+        "Connection: close, X-Custom-Hop\r\n",
+        "X-Custom-Hop: secret-val\r\n",
+        "Keep-Alive: timeout=5\r\n",
+        "Proxy-Authenticate: Basic\r\n",
+        "Proxy-Authorization: Bearer xyz\r\n",
+        "TE: trailers\r\n",
+        "Trailer: X-Checksum\r\n",
+        "Trailers: X-Checksum-2\r\n",
+        "Upgrade: custom-proto\r\n\r\n"
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    client.flush().await.unwrap();
+
+    let resp = read_http_response_complete(&mut client).await;
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "{resp}");
+    assert!(!resp.contains("X-Custom-Hop:"), "Connection token silinmeli: {resp}");
+    assert!(!resp.contains("Keep-Alive:"), "Keep-Alive silinmeli: {resp}");
+    assert!(!resp.contains("Proxy-Authenticate:"), "Proxy-Authenticate silinmeli: {resp}");
+    assert!(!resp.contains("Proxy-Authorization:"), "Proxy-Authorization silinmeli: {resp}");
+    assert!(!resp.contains("TE:"), "TE silinmeli: {resp}");
+    assert!(!resp.contains("Trailer:"), "Trailer silinmeli: {resp}");
+    assert!(!resp.contains("Trailers:"), "Trailers silinmeli: {resp}");
+    assert!(!resp.contains("Upgrade:"), "Upgrade silinmeli: {resp}");
 }
