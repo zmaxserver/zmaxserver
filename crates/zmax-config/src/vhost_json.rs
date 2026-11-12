@@ -2,9 +2,9 @@
 //! Sanal konak (vHost) yapılandırmalarının JSON REST API üzerinden tam alan
 //! ayrıştırılması, doğrulanması, serileştirilmesi ve TOML turu (round-trip) eşitliği.
 
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
-use serde_json::{Map, Value};
 
 use crate::{LoadedVHost, VHostEntry, VHostRewriteRule};
 
@@ -50,9 +50,12 @@ pub fn val_as_string_list(v: &Value, field: &str) -> Result<Vec<String>, String>
 
 /// Bir JSON değerini `BTreeMap<u16, String>` (HTTP durum kodu -> sayfa yolu) olarak doğrular.
 pub fn val_as_status_pages(v: &Value, field: &str) -> Result<BTreeMap<u16, String>, String> {
-    let obj = v
-        .as_object()
-        .ok_or_else(|| format!("'{}' alanı durum kodu eşleme nesnesi ({{...}}) olmalıdır", field))?;
+    let obj = v.as_object().ok_or_else(|| {
+        format!(
+            "'{}' alanı durum kodu eşleme nesnesi ({{...}}) olmalıdır",
+            field
+        )
+    })?;
     let mut pages = BTreeMap::new();
     for (k, val) in obj {
         let code: u16 = k
@@ -87,7 +90,10 @@ pub fn val_as_rewrite_rules(v: &Value, field: &str) -> Result<Vec<VHostRewriteRu
     let mut rules = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
         let obj = item.as_object().ok_or_else(|| {
-            format!("'{}' içindeki {}. kural nesne ({{...}}) olmalıdır", field, idx)
+            format!(
+                "'{}' içindeki {}. kural nesne ({{...}}) olmalıdır",
+                field, idx
+            )
         })?;
         let pattern = obj
             .get("pattern")
@@ -101,10 +107,16 @@ pub fn val_as_rewrite_rules(v: &Value, field: &str) -> Result<Vec<VHostRewriteRu
             .to_string();
         let status = if let Some(st_val) = obj.get("status") {
             let n = st_val.as_u64().ok_or_else(|| {
-                format!("'{}' içindeki {}. kural status değeri sayı olmalıdır", field, idx)
+                format!(
+                    "'{}' içindeki {}. kural status değeri sayı olmalıdır",
+                    field, idx
+                )
             })?;
             u16::try_from(n).map_err(|_| {
-                format!("'{}' içindeki {}. kural status değeri u16 sınırını aşıyor", field, idx)
+                format!(
+                    "'{}' içindeki {}. kural status değeri u16 sınırını aşıyor",
+                    field, idx
+                )
             })?
         } else {
             0
@@ -148,7 +160,10 @@ pub fn merge_section_object(
     patch: &Value,
 ) -> Result<(), String> {
     let patch_obj = patch.as_object().ok_or_else(|| {
-        format!("'{}' alanı bir JSON nesnesi ({{...}}) olmalıdır", section_key)
+        format!(
+            "'{}' alanı bir JSON nesnesi ({{...}}) olmalıdır",
+            section_key
+        )
     })?;
     let target_entry = root
         .entry(section_key.to_string())
@@ -210,6 +225,9 @@ pub fn merge_vhost_json_patch(
         "error_docs",
         "tls",
         "static",
+        // [kart-3b] Kart 5 ile eklenen hotlink ve acl bölümleri
+        "hotlink",
+        "acl",
     ] {
         if let Some(patch) = obj.get(section) {
             merge_section_object(&mut base_map, section, patch)?;
@@ -296,18 +314,50 @@ pub fn merge_vhost_json_patch(
     if let Some(v) = obj.get("deny_ips") {
         entry.security.deny_ips = val_as_string_list(v, "deny_ips")?;
     }
-    if let Some(v) = obj.get("waf_enabled").or_else(|| obj.get("security_waf_enabled")) {
+    if let Some(v) = obj
+        .get("waf_enabled")
+        .or_else(|| obj.get("security_waf_enabled"))
+    {
         entry.security.waf_enabled = match v {
             Value::Null => None,
             Value::Bool(b) => Some(*b),
             _ => return Err("'waf_enabled' alanı mantıksal (bool) veya null olmalıdır".to_string()),
         };
     }
-    if let Some(v) = obj.get("wp_brute_force").or_else(|| obj.get("security_wp_brute_force")) {
+    if let Some(v) = obj
+        .get("wp_brute_force")
+        .or_else(|| obj.get("security_wp_brute_force"))
+    {
         entry.security.wp_brute_force = val_as_bool(v, "wp_brute_force")?;
     }
-    if let Some(v) = obj.get("waf_exclude_paths").or_else(|| obj.get("security_waf_exclude_paths")) {
+    if let Some(v) = obj
+        .get("waf_exclude_paths")
+        .or_else(|| obj.get("security_waf_exclude_paths"))
+    {
         entry.security.waf_exclude_paths = val_as_string_list(v, "waf_exclude_paths")?;
+    }
+
+    // [kart-3b] Hotlink (enabled, allowed_referers, extensions) ve ACL (allow_ips, deny_ips)
+    if let Some(v) = obj.get("hotlink_enabled") {
+        entry.hotlink.enabled = val_as_bool(v, "hotlink_enabled")?;
+    }
+    if let Some(v) = obj
+        .get("hotlink_allowed_referers")
+        .or_else(|| obj.get("allowed_referers"))
+    {
+        entry.hotlink.allowed_referers = val_as_string_list(v, "hotlink_allowed_referers")?;
+    }
+    if let Some(v) = obj
+        .get("hotlink_extensions")
+        .or_else(|| obj.get("extensions"))
+    {
+        entry.hotlink.extensions = val_as_string_list(v, "hotlink_extensions")?;
+    }
+    if let Some(v) = obj.get("acl_allow_ips") {
+        entry.acl.allow_ips = val_as_string_list(v, "acl_allow_ips")?;
+    }
+    if let Some(v) = obj.get("acl_deny_ips") {
+        entry.acl.deny_ips = val_as_string_list(v, "acl_deny_ips")?;
     }
 
     // Rewrite (rules, enabled, try_files, htaccess)
@@ -325,7 +375,10 @@ pub fn merge_vhost_json_patch(
     }
 
     // Headers (security_headers, hsts)
-    if let Some(v) = obj.get("security_headers").or_else(|| obj.get("headers_security_headers")) {
+    if let Some(v) = obj
+        .get("security_headers")
+        .or_else(|| obj.get("headers_security_headers"))
+    {
         entry.headers.security_headers = val_as_bool(v, "security_headers")?;
     }
     if let Some(v) = obj.get("hsts").or_else(|| obj.get("headers_hsts")) {
@@ -476,17 +529,35 @@ pub fn format_vhost_entry_json(
 
     // Geriye dönük uyumlu ve açık düz kısayol alanları
     root.insert("php_enabled".to_string(), Value::Bool(entry.php.enabled));
-    root.insert("php_sapi".to_string(), Value::String(entry.php.sapi.clone()));
+    root.insert(
+        "php_sapi".to_string(),
+        Value::String(entry.php.sapi.clone()),
+    );
     root.insert(
         "php_upstream".to_string(),
         Value::String(entry.php.upstream.clone()),
     );
     root.insert("php_timeout".to_string(), Value::from(entry.php.timeout));
-    root.insert("php_upstreams".to_string(), serde_json::json!(effective_upstreams));
-    root.insert("upstreams".to_string(), serde_json::json!(entry.php.upstreams));
-    root.insert("lb_policy".to_string(), Value::String(entry.php.lb_policy.clone()));
-    root.insert("dial_timeout_ms".to_string(), Value::from(entry.php.dial_timeout_ms));
-    root.insert("io_timeout_secs".to_string(), Value::from(entry.php.io_timeout_secs));
+    root.insert(
+        "php_upstreams".to_string(),
+        serde_json::json!(effective_upstreams),
+    );
+    root.insert(
+        "upstreams".to_string(),
+        serde_json::json!(entry.php.upstreams),
+    );
+    root.insert(
+        "lb_policy".to_string(),
+        Value::String(entry.php.lb_policy.clone()),
+    );
+    root.insert(
+        "dial_timeout_ms".to_string(),
+        Value::from(entry.php.dial_timeout_ms),
+    );
+    root.insert(
+        "io_timeout_secs".to_string(),
+        Value::from(entry.php.io_timeout_secs),
+    );
     root.insert("keep_conn".to_string(), Value::Bool(entry.php.keep_conn));
     root.insert(
         "max_idle_conns".to_string(),
@@ -505,28 +576,82 @@ pub fn format_vhost_entry_json(
         Value::String(entry.php.x_accel_prefix.clone()),
     );
 
-    root.insert("cache_enabled".to_string(), Value::Bool(entry.cache.enabled));
+    root.insert(
+        "cache_enabled".to_string(),
+        Value::Bool(entry.cache.enabled),
+    );
     root.insert("cache_expire".to_string(), Value::from(entry.cache.expire));
 
     root.insert("ssl_enabled".to_string(), Value::Bool(has_ssl));
-    root.insert("ssl_cert".to_string(), Value::String(entry.ssl.certificate.clone()));
+    root.insert(
+        "ssl_cert".to_string(),
+        Value::String(entry.ssl.certificate.clone()),
+    );
     root.insert("ssl_key".to_string(), Value::String(entry.ssl.key.clone()));
 
-    root.insert("force_https".to_string(), Value::Bool(entry.security.force_https));
+    root.insert(
+        "force_https".to_string(),
+        Value::Bool(entry.security.force_https),
+    );
     root.insert(
         "hotlink_protection".to_string(),
         Value::Bool(entry.security.hotlink_protection),
     );
-    root.insert("allow_ips".to_string(), serde_json::json!(entry.security.allow_ips));
-    root.insert("deny_ips".to_string(), serde_json::json!(entry.security.deny_ips));
-    root.insert("waf_enabled".to_string(), serde_json::json!(entry.security.waf_enabled));
-    root.insert("wp_brute_force".to_string(), Value::Bool(entry.security.wp_brute_force));
+    root.insert(
+        "allow_ips".to_string(),
+        serde_json::json!(entry.security.allow_ips),
+    );
+    root.insert(
+        "deny_ips".to_string(),
+        serde_json::json!(entry.security.deny_ips),
+    );
+    root.insert(
+        "waf_enabled".to_string(),
+        serde_json::json!(entry.security.waf_enabled),
+    );
+    root.insert(
+        "wp_brute_force".to_string(),
+        Value::Bool(entry.security.wp_brute_force),
+    );
     root.insert(
         "waf_exclude_paths".to_string(),
         serde_json::json!(entry.security.waf_exclude_paths),
     );
 
-    root.insert("proxy_enabled".to_string(), Value::Bool(entry.proxy.enabled));
+    // [kart-3b] Kart 5 Hotlink ve ACL düz kısayol alanları
+    root.insert(
+        "hotlink_enabled".to_string(),
+        Value::Bool(entry.hotlink.enabled),
+    );
+    root.insert(
+        "hotlink_allowed_referers".to_string(),
+        serde_json::json!(entry.hotlink.allowed_referers),
+    );
+    root.insert(
+        "allowed_referers".to_string(),
+        serde_json::json!(entry.hotlink.allowed_referers),
+    );
+    root.insert(
+        "hotlink_extensions".to_string(),
+        serde_json::json!(entry.hotlink.extensions),
+    );
+    root.insert(
+        "extensions".to_string(),
+        serde_json::json!(entry.hotlink.extensions),
+    );
+    root.insert(
+        "acl_allow_ips".to_string(),
+        serde_json::json!(entry.acl.allow_ips),
+    );
+    root.insert(
+        "acl_deny_ips".to_string(),
+        serde_json::json!(entry.acl.deny_ips),
+    );
+
+    root.insert(
+        "proxy_enabled".to_string(),
+        Value::Bool(entry.proxy.enabled),
+    );
     root.insert(
         "proxy_upstream".to_string(),
         Value::String(entry.proxy.upstream.clone()),
@@ -535,13 +660,25 @@ pub fn format_vhost_entry_json(
         "proxy_path_prefix".to_string(),
         Value::String(entry.proxy.path_prefix.clone()),
     );
-    root.insert("preserve_host".to_string(), Value::Bool(entry.proxy.preserve_host));
+    root.insert(
+        "preserve_host".to_string(),
+        Value::Bool(entry.proxy.preserve_host),
+    );
     root.insert("websocket".to_string(), Value::Bool(entry.proxy.websocket));
 
-    root.insert("rewrite_enabled".to_string(), Value::Bool(entry.rewrite.enabled));
-    root.insert("try_files".to_string(), Value::Bool(entry.rewrite.try_files));
+    root.insert(
+        "rewrite_enabled".to_string(),
+        Value::Bool(entry.rewrite.enabled),
+    );
+    root.insert(
+        "try_files".to_string(),
+        Value::Bool(entry.rewrite.try_files),
+    );
     root.insert("htaccess".to_string(), Value::Bool(entry.rewrite.htaccess));
-    root.insert("rewrite_rules".to_string(), serde_json::json!(entry.rewrite.rules));
+    root.insert(
+        "rewrite_rules".to_string(),
+        serde_json::json!(entry.rewrite.rules),
+    );
     root.insert("rules".to_string(), serde_json::json!(entry.rewrite.rules));
 
     root.insert(
@@ -550,7 +687,10 @@ pub fn format_vhost_entry_json(
     );
     root.insert("hsts".to_string(), Value::Bool(entry.headers.hsts));
 
-    root.insert("logging_enabled".to_string(), Value::Bool(entry.logging.enabled));
+    root.insert(
+        "logging_enabled".to_string(),
+        Value::Bool(entry.logging.enabled),
+    );
     root.insert(
         "access_log".to_string(),
         Value::String(entry.logging.access_log.clone()),
@@ -559,7 +699,10 @@ pub fn format_vhost_entry_json(
         "error_log".to_string(),
         Value::String(entry.logging.error_log.clone()),
     );
-    root.insert("log_format".to_string(), Value::String(entry.logging.format.clone()));
+    root.insert(
+        "log_format".to_string(),
+        Value::String(entry.logging.format.clone()),
+    );
     root.insert(
         "max_log_size_mb".to_string(),
         Value::from(entry.logging.max_log_size_mb),
@@ -569,7 +712,10 @@ pub fn format_vhost_entry_json(
         Value::Bool(entry.logging.also_write_global),
     );
 
-    root.insert("error_docs_enabled".to_string(), Value::Bool(entry.error_docs.enabled));
+    root.insert(
+        "error_docs_enabled".to_string(),
+        Value::Bool(entry.error_docs.enabled),
+    );
     root.insert(
         "error_docs_dir".to_string(),
         Value::String(entry.error_docs.dir.clone()),
@@ -592,8 +738,14 @@ pub fn format_vhost_entry_json(
     );
     root.insert("brotli".to_string(), Value::Bool(entry.static_files.brotli));
     root.insert("gzip".to_string(), Value::Bool(entry.static_files.gzip));
-    root.insert("autoindex".to_string(), Value::Bool(entry.static_files.autoindex));
-    root.insert("sendfile".to_string(), Value::Bool(entry.static_files.sendfile));
+    root.insert(
+        "autoindex".to_string(),
+        Value::Bool(entry.static_files.autoindex),
+    );
+    root.insert(
+        "sendfile".to_string(),
+        Value::Bool(entry.static_files.sendfile),
+    );
 
     Value::Object(root)
 }
@@ -618,10 +770,16 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
         return Some(format!("aliases: '{:?}' != '{:?}'", a.aliases, b.aliases));
     }
     if a.document_root != b.document_root {
-        return Some(format!("document_root: '{}' != '{}'", a.document_root, b.document_root));
+        return Some(format!(
+            "document_root: '{}' != '{}'",
+            a.document_root, b.document_root
+        ));
     }
     if a.index_files != b.index_files {
-        return Some(format!("index_files: '{:?}' != '{:?}'", a.index_files, b.index_files));
+        return Some(format!(
+            "index_files: '{:?}' != '{:?}'",
+            a.index_files, b.index_files
+        ));
     }
     if a.cache.enabled != b.cache.enabled || a.cache.expire != b.cache.expire {
         return Some(format!("cache: '{:?}' != '{:?}'", a.cache, b.cache));
@@ -653,7 +811,10 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
         || a.security.wp_brute_force != b.security.wp_brute_force
         || a.security.waf_exclude_paths != b.security.waf_exclude_paths
     {
-        return Some(format!("security: '{:?}' != '{:?}'", a.security, b.security));
+        return Some(format!(
+            "security: '{:?}' != '{:?}'",
+            a.security, b.security
+        ));
     }
     if a.rewrite.enabled != b.rewrite.enabled
         || a.rewrite.try_files != b.rewrite.try_files
@@ -670,8 +831,7 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
     {
         return Some(format!("proxy: '{:?}' != '{:?}'", a.proxy, b.proxy));
     }
-    if a.headers.security_headers != b.headers.security_headers
-        || a.headers.hsts != b.headers.hsts
+    if a.headers.security_headers != b.headers.security_headers || a.headers.hsts != b.headers.hsts
     {
         return Some(format!("headers: '{:?}' != '{:?}'", a.headers, b.headers));
     }
@@ -688,7 +848,10 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
         || a.error_docs.dir != b.error_docs.dir
         || a.error_docs.pages != b.error_docs.pages
     {
-        return Some(format!("error_docs: '{:?}' != '{:?}'", a.error_docs, b.error_docs));
+        return Some(format!(
+            "error_docs: '{:?}' != '{:?}'",
+            a.error_docs, b.error_docs
+        ));
     }
     if a.tls.http2 != b.tls.http2
         || a.tls.strict_sni != b.tls.strict_sni
@@ -702,7 +865,16 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
         || a.static_files.autoindex != b.static_files.autoindex
         || a.static_files.sendfile != b.static_files.sendfile
     {
-        return Some(format!("static_files: '{:?}' != '{:?}'", a.static_files, b.static_files));
+        return Some(format!(
+            "static_files: '{:?}' != '{:?}'",
+            a.static_files, b.static_files
+        ));
+    }
+    if a.hotlink != b.hotlink {
+        return Some(format!("hotlink: '{:?}' != '{:?}'", a.hotlink, b.hotlink));
+    }
+    if a.acl != b.acl {
+        return Some(format!("acl: '{:?}' != '{:?}'", a.acl, b.acl));
     }
     None
 }
@@ -769,7 +941,10 @@ mod tests {
         assert_eq!(entry.security.deny_ips, vec!["198.51.100.5"]);
         assert_eq!(entry.security.waf_enabled, Some(true));
         assert!(!entry.security.wp_brute_force);
-        assert_eq!(entry.security.waf_exclude_paths, vec!["/api/webhook", "/health"]);
+        assert_eq!(
+            entry.security.waf_exclude_paths,
+            vec!["/api/webhook", "/health"]
+        );
         assert!(entry.headers.security_headers);
         assert!(entry.headers.hsts);
         assert!(entry.logging.enabled);
@@ -780,9 +955,18 @@ mod tests {
         assert!(!entry.logging.also_write_global);
         assert!(entry.error_docs.enabled);
         assert_eq!(entry.error_docs.dir, "errors/custom");
-        assert_eq!(entry.error_docs.pages.get(&404).map(String::as_str), Some("404.html"));
-        assert_eq!(entry.error_docs.pages.get(&403).map(String::as_str), Some("forbidden.html"));
-        assert_eq!(entry.error_docs.pages.get(&500).map(String::as_str), Some("500.html"));
+        assert_eq!(
+            entry.error_docs.pages.get(&404).map(String::as_str),
+            Some("404.html")
+        );
+        assert_eq!(
+            entry.error_docs.pages.get(&403).map(String::as_str),
+            Some("forbidden.html")
+        );
+        assert_eq!(
+            entry.error_docs.pages.get(&500).map(String::as_str),
+            Some("500.html")
+        );
         assert!(entry.rewrite.enabled);
         assert!(entry.rewrite.try_files);
         assert!(!entry.rewrite.htaccess);
@@ -850,7 +1034,10 @@ mod tests {
         assert!(!entry.headers.hsts);
         assert!(entry.logging.enabled);
         assert_eq!(entry.logging.access_log, "logs/ozel.log");
-        assert_eq!(entry.error_docs.pages.get(&404).map(String::as_str), Some("bulunamadi.html"));
+        assert_eq!(
+            entry.error_docs.pages.get(&404).map(String::as_str),
+            Some("bulunamadi.html")
+        );
         assert_eq!(entry.rewrite.rules.len(), 1);
     }
 
@@ -900,5 +1087,241 @@ mod tests {
         let payload = r#"{"tls_min_version": "1.0"}"#;
         let err = merge_vhost_json_patch(&base, "test.local", payload.as_bytes()).unwrap_err();
         assert!(err.contains("tls.min_version") || err.contains("min_version"));
+    }
+
+    #[test]
+    fn test_kart3b_hotlink_and_acl_nested_json_roundtrip_equality() {
+        let base = VHostEntry::default();
+        let payload = r#"{
+            "domain": "kart3b.test",
+            "document_root": "www/kart3b",
+            "hotlink": {
+                "enabled": true,
+                "allowed_referers": ["kart3b.test", "*.cdn.kart3b.test"],
+                "extensions": ["jpg", "png", "webp"]
+            },
+            "acl": {
+                "allow_ips": ["10.0.0.0/8", "127.0.0.1", "2001:db8::/32"],
+                "deny_ips": ["192.168.100.5", "172.16.0.0/12"]
+            }
+        }"#;
+
+        let entry = merge_vhost_json_patch(&base, "kart3b.test", payload.as_bytes())
+            .expect("Kart 3b hotlink + acl birleştirmesi başarılı olmalıdır");
+
+        assert!(entry.hotlink.enabled);
+        assert_eq!(
+            entry.hotlink.allowed_referers,
+            vec!["kart3b.test", "*.cdn.kart3b.test"]
+        );
+        assert_eq!(entry.hotlink.extensions, vec!["jpg", "png", "webp"]);
+        assert_eq!(
+            entry.acl.allow_ips,
+            vec!["10.0.0.0/8", "127.0.0.1", "2001:db8::/32"]
+        );
+        assert_eq!(entry.acl.deny_ips, vec!["192.168.100.5", "172.16.0.0/12"]);
+        // Eski security alanları istenmeden değişmemeli
+        assert!(!entry.security.hotlink_protection);
+        assert!(entry.security.allow_ips.is_empty());
+        assert!(entry.security.deny_ips.is_empty());
+
+        // TOML yaz -> oku -> tam tur eşitliği
+        let toml_str = serialize_vhost_toml(&entry).expect("TOML serileştirme başarılı olmalıdır");
+        let reloaded_doc: crate::VHostFileDocument =
+            toml::from_str(&toml_str).expect("TOML ayrıştırma başarılı olmalıdır");
+        let reloaded = reloaded_doc.vhost;
+
+        if let Some(diff) = vhost_entry_diff(&entry, &reloaded) {
+            panic!("Kart 3b TOML round-trip sonrasında fark bulundu: {}", diff);
+        }
+        assert!(vhost_entry_eq(&entry, &reloaded));
+
+        // JSON GET çıktısında hem nested hem flat alanların tam eşitliği
+        let json_val =
+            format_vhost_entry_json(&reloaded, "kart3b.test.toml", Path::new("www/kart3b"));
+        assert_eq!(json_val["hotlink"]["enabled"], serde_json::json!(true));
+        assert_eq!(
+            json_val["hotlink"]["allowed_referers"],
+            serde_json::json!(["kart3b.test", "*.cdn.kart3b.test"])
+        );
+        assert_eq!(
+            json_val["hotlink"]["extensions"],
+            serde_json::json!(["jpg", "png", "webp"])
+        );
+        assert_eq!(
+            json_val["acl"]["allow_ips"],
+            serde_json::json!(["10.0.0.0/8", "127.0.0.1", "2001:db8::/32"])
+        );
+        assert_eq!(
+            json_val["acl"]["deny_ips"],
+            serde_json::json!(["192.168.100.5", "172.16.0.0/12"])
+        );
+
+        assert_eq!(json_val["hotlink_enabled"], serde_json::json!(true));
+        assert_eq!(
+            json_val["hotlink_allowed_referers"],
+            serde_json::json!(["kart3b.test", "*.cdn.kart3b.test"])
+        );
+        assert_eq!(
+            json_val["allowed_referers"],
+            serde_json::json!(["kart3b.test", "*.cdn.kart3b.test"])
+        );
+        assert_eq!(
+            json_val["hotlink_extensions"],
+            serde_json::json!(["jpg", "png", "webp"])
+        );
+        assert_eq!(
+            json_val["extensions"],
+            serde_json::json!(["jpg", "png", "webp"])
+        );
+        assert_eq!(
+            json_val["acl_allow_ips"],
+            serde_json::json!(["10.0.0.0/8", "127.0.0.1", "2001:db8::/32"])
+        );
+        assert_eq!(
+            json_val["acl_deny_ips"],
+            serde_json::json!(["192.168.100.5", "172.16.0.0/12"])
+        );
+    }
+
+    #[test]
+    fn test_kart3b_flat_aliases_partial_patch_empty_extensions_and_diff() {
+        // 1. Flat kısayollar ile oluşturma + boş extensions dizisi TOML turu
+        let base = VHostEntry::default();
+        let flat_payload = r#"{
+            "document_root": "www/duz",
+            "hotlink_enabled": true,
+            "hotlink_allowed_referers": ["duz.test", "media.duz.test"],
+            "hotlink_extensions": [],
+            "acl_allow_ips": ["192.168.10.0/24"],
+            "acl_deny_ips": ["192.168.10.99"]
+        }"#;
+        let entry1 = merge_vhost_json_patch(&base, "duz.test", flat_payload.as_bytes())
+            .expect("Flat hotlink/acl alanları ayrıştırılmalıdır");
+        assert!(entry1.hotlink.enabled);
+        assert_eq!(
+            entry1.hotlink.allowed_referers,
+            vec!["duz.test", "media.duz.test"]
+        );
+        assert!(entry1.hotlink.extensions.is_empty());
+        assert_eq!(entry1.acl.allow_ips, vec!["192.168.10.0/24"]);
+        assert_eq!(entry1.acl.deny_ips, vec!["192.168.10.99"]);
+
+        // Boş extensions dizisinin TOML round-trip sonrasında varsayılana dönmediğini doğrula
+        let toml_str = serialize_vhost_toml(&entry1).expect("TOML serileştirme başarılı olmalıdır");
+        let reloaded_doc: crate::VHostFileDocument =
+            toml::from_str(&toml_str).expect("TOML ayrıştırma başarılı olmalıdır");
+        assert!(vhost_entry_eq(&entry1, &reloaded_doc.vhost));
+        assert!(reloaded_doc.vhost.hotlink.extensions.is_empty());
+
+        // 2. Kısmi güncelleme: yalnızca hotlink.enabled ve acl.deny_ips güncellenir, diğerleri korunur
+        let partial_payload = r#"{
+            "hotlink": { "enabled": false },
+            "acl": { "deny_ips": ["203.0.113.0/24"] }
+        }"#;
+        let entry2 = merge_vhost_json_patch(&entry1, "duz.test", partial_payload.as_bytes())
+            .expect("Kısmi hotlink/acl güncellemesi başarılı olmalıdır");
+        assert!(!entry2.hotlink.enabled);
+        assert_eq!(
+            entry2.hotlink.allowed_referers,
+            vec!["duz.test", "media.duz.test"]
+        );
+        assert!(entry2.hotlink.extensions.is_empty());
+        assert_eq!(entry2.acl.allow_ips, vec!["192.168.10.0/24"]);
+        assert_eq!(entry2.acl.deny_ips, vec!["203.0.113.0/24"]);
+
+        // 3. vhost_entry_diff hem hotlink hem acl farklarını ayrı ayrı raporlamalı
+        let mut diff_hl = entry1.clone();
+        diff_hl.hotlink.extensions = vec!["png".to_string()];
+        let d_hl = vhost_entry_diff(&entry1, &diff_hl).expect("hotlink farkı yakalanmalı");
+        assert!(d_hl.starts_with("hotlink:"));
+
+        let mut diff_acl = entry1.clone();
+        diff_acl.acl.allow_ips.push("10.0.0.1".to_string());
+        let d_acl = vhost_entry_diff(&entry1, &diff_acl).expect("acl farkı yakalanmalı");
+        assert!(d_acl.starts_with("acl:"));
+
+        // 4. Alternatif flat alias'lar: allowed_referers + extensions + Kart 3 allow_ips ayrı kalmalı
+        let alias_payload = r#"{
+            "allowed_referers": ["alias.test"],
+            "extensions": ["svg", "avif"],
+            "allow_ips": ["10.20.30.40"]
+        }"#;
+        let entry3 = merge_vhost_json_patch(&base, "alias.test", alias_payload.as_bytes())
+            .expect("Kısa alias'lar başarılı olmalıdır");
+        assert_eq!(entry3.hotlink.allowed_referers, vec!["alias.test"]);
+        assert_eq!(entry3.hotlink.extensions, vec!["svg", "avif"]);
+        assert_eq!(entry3.security.allow_ips, vec!["10.20.30.40"]);
+        assert!(entry3.acl.allow_ips.is_empty());
+    }
+
+    #[test]
+    fn test_kart3b_hotlink_and_acl_invalid_inputs_rejected() {
+        let base = VHostEntry::default();
+
+        // Geçersiz IPv4 CIDR (/33)
+        let err = merge_vhost_json_patch(
+            &base,
+            "bad.test",
+            br#"{"acl":{"allow_ips":["10.0.0.1/33"]}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("allow_ips") || err.contains("CIDR") || err.contains("Maske"));
+
+        // Geçersiz IPv6 CIDR (/129)
+        let err = merge_vhost_json_patch(
+            &base,
+            "bad.test",
+            br#"{"acl":{"deny_ips":["2001:db8::/129"]}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("deny_ips") || err.contains("CIDR") || err.contains("Maske"));
+
+        // Geçersiz flat acl_allow_ips & acl_deny_ips
+        assert!(
+            merge_vhost_json_patch(&base, "bad.test", br#"{"acl_allow_ips":["not-a-cidr"]}"#,)
+                .is_err()
+        );
+        assert!(merge_vhost_json_patch(
+            &base,
+            "bad.test",
+            br#"{"acl_deny_ips":["999.999.999.999"]}"#,
+        )
+        .is_err());
+        assert!(
+            merge_vhost_json_patch(&base, "bad.test", br#"{"acl":{"allow_ips":[""]}}"#,).is_err()
+        );
+
+        // Geçersiz hotlink referer (boş ve >253 karakter)
+        assert!(merge_vhost_json_patch(
+            &base,
+            "bad.test",
+            br#"{"hotlink":{"allowed_referers":["   "]}}"#,
+        )
+        .is_err());
+        let long_ref_json = format!(r#"{{"hotlink_allowed_referers":["{}"]}}"#, "a".repeat(254));
+        assert!(merge_vhost_json_patch(&base, "bad.test", long_ref_json.as_bytes()).is_err());
+
+        // Geçersiz hotlink uzantısı
+        assert!(merge_vhost_json_patch(
+            &base,
+            "bad.test",
+            br#"{"hotlink":{"extensions":["bad/ext"]}}"#,
+        )
+        .is_err());
+        assert!(
+            merge_vhost_json_patch(&base, "bad.test", br#"{"hotlink_extensions":["."]}"#,).is_err()
+        );
+
+        // Yanlış JSON tipleri (nesne yerine string/dizi, dizi yerine string)
+        assert!(merge_vhost_json_patch(&base, "bad.test", br#"{"hotlink":"enabled"}"#).is_err());
+        assert!(merge_vhost_json_patch(&base, "bad.test", br#"{"acl":["1.2.3.4"]}"#).is_err());
+        assert!(
+            merge_vhost_json_patch(&base, "bad.test", br#"{"acl":{"allow_ips":"1.2.3.4"}}"#)
+                .is_err()
+        );
+        assert!(
+            merge_vhost_json_patch(&base, "bad.test", br#"{"hotlink_extensions":"jpg"}"#).is_err()
+        );
     }
 }
