@@ -71,6 +71,7 @@ pub struct ServerState {
     pub admin_tls: Arc<zmax_tls::SniResolver>,
     pub api_tls: Arc<zmax_tls::SniResolver>,
     pub log_manager: Arc<crate::logger::AsyncLogManager>,
+    pub waf_events: Arc<zmax_security::waf_events::WafEventStore>,
     pub htaccess_resolver: Arc<zmax_rewrite::HtAccessResolver>,
     pub shutdown: Arc<zmax_runtime::ShutdownCoordinator>,
     pub access_logs: Mutex<VecDeque<AccessLogRecord>>,
@@ -848,6 +849,8 @@ where
         let hits = state.stats.cache_hits.load(Ordering::Relaxed);
         let misses = state.stats.cache_misses.load(Ordering::Relaxed);
         let banned_count = state.ban_manager.list_banned().len();
+        let waf_total = state.waf_events.total_count();
+        let waf_24h = state.waf_events.last_24h_count();
         let (vhosts_len, mods_len) = {
             let rt = state.runtime.read().await;
             (rt.vhosts.len(), rt.modules.len())
@@ -873,8 +876,14 @@ where
              zmax_modules_loaded {}\n\
              # HELP zmax_banned_ips Aktif yasakli IP sayisi.\n\
              # TYPE zmax_banned_ips gauge\n\
-             zmax_banned_ips {}\n",
-            uptime_secs, total, hits, misses, vhosts_len, mods_len, banned_count
+             zmax_banned_ips {}\n\
+             # HELP zmax_waf_events_total Toplam engellenen WAF olay sayisi.\n\
+             # TYPE zmax_waf_events_total counter\n\
+             zmax_waf_events_total {}\n\
+             # HELP zmax_waf_blocked_24h Son 24 saatte engellenen WAF olay sayisi.\n\
+             # TYPE zmax_waf_blocked_24h gauge\n\
+             zmax_waf_blocked_24h {}\n",
+            uptime_secs, total, hits, misses, vhosts_len, mods_len, banned_count, waf_total, waf_24h
         );
         send_response_with_content_type(
             socket,
@@ -895,6 +904,9 @@ where
         let hits = state.stats.cache_hits.load(Ordering::Relaxed);
         let misses = state.stats.cache_misses.load(Ordering::Relaxed);
         let banned_count = state.ban_manager.list_banned().len();
+        let waf_total = state.waf_events.total_count();
+        let waf_24h = state.waf_events.last_24h_count();
+        let waf_recent = state.waf_events.recent_count();
 
         let rt = state.runtime.read().await;
         let workers = if rt.config.server.workers == 0 {
@@ -904,7 +916,7 @@ where
         };
         let cfg = &rt.config;
         let json = format!(
-            r#"{{"ok":true,"running":true,"engine":"zmax","version":"1.0.01","pid":{},"uptime_seconds":{},"total_requests":{},"cache_hits":{},"cache_misses":{},"workers":{},"ram_mb":12,"vhosts_loaded":{},"active_sites":{},"modules_loaded":{},"banned_count":{},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"cache":{{"enabled":{},"memory_cache_mb":{},"default_ttl_seconds":{},"disk_enabled":{}}},"security":{{"rate_limit_enabled":{},"rate_limit_per_minute":{},"keep_alive_timeout_sec":{},"slowloris_header_timeout_sec":{},"max_body_size_mb":{}}},"vhosts_dir":"{}","config_path":"{}"}}"#,
+            r#"{{"ok":true,"running":true,"engine":"zmax","version":"1.0.01","pid":{},"uptime_seconds":{},"total_requests":{},"cache_hits":{},"cache_misses":{},"workers":{},"ram_mb":12,"vhosts_loaded":{},"active_sites":{},"modules_loaded":{},"banned_count":{},"waf_events_total":{},"waf_blocked_24h":{},"waf":{{"events_total":{},"blocked_24h":{},"recent_count":{}}},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"cache":{{"enabled":{},"memory_cache_mb":{},"default_ttl_seconds":{},"disk_enabled":{}}},"security":{{"rate_limit_enabled":{},"rate_limit_per_minute":{},"keep_alive_timeout_sec":{},"slowloris_header_timeout_sec":{},"max_body_size_mb":{},"waf_events_total":{},"waf_blocked_24h":{}}},"vhosts_dir":"{}","config_path":"{}"}}"#,
             std::process::id(),
             uptime_secs,
             total,
@@ -915,6 +927,11 @@ where
             rt.vhosts.len(),
             rt.modules.len(),
             banned_count,
+            waf_total,
+            waf_24h,
+            waf_total,
+            waf_24h,
+            waf_recent,
             cfg.listeners.http.port,
             cfg.listeners.https.port,
             cfg.listeners.admin.port,
@@ -936,6 +953,8 @@ where
             cfg.security.keep_alive_timeout_sec,
             cfg.security.slowloris_header_timeout_sec,
             cfg.security.max_body_size_mb,
+            waf_total,
+            waf_24h,
             json_escape(&rt.vhosts_dir.to_string_lossy()),
             json_escape(&rt.conf_path.to_string_lossy()),
         );
@@ -1898,6 +1917,7 @@ token = "api-secret-token"
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::new()),
             stats: ServerStats {
                 start_time: Instant::now(),
@@ -2001,6 +2021,55 @@ token = "api-secret-token"
             resp_metrics.contains("zmax_banned_ips 1\n"),
             "{resp_metrics}"
         );
+        assert!(
+            resp_metrics.contains("zmax_waf_events_total 0\n"),
+            "{resp_metrics}"
+        );
+        assert!(
+            resp_metrics.contains("zmax_waf_blocked_24h 0\n"),
+            "{resp_metrics}"
+        );
+
+        // WAF olayı kaydedildiğinde /metrics ve /api/v1/status sayaçları yansımalı
+        state.waf_events.record_violation(
+            &zmax_security::WafViolation::SqlInjection("union select".to_string()),
+            "site.test",
+            "127.0.0.1",
+            "GET",
+            "/arama?password=Secret&id=1",
+        );
+        let (handled_waf_metrics, resp_waf_metrics) = call_route(
+            &state,
+            true,
+            "GET",
+            "/v1/zmax/api/metrics",
+            api_auth.clone(),
+        )
+        .await;
+        assert!(handled_waf_metrics);
+        assert!(
+            resp_waf_metrics.contains("zmax_waf_events_total 1\n"),
+            "{resp_waf_metrics}"
+        );
+        assert!(
+            resp_waf_metrics.contains("zmax_waf_blocked_24h 1\n"),
+            "{resp_waf_metrics}"
+        );
+
+        let (handled_waf_status, resp_waf_status) = call_route(
+            &state,
+            true,
+            "GET",
+            "/v1/zmax/api/api/v1/status",
+            api_auth.clone(),
+        )
+        .await;
+        assert!(handled_waf_status);
+        assert!(
+            resp_waf_status.contains(r#""waf_events_total":1,"waf_blocked_24h":1"#),
+            "{resp_waf_status}"
+        );
+        assert!(!resp_waf_status.contains("Secret"), "{resp_waf_status}");
 
         // Panel taraması için /api/v1/metrics (Admin dinleyici + ön ek soyma)
         let adm_auth = vec![("X-ZMax-Token".to_string(), "adm-secret-token".to_string())];
@@ -2133,6 +2202,7 @@ path = "conf/vhosts"
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::new()),
             stats: ServerStats {
                 start_time: Instant::now(),

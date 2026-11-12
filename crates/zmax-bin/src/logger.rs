@@ -15,6 +15,7 @@ const LOG_CHANNEL_CAPACITY: usize = 16_384;
 const MIN_FLUSH_MS: u64 = 50;
 const TAIL_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_TAIL_SCAN_BYTES: u64 = 32 * 1024 * 1024;
+pub const DEFAULT_WAF_EVENTS_LOG: &str = "logs/waf_events.log";
 
 /// Tek bir HTTP/HTTPS isteği için erişim günlüğü kaydı.
 #[derive(Debug, Clone)]
@@ -68,6 +69,12 @@ enum LogCommand {
         max_size_bytes: u64,
         also_global: bool,
     },
+    Waf {
+        path_override: Option<PathBuf>,
+        record: zmax_security::waf_events::WafEventRecord,
+        max_size_bytes: u64,
+        also_global: bool,
+    },
     Flush(oneshot::Sender<()>),
     ReopenAll(oneshot::Sender<()>),
     UpdateGlobalPaths {
@@ -87,6 +94,7 @@ struct LogWorkerState {
     base_dir: PathBuf,
     global_access_log: PathBuf,
     global_error_log: PathBuf,
+    global_waf_log: PathBuf,
     writers: HashMap<PathBuf, OpenLogFile>,
     total_pending_bytes: usize,
     batch_threshold_bytes: usize,
@@ -106,6 +114,17 @@ impl LogWorkerState {
             }
         }
         self.total_pending_bytes = 0;
+    }
+
+    async fn flush_path(&mut self, path: &Path) {
+        if let Some(open) = self.writers.get_mut(path) {
+            if open.pending_bytes > 0 {
+                self.total_pending_bytes =
+                    self.total_pending_bytes.saturating_sub(open.pending_bytes);
+                let _ = open.writer.flush().await;
+                open.pending_bytes = 0;
+            }
+        }
     }
 
     async fn close_all(&mut self) {
@@ -262,6 +281,38 @@ impl LogWorkerState {
                     }
                 }
             }
+            LogCommand::Waf {
+                path_override,
+                record,
+                max_size_bytes,
+                also_global,
+            } => {
+                let line = record.to_json_line();
+                let custom = path_override
+                    .as_deref()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| self.resolve(p));
+
+                match custom {
+                    Some(target) => {
+                        self.ensure_ready_and_write(&target, &line, max_size_bytes)
+                            .await;
+                        self.flush_path(&target).await;
+                        if also_global && target != self.global_waf_log {
+                            let global = self.global_waf_log.clone();
+                            self.ensure_ready_and_write(&global, &line, max_size_bytes)
+                                .await;
+                            self.flush_path(&global).await;
+                        }
+                    }
+                    None => {
+                        let global = self.global_waf_log.clone();
+                        self.ensure_ready_and_write(&global, &line, max_size_bytes)
+                            .await;
+                        self.flush_path(&global).await;
+                    }
+                }
+            }
             LogCommand::Flush(ack) => {
                 self.flush_all().await;
                 let _ = ack.send(());
@@ -299,6 +350,7 @@ pub struct AsyncLogManager {
     base_dir: PathBuf,
     tx: mpsc::Sender<LogCommand>,
     dropped: Arc<AtomicU64>,
+    dropped_events: Arc<AtomicU64>,
 }
 
 impl AsyncLogManager {
@@ -312,9 +364,11 @@ impl AsyncLogManager {
     ) -> Self {
         let (tx, rx) = mpsc::channel(LOG_CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
+        let dropped_events = Arc::new(AtomicU64::new(0));
 
         let resolved_access = resolve_log_path(&base_dir, &global_access_log);
         let resolved_error = resolve_log_path(&base_dir, &global_error_log);
+        let resolved_waf = resolve_log_path(&base_dir, Path::new(DEFAULT_WAF_EVENTS_LOG));
         let batch_threshold_bytes = batch_buffer_kb.saturating_mul(1024);
         let writer_capacity = batch_threshold_bytes.clamp(8 * 1024, 256 * 1024);
 
@@ -322,6 +376,7 @@ impl AsyncLogManager {
             base_dir: base_dir.clone(),
             global_access_log: resolved_access,
             global_error_log: resolved_error,
+            global_waf_log: resolved_waf,
             writers: HashMap::new(),
             total_pending_bytes: 0,
             batch_threshold_bytes,
@@ -348,6 +403,7 @@ impl AsyncLogManager {
             base_dir,
             tx,
             dropped,
+            dropped_events,
         }
     }
 
@@ -377,6 +433,42 @@ impl AsyncLogManager {
             .is_err()
         {
             self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Kuyruk taşması nedeniyle düşürülen WAF olay sayısını döndürür.
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events.load(Ordering::Relaxed)
+    }
+
+    /// WAF olay kaydını beklemesiz (`try_send`) olarak olay günlüğüne (`logs/waf_events.log`) kuyruklar.
+    pub fn log_waf_event(
+        &self,
+        record: zmax_security::waf_events::WafEventRecord,
+        path_override: Option<PathBuf>,
+        max_size_bytes: u64,
+        also_global: bool,
+    ) -> bool {
+        if self
+            .tx
+            .try_send(LogCommand::Waf {
+                path_override,
+                record,
+                max_size_bytes,
+                also_global,
+            })
+            .is_err()
+        {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.dropped_events.fetch_add(1, Ordering::Relaxed);
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!("WAF olay gunlugu kuyrugu dolu, olaylar dusuruluyor (dropped_events)");
+            }
+            false
+        } else {
+            true
         }
     }
 
@@ -1086,6 +1178,45 @@ mod tests {
             tokio::fs::read_to_string(&err_abs).await.unwrap(),
             "ikinci-hata\n"
         );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn log_waf_event_writes_sanitized_json_lines_and_keeps_access_error_intact() {
+        let dir = make_temp_dir("waf_events");
+        let access = dir.join("logs").join("access.log");
+        let error = dir.join("logs").join("error.log");
+        let waf_log = dir.join(DEFAULT_WAF_EVENTS_LOG);
+        let mgr = AsyncLogManager::new(dir.clone(), access.clone(), error.clone(), 50, 64);
+
+        let rec = zmax_security::waf_events::WafEventRecord::from_violation(
+            &zmax_security::WafViolation::SqlInjection("union select".to_string()),
+            "waf-test.local",
+            "198.51.100.42",
+            "GET",
+            "/login?password=GizliSifre99&cookie=OturumCerez99&q=union+select",
+            1_794_430_800,
+        );
+        mgr.log_waf_event(rec, None, 1024 * 1024, true);
+        mgr.log_error(None, "normal-error-line".to_string(), 1024 * 1024, true);
+        mgr.flush().await;
+
+        let waf_content = tokio::fs::read_to_string(&waf_log).await.unwrap();
+        assert_eq!(waf_content.lines().count(), 1);
+        let parsed: serde_json::Value =
+            serde_json::from_str(waf_content.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed["ts"], "2026-11-11T21:00:00Z");
+        assert_eq!(parsed["vhost"], "waf-test.local");
+        assert_eq!(parsed["ip"], "198.51.100.42");
+        assert_eq!(parsed["rule_id"], "942100");
+        assert_eq!(parsed["path"], "/login?password=&cookie=&q=");
+        assert!(!waf_content.contains("GizliSifre99"), "{waf_content}");
+        assert!(!waf_content.contains("OturumCerez99"), "{waf_content}");
+        assert_eq!(mgr.dropped_events(), 0);
+
+        let err_content = tokio::fs::read_to_string(&error).await.unwrap();
+        assert_eq!(err_content, "normal-error-line\n");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

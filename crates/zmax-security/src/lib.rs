@@ -9,9 +9,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod acl;
 pub mod hotlink;
+pub mod waf_events;
 
 pub use acl::*;
 pub use hotlink::*;
+pub use waf_events::*;
 
 const DEFAULT_PURGE_THRESHOLD: usize = 4096;
 const RATE_WINDOW_SECS: u64 = 60;
