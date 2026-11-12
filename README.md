@@ -39,6 +39,12 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | OpenLiteSpeed ile yan yana denklik testleri | Sırada |
 | Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Sırada |
 
+## Yönetim paneli
+
+ZMax, yerel (loopback) bir web yönetim arayüzüyle gelir. Aşağıda sanal konak (alan adı) listesi görülüyor.
+
+![ZMax WebAdmin: alan adları](screenshots/zmax-webadmin-alan-adlari.png)
+
 ## Mimari
 
 Cargo çalışma alanı, tek sorumluluklu küçük paketlerden oluşur:
