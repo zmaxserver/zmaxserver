@@ -13,8 +13,8 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 İlk sürüm kapsamı 13 iş kaleminden oluşuyor. Her kalem kodlandıktan sonra bağımsız denetimden ve testlerden geçiyor.
 
 ```
-Tamamlandı ve test edildi   ██████████░░░░░░░░░░  %54
-İnceleme aşamasında         ██████░░░░░░░░░░░░░░  %31
+Tamamlandı ve test edildi   ███████████░░░░░░░░░  %62
+İnceleme aşamasında         ████░░░░░░░░░░░░░░░░  %23
 Sırada                      ███░░░░░░░░░░░░░░░░░  %15
 ```
 
@@ -26,7 +26,8 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 - Önbellek temizleme (purge) alan adı, URI ve etiket bazında çalışıyor; yetkilendirme (IP/anahtar) ve vhost izolasyonu korunuyor.
 - ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
 - HTTP/1.1 ve HTTP/2 aynı güvenlik denetim hattından geçiyor (`[vhost.acl]` dahil).
-- Ters vekil, Basic Auth, WAF olay günlüğü ve ayrıcalık düşürme güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
+- Ters vekil güvenlik incelemesinden geçti: HTTP istek kaçırma (smuggling) kapatıldı, HTTP/2 yanıtları akıtılıyor, bağlantı ve WebSocket zaman aşımları çalışıyor.
+- Basic Auth ve ayrıcalık düşürme güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
 
 ### Bileşen durumu
 
@@ -42,7 +43,8 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | Erişim günlüğü (NCSA, gerçek bayt sayısı) | Tamamlandı |
 | Bellek ve disk önbelleği (L1/L2), alan adı/URI bazlı temizleme | Tamamlandı |
 | FastCGI / PHP (temel) | Tamamlandı |
-| Basic Auth, ters vekil (reverse proxy), WAF olay günlüğü | İncelemede |
+| Ters vekil (reverse proxy): HTTP/1.1 ve HTTP/2, WebSocket, SSE | Tamamlandı |
+| Basic Auth, WAF olay günlüğü | İncelemede |
 | FastCGI havuzu, `sendfile`, ayrıcalık düşürme | İncelemede |
 | OpenLiteSpeed ile yan yana denklik testleri | Sırada |
 | Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Sırada |
