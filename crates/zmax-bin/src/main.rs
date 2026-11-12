@@ -3608,7 +3608,6 @@ mod tests {
             ssl: zmax_config::VHostSslSection {
                 certificate: "certs/a.pem".into(),
                 key: "certs/a.key".into(),
-                ..Default::default()
             },
             ..Default::default()
         };
