@@ -8,7 +8,7 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 
 ## İlerleme
 
-**Son güncelleme: 2026-11-12**
+**Son güncelleme: 2026-11-13**
 
 İlk sürüm kapsamı 13 iş kaleminden oluşuyor. Her kalem kodlandıktan sonra bağımsız denetimden ve testlerden geçiyor.
 
@@ -19,6 +19,13 @@ Sırada                      ███░░░░░░░░░░░░░░
 ```
 
 Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulanan kısım: **yaklaşık %30**; sunucu testleri tüm kalemler bittikten sonra toplu yapılacak. Geliştirme devam ediyor.
+
+### Son gelişmeler
+
+- Sanal konak REST API'si hotlink ve IP erişim listesi alanlarını destekliyor.
+- ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
+- HTTP/1.1 ve HTTP/2 aynı güvenlik denetim hattından geçiyor (`[vhost.acl]` dahil).
+- Ters vekil, Basic Auth, WAF olay günlüğü ve ayrıcalık düşürme güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
 
 ### Bileşen durumu
 
