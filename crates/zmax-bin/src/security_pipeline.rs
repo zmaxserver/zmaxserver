@@ -226,6 +226,75 @@ pub fn build_unauthorized_response(
     (headers, body)
 }
 
+/// Kimlik doğrulama reddinin HTTP karşılığı (HTTP/1.1 ve HTTP/2 ortak).
+pub struct AuthDenial {
+    pub status: u16,
+    pub reason: &'static str,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// `AuthDecision` -> yanıt: 401 (+WWW-Authenticate), 403 (ban), 429 / 503 (+Retry-After).
+/// `Allowed` için `None` döner.
+pub fn build_auth_denial(
+    vhost_ctx: &ResolvedVHostContext,
+    decision: &zmax_security::AuthDecision,
+    req_id: Option<&str>,
+) -> Option<AuthDenial> {
+    use zmax_security::AuthDecision;
+    let simple = |status: u16, reason: &'static str, body: &str, retry: Option<u64>| {
+        let mut headers = vec![
+            ("Cache-Control".to_string(), "no-store".to_string()),
+            (
+                "Content-Type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
+        ];
+        if let Some(secs) = retry {
+            headers.push(("Retry-After".to_string(), secs.to_string()));
+        }
+        if let Some(id) = req_id.filter(|id| !id.is_empty()) {
+            headers.push(("x-request-id".to_string(), id.to_string()));
+        }
+        AuthDenial {
+            status,
+            reason,
+            headers,
+            body: body.as_bytes().to_vec(),
+        }
+    };
+    match decision {
+        AuthDecision::Allowed => None,
+        AuthDecision::Unauthorized { realm } => {
+            let (headers, body) = build_unauthorized_response(vhost_ctx, realm, req_id);
+            Some(AuthDenial {
+                status: 401,
+                reason: "Unauthorized",
+                headers,
+                body,
+            })
+        }
+        AuthDecision::Banned => Some(simple(
+            403,
+            "Forbidden",
+            "403 Forbidden - Brute Force Protection\n",
+            None,
+        )),
+        AuthDecision::TooManyRequests { retry_after_secs } => Some(simple(
+            429,
+            "Too Many Requests",
+            "429 Too Many Requests - Too many concurrent authentication attempts\n",
+            Some(*retry_after_secs),
+        )),
+        AuthDecision::Unavailable { retry_after_secs } => Some(simple(
+            503,
+            "Service Unavailable",
+            "503 Service Unavailable - Authentication queue is busy\n",
+            Some(*retry_after_secs),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_merged_vhost_acl;

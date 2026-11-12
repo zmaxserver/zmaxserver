@@ -325,7 +325,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limiter: RwLock::new(zmax_security::RateLimiter::new(rate_max)),
         ban_manager: Arc::new(zmax_security::IpBanManager::new()),
         wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
-        basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
+        basic_auth: Arc::new(zmax_security::BasicAuthManager::with_max_concurrent_hashes(
+            config.security.auth_max_concurrent_hashes,
+        )),
         buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
         upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::new(fastcgi_pool_size)),
         runtime: RwLock::new(RuntimeState {

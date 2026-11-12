@@ -5,13 +5,14 @@
 //! Sabit zamanlı karşılaştırma (constant-time) uygulanır; parolalar ve kimlik
 //! başlıkları asla günlük veya hata çıktılarına yazılmaz.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
-use dashmap::DashMap;
+use std::time::{Duration, Instant, SystemTime};
 use zmax_config::VHostAuthSection;
 
 // ============================================================================
@@ -977,7 +978,11 @@ pub fn verify_password(stored_hash: &str, candidate_password: &str) -> bool {
 // 5. SHA-1 ve Katı Base64 Yardımcıları ({SHA} Apache Formatı)
 // ============================================================================
 
-#[allow(clippy::manual_is_multiple_of, clippy::chunks_exact_to_as_chunks, clippy::needless_range_loop)]
+#[allow(
+    clippy::manual_is_multiple_of,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::needless_range_loop
+)]
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
     let mut h = [
         0x67452301u32,
@@ -1256,10 +1261,17 @@ fn percent_decode_for_auth(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Yol karşılaştırması için büyük/küçük harfi tek tipe indirger (büyük/küçük harf duyarsız dosya
+/// sistemlerinde `/GIZLI/` ile `/gizli/` aynı korumaya girer). Türkçe `ı`/`İ` de `i`ye katlanır:
+/// bu yalnız eşleştirme içindir ve korumayı genişletir (fail-closed), sunulan yolu değiştirmez.
+fn fold_case_for_auth(s: &str) -> String {
+    s.to_lowercase().replace('ı', "i").replace('\u{307}', "")
+}
+
 /// Percent-encoding, ters bölü, `.` / `..` ve çift eğik çizgi atlatma girişimlerini tek tip yola indirger.
 pub fn normalize_auth_path(raw_path: &str) -> String {
     let path_only = raw_path.split(['?', '#']).next().unwrap_or("/");
-    let decoded = percent_decode_for_auth(path_only).replace('\\', "/");
+    let decoded = fold_case_for_auth(&percent_decode_for_auth(path_only).replace('\\', "/"));
     let mut segments: Vec<&str> = Vec::new();
     for seg in decoded.split('/') {
         match seg {
@@ -1294,72 +1306,187 @@ pub enum AuthDecision {
     Allowed,
     /// 401 Unauthorized dönülmeli ve `WWW-Authenticate: Basic realm="..."` verilmeli
     Unauthorized { realm: String },
+    /// Başarısız deneme eşiği aşıldı; IP banlandı (403, Argon2 hesaplanmadı)
+    Banned,
+    /// IP başına eşzamanlı doğrulama sınırı aşıldı (429 + Retry-After)
+    TooManyRequests { retry_after_secs: u64 },
+    /// Doğrulama kuyruğu zaman aşımı (503 + Retry-After)
+    Unavailable { retry_after_secs: u64 },
 }
 
 // ============================================================================
 // 6.5. Basic Auth Brute-Force Kalkanı ve Sahte Özet (Zamanlama Saldırısı Koruması)
 // ============================================================================
 
-/// Bilinmeyen kullanıcı adı sorgularında süre farkını eşitlemek (user enumeration önleme)
-/// için çalıştırılan resmi RFC 9106 Argon2id sahte hash sabiti.
-pub const DUMMY_ARGON2_HASH: &str =
-    "$argon2id$v=19$m=65536,t=3,p=1$aDVMNW9MV3FjUE5xY3h4Lw$VC9wtT1yZVDrE7wkPALDM3Mupw+dSW/ACmdVxL8uuro";
+/// `[vhost.auth]` bölümünden okunan kaba kuvvet / kuyruk / süre sınırları.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthLimits {
+    pub max_failed_attempts: u32,
+    pub fail_window_secs: u64,
+    pub ban_secs: u64,
+    pub fail_min_ms: u64,
+    pub queue_timeout_ms: u64,
+    pub max_concurrent_per_ip: u32,
+}
 
-/// Basic Authentication başarısız denemelerini IP bazında takip edip kaba kuvvet saldırılarını
-/// otomatik tespit ederek IP'yi `IpBanManager` ile banlayan koruma kalkanı.
+impl From<&VHostAuthSection> for AuthLimits {
+    fn from(a: &VHostAuthSection) -> Self {
+        Self {
+            max_failed_attempts: a.max_failed_attempts.max(1),
+            fail_window_secs: a.fail_window_secs.max(1),
+            ban_secs: a.ban_secs.max(1),
+            fail_min_ms: a.fail_min_ms,
+            queue_timeout_ms: a.queue_timeout_ms,
+            max_concurrent_per_ip: a.max_concurrent_per_ip.max(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AttemptEntry {
+    count: u32,
+    start: Instant,
+    window_secs: u64,
+}
+
+/// `attempts` tablosunun süresi dolmuş kayıtlarının en geç bu aralıkla temizlenmesi.
+const ATTEMPTS_PURGE_INTERVAL_SECS: u64 = 30;
+
+/// IP başına eşzamanlı doğrulama sınırı koruyucusu; düşünce sayacı geri azaltır.
+pub struct InflightGuard<'a> {
+    map: &'a DashMap<IpAddr, AtomicU32>,
+    ip: IpAddr,
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(c) = self.map.get(&self.ip) {
+            c.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.map
+            .remove_if(&self.ip, |_, c| c.load(Ordering::Acquire) == 0);
+    }
+}
+
+/// Basic Authentication denemelerini IP bazında sayıp kaba kuvvet eşiğinde IP'yi banlayan,
+/// IP başına eşzamanlı doğrulama sayısını sınırlayan koruma kalkanı.
+///
+/// Sayaç doğrulamadan ÖNCE artırılır (`begin_attempt`): eşik aşıldıysa Argon2 hiç hesaplanmaz.
 pub struct BasicAuthBruteForceGuard {
-    pub max_attempts: u32,
-    pub window_secs: u64,
-    pub ban_duration_secs: u64,
-    attempts: DashMap<IpAddr, (u32, std::time::Instant)>,
+    attempts: DashMap<IpAddr, AttemptEntry>,
+    inflight: DashMap<IpAddr, AtomicU32>,
+    base: Instant,
+    last_purge_secs: AtomicU64,
 }
 
 impl Default for BasicAuthBruteForceGuard {
     fn default() -> Self {
-        Self::new(5, 60, 300)
+        Self::new()
     }
 }
 
 impl BasicAuthBruteForceGuard {
-    pub fn new(max_attempts: u32, window_secs: u64, ban_duration_secs: u64) -> Self {
+    pub fn new() -> Self {
         Self {
-            max_attempts: max_attempts.max(1),
-            window_secs: window_secs.max(1),
-            ban_duration_secs: ban_duration_secs.max(1),
             attempts: DashMap::new(),
+            inflight: DashMap::new(),
+            base: Instant::now(),
+            last_purge_secs: AtomicU64::new(0),
         }
     }
 
-    /// Başarısız kimlik doğrulama denemesini kaydeder. Eşik aşılırsa IP banlanır ve true döner.
-    pub fn record_failure(&self, ip: IpAddr, ban_manager: &crate::IpBanManager) -> bool {
-        let now = std::time::Instant::now();
-        let mut entry = self.attempts.entry(ip).or_insert((0, now));
-        let (count, start_time) = entry.value_mut();
+    /// IP başına eşzamanlı doğrulama yuvası alır; sınır doluysa `None` (429).
+    pub fn try_enter(&self, ip: IpAddr, max_concurrent: u32) -> Option<InflightGuard<'_>> {
+        let entry = self.inflight.entry(ip).or_insert_with(|| AtomicU32::new(0));
+        let prev = entry.fetch_add(1, Ordering::AcqRel);
+        if prev >= max_concurrent {
+            entry.fetch_sub(1, Ordering::AcqRel);
+            drop(entry);
+            self.inflight
+                .remove_if(&ip, |_, c| c.load(Ordering::Acquire) == 0);
+            return None;
+        }
+        Some(InflightGuard {
+            map: &self.inflight,
+            ip,
+        })
+    }
 
-        if now.duration_since(*start_time).as_secs() >= self.window_secs {
-            *count = 1;
-            *start_time = now;
-            false
-        } else {
-            *count += 1;
-            if *count >= self.max_attempts {
-                ban_manager.ban(
-                    ip,
-                    format!("Basic Auth brute-force engellendi ({} basarisiz deneme)", *count),
-                    self.ban_duration_secs,
-                );
-                true
-            } else {
-                false
+    /// Doğrulamadan ÖNCE çağrılır: denemeyi sayar. Eşik aşıldıysa IP banlanır ve `false` döner
+    /// (çağıran Argon2/apr1 hesaplamadan 403 verir).
+    pub fn begin_attempt(
+        &self,
+        ip: IpAddr,
+        limits: &AuthLimits,
+        ban_manager: &crate::IpBanManager,
+    ) -> bool {
+        let now = Instant::now();
+        self.maybe_purge(now);
+        let count = {
+            let mut e = self.attempts.entry(ip).or_insert(AttemptEntry {
+                count: 0,
+                start: now,
+                window_secs: limits.fail_window_secs,
+            });
+            if now.duration_since(e.start).as_secs() >= limits.fail_window_secs {
+                e.count = 0;
+                e.start = now;
             }
+            e.window_secs = limits.fail_window_secs;
+            e.count = e.count.saturating_add(1);
+            e.count
+        };
+        if count > limits.max_failed_attempts {
+            ban_manager.ban(
+                ip,
+                format!("Basic Auth brute-force engellendi ({count} deneme)"),
+                limits.ban_secs,
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Doğrulama hiç yapılamadıysa (503) denemeyi sayaçtan geri alır.
+    pub fn cancel_attempt(&self, ip: IpAddr) {
+        if let Some(mut e) = self.attempts.get_mut(&ip) {
+            e.count = e.count.saturating_sub(1);
         }
     }
 
-    /// Başarılı girişte IP'nin başarısız deneme sayacını sıfırlar.
+    /// Başarılı girişte IP'nin sayacını sıfırlar.
     pub fn record_success(&self, ip: IpAddr) {
         self.attempts.remove(&ip);
     }
+
+    /// Penceresi dolmuş kayıtları siler (TTL temizliği).
+    pub fn purge_expired_at(&self, now: Instant) {
+        self.attempts
+            .retain(|_, e| now.saturating_duration_since(e.start).as_secs() < e.window_secs);
+    }
+
+    /// En fazla `ATTEMPTS_PURGE_INTERVAL_SECS` aralıkla `purge_expired_at` çalıştırır.
+    fn maybe_purge(&self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.base).as_secs();
+        let last = self.last_purge_secs.load(Ordering::Relaxed);
+        if elapsed.saturating_sub(last) >= ATTEMPTS_PURGE_INTERVAL_SECS
+            && self
+                .last_purge_secs
+                .compare_exchange(last, elapsed, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            self.purge_expired_at(now);
+        }
+    }
+
+    /// Tabloda tutulan IP kayıt sayısı (sızıntı denetimi için).
+    pub fn tracked_ips(&self) -> usize {
+        self.attempts.len()
+    }
 }
+
+/// Eşzamanlı Argon2/apr1 doğrulama sayısı için varsayılan üst sınır (`[security] auth_max_concurrent_hashes`).
+pub const DEFAULT_MAX_CONCURRENT_HASHES: usize = 4;
 
 #[derive(Clone)]
 struct CachedUsersEntry {
@@ -1384,7 +1511,7 @@ impl Default for BasicAuthManager {
 
 impl BasicAuthManager {
     pub fn new() -> Self {
-        Self::with_max_concurrent_hashes(4)
+        Self::with_max_concurrent_hashes(DEFAULT_MAX_CONCURRENT_HASHES)
     }
 
     pub fn with_max_concurrent_hashes(max_concurrent: usize) -> Self {
@@ -1568,16 +1695,12 @@ impl BasicAuthManager {
         };
 
         // 3. Kullanıcı doğrulama ve Zamanlama Saldırısı (Timing Attack) Koruması
-        let (found_hash, file_err) = self.resolve_user_hash(matched_dir, vhost_auth, base_dir, &user);
-        let user_verified = if file_err {
-            let _ = verify_password(DUMMY_ARGON2_HASH, &pass);
-            false
-        } else if let Some(hash) = found_hash {
-            verify_password(&hash, &pass)
-        } else {
-            // Bilinmeyen kullanıcı: sahte hash hesaplanarak süre bilinen kullanıcı ile eşitlenir
-            let _ = verify_password(DUMMY_ARGON2_HASH, &pass);
-            false
+        let (found_hash, file_err) =
+            self.resolve_user_hash(matched_dir, vhost_auth, base_dir, &user);
+        // Süre eşitleme `check_request_async` içinde `fail_min_ms` tabanıyla yapılır.
+        let user_verified = match found_hash {
+            Some(hash) if !file_err => verify_password(&hash, &pass),
+            _ => false,
         };
 
         if user_verified {
@@ -1601,7 +1724,10 @@ impl BasicAuthManager {
 
     /// Asenkron tokio işleyicilerini bloklamamak için CPU-yoğun hash hesaplamalarını
     /// `spawn_blocking` ve eşzamanlı `Semaphore` koruması altında yürütür.
-    /// Başarısız denemeleri IP bazında takip ederek kaba kuvvet eşiğinde IP'yi otomatik banlar.
+    ///
+    /// Sıra: IP başına eşzamanlı sınır (429) -> sayaç doğrulamadan ÖNCE (403, ban) ->
+    /// `queue_timeout_ms` süreli semafor (503) -> doğrulama -> başarısızsa en az `fail_min_ms`
+    /// süre (kullanıcı var/yok ve şemadan bağımsız).
     pub async fn check_request_async(
         self: &Arc<Self>,
         client_ip: IpAddr,
@@ -1614,6 +1740,8 @@ impl BasicAuthManager {
         if !vhost_auth.enabled {
             return AuthDecision::Allowed;
         }
+        let started = tokio::time::Instant::now();
+        let limits = AuthLimits::from(vhost_auth);
 
         let normalized_path = normalize_auth_path(request_path);
 
@@ -1650,24 +1778,50 @@ impl BasicAuthManager {
             };
         };
 
+        // 1. IP başına eşzamanlı doğrulama sınırı (yuva, yanıt sonuna kadar tutulur)
+        let Some(_slot) = self
+            .brute_force_guard
+            .try_enter(client_ip, limits.max_concurrent_per_ip)
+        else {
+            return AuthDecision::TooManyRequests {
+                retry_after_secs: 1,
+            };
+        };
+
+        // 2. Sayaç doğrulamadan ÖNCE: eşik aşıldıysa hash hesaplanmadan 403
+        if !self
+            .brute_force_guard
+            .begin_attempt(client_ip, &limits, ban_manager)
+        {
+            return AuthDecision::Banned;
+        }
+
+        let deadline = started + Duration::from_millis(limits.fail_min_ms);
+
         if parse_basic_auth_header(auth_str).is_none() {
-            self.brute_force_guard.record_failure(client_ip, ban_manager);
+            tokio::time::sleep_until(deadline).await;
             return AuthDecision::Unauthorized {
                 realm: active_realm,
             };
         }
 
-        // P1: Eşzamanlı hash sınırı (Semaphore)
-        let permit = match self.semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => {
-                return AuthDecision::Unauthorized {
-                    realm: active_realm,
+        // 3. Sınırlı kuyruk: semafor beklemesi zaman aşımına uğrarsa 503 + Retry-After
+        let permit = match tokio::time::timeout(
+            Duration::from_millis(limits.queue_timeout_ms),
+            self.semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            _ => {
+                self.brute_force_guard.cancel_attempt(client_ip);
+                return AuthDecision::Unavailable {
+                    retry_after_secs: 1,
                 };
             }
         };
 
-        // P1: CPU-yoğun hash hesaplaması tokio worker thread'lerinden izole edilir
+        // 4. CPU-yoğun hash hesaplaması tokio worker thread'lerinden izole edilir
         let this = self.clone();
         let auth_hdr_owned = auth_str.to_string();
         let path_owned = request_path.to_string();
@@ -1689,14 +1843,9 @@ impl BasicAuthManager {
         });
 
         match &decision {
-            AuthDecision::Allowed => {
-                self.brute_force_guard.record_success(client_ip);
-            }
-            AuthDecision::Unauthorized { .. } => {
-                self.brute_force_guard.record_failure(client_ip, ban_manager);
-            }
+            AuthDecision::Allowed => self.brute_force_guard.record_success(client_ip),
+            _ => tokio::time::sleep_until(deadline).await,
         }
-
         decision
     }
 }
@@ -1873,6 +2022,7 @@ mod tests {
             htpasswd_path: None,
             users: vec![AuthUserEntry::new("panelci", hash)],
             directories: vec![],
+            ..Default::default()
         };
 
         // Korumasız yol Allowed
@@ -1943,6 +2093,7 @@ mod tests {
                     )],
                 },
             ],
+            ..Default::default()
         };
 
         // 1. Korumasız yol -> Doğrudan Allowed
@@ -2049,32 +2200,148 @@ mod tests {
         assert!(!verify_password("rastgeleparola", "rastgeleparola"));
     }
 
+    fn limits(max: u32, window: u64) -> AuthLimits {
+        AuthLimits {
+            max_failed_attempts: max,
+            fail_window_secs: window,
+            ban_secs: 300,
+            fail_min_ms: 0,
+            queue_timeout_ms: 500,
+            max_concurrent_per_ip: 2,
+        }
+    }
+
     #[test]
-    fn test_brute_force_guard_and_ban_manager_integration() {
+    fn test_brute_force_guard_counts_before_verification_and_bans_over_threshold() {
         use std::net::IpAddr;
         let ban_mgr = crate::IpBanManager::new();
-        let guard = BasicAuthBruteForceGuard::new(3, 60, 300);
-        let test_ip: IpAddr = "192.168.10.50".parse().unwrap();
+        let guard = BasicAuthBruteForceGuard::new();
+        let lim = limits(3, 60);
+        let ip: IpAddr = "192.168.10.50".parse().unwrap();
 
-        assert!(!ban_mgr.is_banned(test_ip));
+        // İlk 3 deneme doğrulanabilir, 4. deneme doğrulamadan ÖNCE reddedilir ve IP banlanır
+        for _ in 0..3 {
+            assert!(guard.begin_attempt(ip, &lim, &ban_mgr));
+            assert!(!ban_mgr.is_banned(ip));
+        }
+        assert!(!guard.begin_attempt(ip, &lim, &ban_mgr));
+        assert!(ban_mgr.is_banned(ip));
 
-        // 1. ve 2. başarısız denemede henüz banlanmaz
-        assert!(!guard.record_failure(test_ip, &ban_mgr));
-        assert!(!ban_mgr.is_banned(test_ip));
-        assert!(!guard.record_failure(test_ip, &ban_mgr));
-        assert!(!ban_mgr.is_banned(test_ip));
+        // Başarılı giriş sayacı sıfırlar
+        let other: IpAddr = "192.168.10.51".parse().unwrap();
+        for _ in 0..3 {
+            assert!(guard.begin_attempt(other, &lim, &ban_mgr));
+        }
+        guard.record_success(other);
+        assert!(guard.begin_attempt(other, &lim, &ban_mgr));
+        assert!(!ban_mgr.is_banned(other));
 
-        // 3. başarısız denemede eşik aşılır ve banlanır!
-        assert!(guard.record_failure(test_ip, &ban_mgr));
-        assert!(ban_mgr.is_banned(test_ip));
+        // 503 ile iptal edilen deneme sayılmaz
+        let third: IpAddr = "192.168.10.52".parse().unwrap();
+        for _ in 0..10 {
+            assert!(guard.begin_attempt(third, &lim, &ban_mgr));
+            guard.cancel_attempt(third);
+        }
+        assert!(!ban_mgr.is_banned(third));
+    }
 
-        // Başarılı giriş ile sayaç sıfırlanabilir
-        let other_ip: IpAddr = "192.168.10.51".parse().unwrap();
-        guard.record_failure(other_ip, &ban_mgr);
-        guard.record_success(other_ip);
-        // Sıfırlandıktan sonra 1 deneme daha yapıldığında eşiğe ulaşmamalı
-        assert!(!guard.record_failure(other_ip, &ban_mgr));
-        assert!(!ban_mgr.is_banned(other_ip));
+    #[test]
+    fn test_attempts_table_is_purged_after_window_ttl() {
+        let ban_mgr = crate::IpBanManager::new();
+        let guard = BasicAuthBruteForceGuard::new();
+        let lim = limits(5, 60);
+        for n in 1..=200u32 {
+            let ip: std::net::IpAddr = std::net::IpAddr::from([10, 1, (n >> 8) as u8, n as u8]);
+            assert!(guard.begin_attempt(ip, &lim, &ban_mgr));
+        }
+        assert_eq!(guard.tracked_ips(), 200);
+        // Pencere dolmadan temizlik kayıt silmez
+        guard.purge_expired_at(Instant::now() + Duration::from_secs(30));
+        assert_eq!(guard.tracked_ips(), 200);
+        // Pencere (60 sn) dolunca tablo boşalır
+        guard.purge_expired_at(Instant::now() + Duration::from_secs(61));
+        assert_eq!(
+            guard.tracked_ips(),
+            0,
+            "attempts tablosu TTL ile temizlenmeli"
+        );
+    }
+
+    #[test]
+    fn test_per_ip_inflight_limit_and_release() {
+        let guard = BasicAuthBruteForceGuard::new();
+        let ip: std::net::IpAddr = "10.9.9.9".parse().unwrap();
+        let g1 = guard.try_enter(ip, 2).expect("1. yuva");
+        let g2 = guard.try_enter(ip, 2).expect("2. yuva");
+        assert!(
+            guard.try_enter(ip, 2).is_none(),
+            "3. yuva reddedilmeli (429)"
+        );
+        drop(g1);
+        let g3 = guard
+            .try_enter(ip, 2)
+            .expect("yuva serbest kalinca yeniden alinabilir");
+        drop((g2, g3));
+        assert!(guard.inflight.is_empty(), "yuva tablosu sizdirmamali");
+    }
+
+    #[test]
+    fn test_auth_limits_come_from_vhost_auth_section_with_documented_defaults() {
+        let d = AuthLimits::from(&VHostAuthSection::default());
+        assert_eq!(
+            (d.max_failed_attempts, d.fail_window_secs, d.ban_secs),
+            (5, 60, 300)
+        );
+        assert_eq!(
+            (d.fail_min_ms, d.queue_timeout_ms, d.max_concurrent_per_ip),
+            (500, 500, 2)
+        );
+        let cfg = VHostAuthSection {
+            max_failed_attempts: 9,
+            fail_window_secs: 11,
+            ban_secs: 13,
+            fail_min_ms: 17,
+            queue_timeout_ms: 19,
+            max_concurrent_per_ip: 23,
+            ..Default::default()
+        };
+        let l = AuthLimits::from(&cfg);
+        assert_eq!(
+            (l.max_failed_attempts, l.fail_window_secs, l.ban_secs),
+            (9, 11, 13)
+        );
+        assert_eq!(
+            (l.fail_min_ms, l.queue_timeout_ms, l.max_concurrent_per_ip),
+            (17, 19, 23)
+        );
+    }
+
+    #[test]
+    fn test_normalize_auth_path_is_case_insensitive() {
+        assert_eq!(
+            normalize_auth_path("/GIZLI/"),
+            normalize_auth_path("/gizli")
+        );
+        assert_eq!(
+            normalize_auth_path("/Gizli/IndeX.HTML"),
+            "/gizli/index.html"
+        );
+        assert_eq!(
+            normalize_auth_path("/G%C4%B0ZL%C4%B0"),
+            normalize_auth_path("/gizli")
+        );
+        assert!(matches_path_prefix(
+            &normalize_auth_path("/GiZLi/x"),
+            "/gizli"
+        ));
+        assert!(matches_path_prefix(
+            &normalize_auth_path("/gizli/x"),
+            "/GIZLI/"
+        ));
+        assert!(!matches_path_prefix(
+            &normalize_auth_path("/gizlix"),
+            "/gizli"
+        ));
     }
 
     #[tokio::test]
@@ -2156,107 +2423,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_user_timing_matches_known_user() {
+    async fn failure_time_is_equalized_between_known_apr1_user_and_unknown_user() {
         let manager = Arc::new(BasicAuthManager::new());
         let ban_mgr = crate::IpBanManager::new();
-        let test_ip: std::net::IpAddr = "10.0.9.9".parse().unwrap();
-
-        let argon_pass = "TestParola123!";
-        let argon_hash = argon2id_hash(argon_pass, b"saltsalt1234", 1024, 2, 1).unwrap();
         let mut vhost_auth = VHostAuthSection {
             enabled: true,
             realm: "Timing Test".to_string(),
+            fail_min_ms: 150,
+            max_failed_attempts: 1000,
             ..Default::default()
         };
         vhost_auth.users.push(AuthUserEntry {
             username: "knownuser".to_string(),
-            password_hash: argon_hash,
+            password_hash: apr1_hash("Dogru", "salt1234"),
         });
+        let known = "Basic ".to_string() + &std_base64_encode(b"knownuser:Yanlis");
+        let unknown = "Basic ".to_string() + &std_base64_encode(b"nonexistent:Yanlis");
+        let ip: std::net::IpAddr = "10.0.9.9".parse().unwrap();
 
-        let known_bad_tok =
-            "Basic ".to_string() + &std_base64_encode(b"knownuser:YanlisParola999");
-        let unknown_tok =
-            "Basic ".to_string() + &std_base64_encode(b"nonexistent:YanlisParola999");
-
-        let t0 = std::time::Instant::now();
-        let res1 = manager
-            .check_request_async(
-                test_ip,
-                Some(&known_bad_tok),
-                "/timing",
-                &vhost_auth,
-                None,
-                &ban_mgr,
-            )
-            .await;
-        let dur_known = t0.elapsed();
-        assert!(matches!(res1, AuthDecision::Unauthorized { .. }));
-
-        let t1 = std::time::Instant::now();
-        let res2 = manager
-            .check_request_async(
-                test_ip,
-                Some(&unknown_tok),
-                "/timing",
-                &vhost_auth,
-                None,
-                &ban_mgr,
-            )
-            .await;
-        let dur_unknown = t1.elapsed();
-        assert!(matches!(res2, AuthDecision::Unauthorized { .. }));
-
+        let (mut sum_known, mut sum_unknown) = (Duration::ZERO, Duration::ZERO);
+        for _ in 0..6 {
+            let t = Instant::now();
+            let r = manager
+                .check_request_async(ip, Some(&known), "/t", &vhost_auth, None, &ban_mgr)
+                .await;
+            sum_known += t.elapsed();
+            assert!(matches!(r, AuthDecision::Unauthorized { .. }));
+            let t = Instant::now();
+            let r = manager
+                .check_request_async(ip, Some(&unknown), "/t", &vhost_auth, None, &ban_mgr)
+                .await;
+            sum_unknown += t.elapsed();
+            assert!(matches!(r, AuthDecision::Unauthorized { .. }));
+        }
+        let (k, u) = (sum_known / 6, sum_unknown / 6);
+        let diff = if k > u { k - u } else { u - k };
         assert!(
-            dur_unknown.as_millis() >= 1,
-            "Bilinmeyen kullanici icin sahte hash calistirilmali, gecen sure: {:?}, bilinen sure: {:?}",
-            dur_unknown,
-            dur_known
+            diff < Duration::from_millis(50),
+            "bilinen {k:?} / bilinmeyen {u:?} farki {diff:?}"
         );
+        assert!(k >= Duration::from_millis(140) && u >= Duration::from_millis(140));
     }
 
     #[tokio::test]
-    async fn dos_protection_argon2_parallel_not_blocking() {
-        let manager = Arc::new(BasicAuthManager::with_max_concurrent_hashes(4));
-        let ban_mgr = Arc::new(crate::IpBanManager::new());
-        let test_ip: std::net::IpAddr = "10.0.9.10".parse().unwrap();
-
-        let argon_pass = "GucluParola123!";
-        let argon_hash = argon2id_hash(argon_pass, b"saltsalt1234", 1024, 3, 1).unwrap();
+    async fn queue_timeout_yields_unavailable_and_per_ip_limit_yields_too_many_requests() {
+        let manager = Arc::new(BasicAuthManager::with_max_concurrent_hashes(1));
+        let ban_mgr = crate::IpBanManager::new();
+        let ip: std::net::IpAddr = "10.0.9.10".parse().unwrap();
         let mut vhost_auth = VHostAuthSection {
             enabled: true,
-            realm: "DoS Test".to_string(),
+            queue_timeout_ms: 50,
+            fail_min_ms: 0,
+            max_failed_attempts: 1000,
+            max_concurrent_per_ip: 1,
             ..Default::default()
         };
         vhost_auth.users.push(AuthUserEntry {
-            username: "argonuser".to_string(),
-            password_hash: argon_hash,
+            username: "u".to_string(),
+            password_hash: apr1_hash("p", "salt1234"),
         });
+        let tok = "Basic ".to_string() + &std_base64_encode(b"u:x");
 
-        let mut tasks = Vec::new();
-        for i in 0..6 {
-            let mgr = manager.clone();
-            let auth = vhost_auth.clone();
-            let bm = ban_mgr.clone();
-            let tok = "Basic ".to_string()
-                + &std_base64_encode(format!("argonuser:Yanlis{}", i).as_bytes());
-            tasks.push(tokio::spawn(async move {
-                mgr.check_request_async(test_ip, Some(&tok), "/dos", &auth, None, &bm)
-                    .await
-            }));
-        }
+        // Semaforun tek yuvasını tut: kuyruk 50 ms sonra 503 olmalı
+        let _held = manager.semaphore.clone().acquire_owned().await.unwrap();
+        let t = Instant::now();
+        let r = manager
+            .check_request_async(ip, Some(&tok), "/q", &vhost_auth, None, &ban_mgr)
+            .await;
+        assert!(matches!(r, AuthDecision::Unavailable { .. }), "{r:?}");
+        assert!(t.elapsed() < Duration::from_millis(1000));
 
-        let t_start = std::time::Instant::now();
-        tokio::task::yield_now().await;
-        let light_elapsed = t_start.elapsed();
-        assert!(
-            light_elapsed < Duration::from_millis(200),
-            "Tokio worker bloke edilmedi, hafif islem gecikmedi: {:?}",
-            light_elapsed
-        );
-
-        for t in tasks {
-            let res = t.await.unwrap();
-            assert!(matches!(res, AuthDecision::Unauthorized { .. }));
-        }
+        // IP yuvası doluyken ikinci istek 429
+        let slot = manager.brute_force_guard.try_enter(ip, 1).unwrap();
+        let r = manager
+            .check_request_async(ip, Some(&tok), "/q", &vhost_auth, None, &ban_mgr)
+            .await;
+        assert!(matches!(r, AuthDecision::TooManyRequests { .. }), "{r:?}");
+        drop(slot);
     }
 }

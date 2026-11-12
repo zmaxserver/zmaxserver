@@ -349,6 +349,8 @@ pub struct SecurityConfig {
     pub allow_ips: Vec<String>,
     #[serde(default)]
     pub deny_ips: Vec<String>,
+    /// Basic Auth için eşzamanlı Argon2/apr1 doğrulama üst sınırı (semafor; yeniden başlatmada geçerli).
+    pub auth_max_concurrent_hashes: usize,
 }
 
 impl Default for SecurityConfig {
@@ -364,6 +366,7 @@ impl Default for SecurityConfig {
             max_header_size_kb: 64,
             allow_ips: Vec::new(),
             deny_ips: Vec::new(),
+            auth_max_concurrent_hashes: 4,
         }
     }
 }

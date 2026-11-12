@@ -29,6 +29,19 @@ pub struct VHostAuthSection {
     /// Dizin bazında koruma kuralları (örn. /admin, /gizli)
     #[serde(default)]
     pub directories: Vec<VHostAuthDirectory>,
+    /// Kaba kuvvet eşiği: pencere içinde bu sayıdan fazla deneme yapan IP banlanır (varsayılan 5).
+    pub max_failed_attempts: u32,
+    /// Başarısız deneme sayım penceresi, saniye (varsayılan 60).
+    pub fail_window_secs: u64,
+    /// Eşik aşıldığında IP ban süresi, saniye (varsayılan 300).
+    pub ban_secs: u64,
+    /// Başarısız yanıtların en az süresi, ms; kullanıcı/şema numaralandırmasını kapatır (varsayılan 500).
+    #[serde(alias = "auth_fail_min_ms")]
+    pub fail_min_ms: u64,
+    /// Doğrulama kuyruğunda (semafor) azami bekleme, ms; aşılırsa 503 (varsayılan 500).
+    pub queue_timeout_ms: u64,
+    /// IP başına eşzamanlı doğrulama sınırı; aşılırsa 429 (varsayılan 2).
+    pub max_concurrent_per_ip: u32,
 }
 
 impl Default for VHostAuthSection {
@@ -40,6 +53,12 @@ impl Default for VHostAuthSection {
             htpasswd_path: None,
             users: Vec::new(),
             directories: Vec::new(),
+            max_failed_attempts: 5,
+            fail_window_secs: 60,
+            ban_secs: 300,
+            fail_min_ms: 500,
+            queue_timeout_ms: 500,
+            max_concurrent_per_ip: 2,
         }
     }
 }
@@ -48,6 +67,20 @@ impl VHostAuthSection {
     /// Tüm Basic Auth yapılandırma alanlarını (realm, dizin önekleri, htpasswd dosya yolları, kullanıcılar) doğrular.
     pub fn validate(&self, scope: &str) -> Result<(), String> {
         validate_realm(scope, "auth.realm", &self.realm)?;
+        if self.max_failed_attempts == 0
+            || self.fail_window_secs == 0
+            || self.ban_secs == 0
+            || self.max_concurrent_per_ip == 0
+        {
+            return Err(format!(
+                "{scope}: auth.max_failed_attempts, fail_window_secs, ban_secs ve max_concurrent_per_ip en az 1 olmali"
+            ));
+        }
+        if self.fail_min_ms > 10_000 || self.queue_timeout_ms > 60_000 {
+            return Err(format!(
+                "{scope}: auth.fail_min_ms en fazla 10000, auth.queue_timeout_ms en fazla 60000 olabilir"
+            ));
+        }
         if let Some(ref prefix) = self.path_prefix {
             validate_auth_path_prefix(scope, "auth.path_prefix", prefix)?;
         }
@@ -281,5 +314,56 @@ mod tests {
         let debug_str = format!("{:?}", entry);
         assert!(!debug_str.contains("super_secret_hash_value"));
         assert!(debug_str.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn auth_limits_are_read_from_toml_and_default_to_documented_values() {
+        let d: VHostAuthSection = toml::from_str("enabled = true").unwrap();
+        assert_eq!(
+            (d.max_failed_attempts, d.fail_window_secs, d.ban_secs),
+            (5, 60, 300)
+        );
+        assert_eq!(
+            (d.fail_min_ms, d.queue_timeout_ms, d.max_concurrent_per_ip),
+            (500, 500, 2)
+        );
+        let c: VHostAuthSection = toml::from_str(
+            "enabled = true
+max_failed_attempts = 9
+fail_window_secs = 11
+ban_secs = 13
+auth_fail_min_ms = 17
+queue_timeout_ms = 19
+max_concurrent_per_ip = 23
+",
+        )
+        .unwrap();
+        assert_eq!(
+            (c.max_failed_attempts, c.fail_window_secs, c.ban_secs),
+            (9, 11, 13)
+        );
+        assert_eq!(
+            (c.fail_min_ms, c.queue_timeout_ms, c.max_concurrent_per_ip),
+            (17, 19, 23)
+        );
+        assert!(c.validate("v").is_ok());
+        let bad = VHostAuthSection {
+            max_failed_attempts: 0,
+            ..Default::default()
+        };
+        assert!(bad.validate("v").is_err());
+        let slow = VHostAuthSection {
+            queue_timeout_ms: 600_000,
+            ..Default::default()
+        };
+        assert!(slow.validate("v").is_err());
+    }
+
+    #[test]
+    fn security_section_reads_auth_max_concurrent_hashes() {
+        let d = crate::SecurityConfig::default();
+        assert_eq!(d.auth_max_concurrent_hashes, 4);
+        let c: crate::SecurityConfig = toml::from_str("auth_max_concurrent_hashes = 7").unwrap();
+        assert_eq!(c.auth_max_concurrent_hashes, 7);
     }
 }

@@ -601,7 +601,7 @@ where
     }
 
     // 4.5. [kart-9] Basic Authentication ($apr1$ & Argon2id)
-    if let zmax_security::AuthDecision::Unauthorized { realm } =
+    let auth_decision =
         crate::security_pipeline::evaluate_basic_auth(
             &vhost_ctx,
             real_ip,
@@ -611,15 +611,16 @@ where
             &state.base_dir,
             &state.ban_manager,
         )
-        .await
+        .await;
+    if let Some(denial) =
+        crate::security_pipeline::build_auth_denial(&vhost_ctx, &auth_decision, None)
     {
-        let (auth_headers, auth_body) =
-            crate::security_pipeline::build_unauthorized_response(&vhost_ctx, &realm, None);
+        let (auth_headers, auth_body) = (denial.headers, denial.body);
         let written_bytes = if is_head { 0 } else { auth_body.len() };
         write_http_response(
             socket,
-            401,
-            "Unauthorized",
+            denial.status,
+            denial.reason,
             &auth_headers,
             &auth_body,
             Some(auth_body.len()),
@@ -636,7 +637,7 @@ where
             &real_ip_str,
             &req.method,
             &req.path,
-            401,
+            denial.status,
             started,
             Some(&vhost_ctx),
             written_bytes,
@@ -3915,7 +3916,7 @@ pub async fn handle_h2_dispatched_request(
     }
 
     // 4. [kart-9] Basic Authentication ($apr1$ & Argon2id)
-    if let zmax_security::AuthDecision::Unauthorized { realm } =
+    let auth_decision =
         crate::security_pipeline::evaluate_basic_auth(
             &vhost_ctx,
             real_ip,
@@ -3925,12 +3926,20 @@ pub async fn handle_h2_dispatched_request(
             &state.base_dir,
             &state.ban_manager,
         )
-        .await
+        .await;
+    if let Some(denial) =
+        crate::security_pipeline::build_auth_denial(
+            &vhost_ctx,
+            &auth_decision,
+            (!req_id.is_empty()).then_some(req_id),
+        )
     {
-        let req_id_opt = (!req_id.is_empty()).then_some(req_id);
-        let (headers, body) =
-            crate::security_pipeline::build_unauthorized_response(&vhost_ctx, &realm, req_id_opt);
-        return Ok((401, headers, bytes::Bytes::from(body), log_meta));
+        return Ok((
+            denial.status,
+            denial.headers,
+            bytes::Bytes::from(denial.body),
+            log_meta,
+        ));
     }
 
     // 4b. [matris-cache-tags] PURGE metodu / X-LiteSpeed-Purge istek basligi (HTTP/1.1 ile ayni yetki denetimi)

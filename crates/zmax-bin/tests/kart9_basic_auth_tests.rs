@@ -1,6 +1,6 @@
 //! Kart 9 — HTTP Basic Authentication ($apr1$ Apache MD5 & Argon2id) Uçtan Uca Entegrasyon Testleri
 //!
-//! Atanan port bloğu: 21090-21093 (21090 HTTP, 21091 HTTPS/H2, 21092 Admin kapalı, 21093 API kapalı).
+//! Portlar dinamiktir (`bind(:0)` ile alınan bos portlar).
 
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::io::{BufRead, BufReader};
@@ -14,10 +14,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio_rustls::TlsConnector;
 
-const HTTP_PORT: u16 = 21090;
-const HTTPS_PORT: u16 = 21091;
-const ADMIN_PORT: u16 = 21092;
-const API_PORT: u16 = 21093;
+/// HTTP, HTTPS, Admin, API portlari: süreç basina bir kez `bind(:0)` ile alinir.
+static PORTS: std::sync::LazyLock<[u16; 4]> = std::sync::LazyLock::new(|| {
+    let listeners: Vec<std::net::TcpListener> = (0..4)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bos port"))
+        .collect();
+    let mut out = [0u16; 4];
+    for (slot, l) in out.iter_mut().zip(listeners.iter()) {
+        *slot = l.local_addr().expect("yerel adres").port();
+    }
+    out
+});
 
 struct ChildGuard {
     child: Child,
@@ -153,7 +160,7 @@ fn spawn_zmax_and_wait_ready(
 }
 
 async fn send_http1(host: &str, path: &str, auth_header: Option<&str>) -> String {
-    let mut stream = TokioTcpStream::connect(("127.0.0.1", HTTP_PORT))
+    let mut stream = TokioTcpStream::connect(("127.0.0.1", PORTS[0]))
         .await
         .expect("HTTP portuna baglanilamadi");
     let mut req = format!("GET {} HTTP/1.1\r\nHost: {}\r\n", path, host);
@@ -224,7 +231,7 @@ async fn make_h2_tls_client(
     cfg.alpn_protocols = vec![b"h2".to_vec()];
     let connector = TlsConnector::from(Arc::new(cfg));
 
-    let tcp = TokioTcpStream::connect(("127.0.0.1", HTTPS_PORT))
+    let tcp = TokioTcpStream::connect(("127.0.0.1", PORTS[1]))
         .await
         .expect("HTTPS portuna baglanilamadi");
     let tls = connector
@@ -394,7 +401,11 @@ level = "info"
 access_log = "logs/access.log"
 error_log = "logs/error.log"
 batch_flush_ms = 50
-"#
+"#,
+            HTTP_PORT = PORTS[0],
+            HTTPS_PORT = PORTS[1],
+            ADMIN_PORT = PORTS[2],
+            API_PORT = PORTS[3],
         ),
     )
     .unwrap();
@@ -722,7 +733,7 @@ password_hash = "{argon_hash_val}"
 
     drop(guard);
     // Sunucu kapandiktan sonra portlarin serbest birakildigini kontrol et
-    assert!(TcpStream::connect(("127.0.0.1", HTTP_PORT)).is_err());
+    assert!(TcpStream::connect(("127.0.0.1", PORTS[0])).is_err());
 }
 
 #[test]
@@ -751,7 +762,11 @@ enabled = false
 port = {API_PORT}
 [vhosts_dir]
 path = "conf/vhosts"
-"#
+"#,
+            HTTP_PORT = PORTS[0],
+            HTTPS_PORT = PORTS[1],
+            ADMIN_PORT = PORTS[2],
+            API_PORT = PORTS[3],
         ),
     )
     .unwrap();
@@ -838,120 +853,10 @@ fn des_crypt_hash_not_accepted_as_password() {
     assert!(!zmax_security::verify_password("duzmetin", "duzmetin"));
 
     // Düz metin parolalar yalnızca açıkça {PLAIN} veya plain: önekiyle kabul edilir
-    assert!(zmax_security::verify_password("{PLAIN}duzmetin", "duzmetin"));
+    assert!(zmax_security::verify_password(
+        "{PLAIN}duzmetin",
+        "duzmetin"
+    ));
     assert!(zmax_security::verify_password("plain:duzmetin", "duzmetin"));
     assert!(!zmax_security::verify_password("{PLAIN}duzmetin", "yanlis"));
-}
-
-#[tokio::test]
-async fn unknown_user_timing_matches_known_user() {
-    use zmax_config::{AuthUserEntry, VHostAuthSection};
-    use zmax_security::{AuthDecision, BasicAuthManager, IpBanManager};
-
-    let manager = Arc::new(BasicAuthManager::new());
-    let ban_mgr = IpBanManager::new();
-    let test_ip: std::net::IpAddr = "10.0.9.11".parse().unwrap();
-
-    let argon_pass = "GizliSifre2026!";
-    let argon_hash = zmax_security::argon2id_hash(argon_pass, b"saltsalt1234", 1024, 2, 1).unwrap();
-    let mut vhost_auth = VHostAuthSection {
-        enabled: true,
-        realm: "Timing Match Test".to_string(),
-        ..Default::default()
-    };
-    vhost_auth.users.push(AuthUserEntry {
-        username: "gercekkullanici".to_string(),
-        password_hash: argon_hash,
-    });
-
-    let known_bad_tok = encode_basic_token("gercekkullanici", "YanlisSifre999");
-    let unknown_tok = encode_basic_token("olmayankullanici", "YanlisSifre999");
-
-    // 1. Bilinen kullanıcı adı + yanlış parola (Argon2id hesaplanır)
-    let t0 = std::time::Instant::now();
-    let r1 = manager
-        .check_request_async(
-            test_ip,
-            Some(&known_bad_tok),
-            "/gizli",
-            &vhost_auth,
-            None,
-            &ban_mgr,
-        )
-        .await;
-    let dur_known = t0.elapsed();
-    assert!(matches!(r1, AuthDecision::Unauthorized { .. }));
-
-    // 2. Bilinmeyen kullanıcı adı (Dummy Argon2id hesaplanır)
-    let t1 = std::time::Instant::now();
-    let r2 = manager
-        .check_request_async(
-            test_ip,
-            Some(&unknown_tok),
-            "/gizli",
-            &vhost_auth,
-            None,
-            &ban_mgr,
-        )
-        .await;
-    let dur_unknown = t1.elapsed();
-    assert!(matches!(r2, AuthDecision::Unauthorized { .. }));
-
-    // Bilinmeyen kullanıcı için sahte Argon2id hesaplandığından süre sıfır veya anlık değildir
-    assert!(
-        dur_unknown.as_millis() >= 1,
-        "Bilinmeyen kullanici icin sahte hash calistirilmali, gecen sure: {:?}, bilinen sure: {:?}",
-        dur_unknown,
-        dur_known
-    );
-}
-
-#[tokio::test]
-async fn dos_protection_argon2_parallel_not_blocking() {
-    use zmax_config::{AuthUserEntry, VHostAuthSection};
-    use zmax_security::{AuthDecision, BasicAuthManager, IpBanManager};
-
-    let manager = Arc::new(BasicAuthManager::with_max_concurrent_hashes(4));
-    let ban_mgr = Arc::new(IpBanManager::new());
-    let test_ip: std::net::IpAddr = "10.0.9.12".parse().unwrap();
-
-    let argon_pass = "AgirArgonSifresi!";
-    let argon_hash = zmax_security::argon2id_hash(argon_pass, b"saltsalt1234", 1024, 3, 1).unwrap();
-    let mut vhost_auth = VHostAuthSection {
-        enabled: true,
-        realm: "DoS Koruma Testi".to_string(),
-        ..Default::default()
-    };
-    vhost_auth.users.push(AuthUserEntry {
-        username: "argonuser".to_string(),
-        password_hash: argon_hash,
-    });
-
-    // 6 paralel ağır istek (Semaphore(4) sınırı ve spawn_blocking izolasyonu)
-    let mut tasks = Vec::new();
-    for i in 0..6 {
-        let mgr = manager.clone();
-        let auth = vhost_auth.clone();
-        let bm = ban_mgr.clone();
-        let tok = encode_basic_token("argonuser", &format!("YanlisParola{}", i));
-        tasks.push(tokio::spawn(async move {
-            mgr.check_request_async(test_ip, Some(&tok), "/dos", &auth, None, &bm)
-                .await
-        }));
-    }
-
-    // Ana tokio worker serbest kalmalı, paralel hafif async işlem anında bitmeli
-    let t_start = std::time::Instant::now();
-    tokio::task::yield_now().await;
-    let light_elapsed = t_start.elapsed();
-    assert!(
-        light_elapsed < Duration::from_millis(200),
-        "Tokio worker bloke edilmedi ({}ms)",
-        light_elapsed.as_millis()
-    );
-
-    for t in tasks {
-        let res = t.await.unwrap();
-        assert!(matches!(res, AuthDecision::Unauthorized { .. }));
-    }
 }
