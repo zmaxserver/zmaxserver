@@ -4682,7 +4682,6 @@ mod kart8_tests {
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
 
-
     /// vhost `php.dial_timeout_ms = Some(900)` verildiğinde politika (400 ms) DEĞİL vhost değeri, bağlantı
     /// kurulamayan arka uçta gerçekten uygulanır (yanıt ~900 ms'de gelir).
     #[tokio::test]
@@ -4728,5 +4727,4 @@ mod kart8_tests {
         );
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
-
 }

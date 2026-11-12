@@ -3011,10 +3011,9 @@ x_accel_prefix = "/protected/"
 
     #[test]
     fn k8_vhost_php_dial_timeout_default_none_and_json_null_roundtrip() {
-        let doc: VHostFileDocument = toml::from_str(
-            "[vhost]\nname = \"a.test\"\ndocument_root = \"www/a\"\n",
-        )
-        .expect("asgari vHost ayrıştırılmalı");
+        let doc: VHostFileDocument =
+            toml::from_str("[vhost]\nname = \"a.test\"\ndocument_root = \"www/a\"\n")
+                .expect("asgari vHost ayrıştırılmalı");
         assert_eq!(doc.vhost.php.dial_timeout_ms, None);
         // None değeri TOML'a yazılmaz (vhost değer vermiyor)
         let toml_out = serialize_vhost_toml(&doc.vhost).unwrap();
@@ -3022,7 +3021,13 @@ x_accel_prefix = "/protected/"
         // JSON: None -> null -> None
         let json_str = serialize_vhost_json(&doc.vhost).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        assert!(v["dial_timeout_ms"].is_null() || v.get("php").map(|p| p["dial_timeout_ms"].is_null()).unwrap_or(false), "{json_str}");
+        assert!(
+            v["dial_timeout_ms"].is_null()
+                || v.get("php")
+                    .map(|p| p["dial_timeout_ms"].is_null())
+                    .unwrap_or(false),
+            "{json_str}"
+        );
         let back = deserialize_vhost_json(&json_str).unwrap();
         assert_eq!(back.php.dial_timeout_ms, None);
         // Açık değer korunur
@@ -3041,5 +3046,4 @@ x_accel_prefix = "/protected/"
         let cfg2 = ZMaxConfig::parse_toml("[server]\ntmp_dir = \"run/tmp\"\n").unwrap();
         assert_eq!(cfg2.server.tmp_dir, "run/tmp");
     }
-
 }

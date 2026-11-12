@@ -170,7 +170,10 @@ fn spawn_zmax(root: &Path) -> Result<ZmaxGuard, String> {
             let _ = child.wait();
             let err_out = stderr_handle.join().unwrap_or_default();
             let _ = fs::remove_dir_all(root);
-            Err(format!("zmax 20 sn içinde hazır olmadı\nstderr:\n{}", err_out))
+            Err(format!(
+                "zmax 20 sn içinde hazır olmadı\nstderr:\n{}",
+                err_out
+            ))
         }
     }
 }
@@ -237,7 +240,10 @@ error_log = "logs/error.log"
         api = ports.api,
         admin = ports.admin,
     );
-    assert!(!conf.contains("user ="), "test yapılandırması user içermemeli");
+    assert!(
+        !conf.contains("user ="),
+        "test yapılandırması user içermemeli"
+    );
     fs::write(root.join("conf").join("zmax.toml"), conf).unwrap();
     #[cfg(unix)]
     // SAFETY: `geteuid` salt-okunur POSIX sorgusudur.
@@ -248,7 +254,11 @@ error_log = "logs/error.log"
     }
     let guard = spawn_zmax(&root).unwrap_or_else(|e| panic!("zmax başlamadı: {}", e));
     let status = http_get_status_line(ports.http);
-    assert!(status.starts_with("HTTP/1.1 "), "HTTP yanıtı alınamadı: '{}'", status);
+    assert!(
+        status.starts_with("HTTP/1.1 "),
+        "HTTP yanıtı alınamadı: '{}'",
+        status
+    );
     drop(guard);
 }
 
@@ -308,7 +318,11 @@ fn kart8_start_with_shipped_conf_nonroot() {
 #[ignore = "root (euid == 0) gerektirir; Linux VM'de --ignored ile çalıştırın"]
 fn kart8_root_with_empty_user_group_fails_closed() {
     // SAFETY: `geteuid` salt-okunur POSIX sorgusudur.
-    assert_eq!(unsafe { libc::geteuid() }, 0, "bu test root olarak koşmalıdır");
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "bu test root olarak koşmalıdır"
+    );
     let root = new_root("rootempty");
     let ports = TestPorts::pick_unique();
     let conf = format!(
@@ -316,8 +330,14 @@ fn kart8_root_with_empty_user_group_fails_closed() {
         ports.http, ports.https, ports.api, ports.admin
     );
     fs::write(root.join("conf").join("zmax.toml"), conf).unwrap();
-    let err = spawn_zmax(&root).err().expect("root + boş user/group başlamamalıydı");
-    assert!(err.contains("fail-closed"), "beklenen fail-closed hatası yok: {}", err);
+    let err = spawn_zmax(&root)
+        .err()
+        .expect("root + boş user/group başlamamalıydı");
+    assert!(
+        err.contains("fail-closed"),
+        "beklenen fail-closed hatası yok: {}",
+        err
+    );
 }
 
 fn minimal_conf(ports: TestPorts, server_extra: &str) -> String {
@@ -352,7 +372,10 @@ fn kart8_fix_tls_perms_nonroot_is_noop_success() {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let _ = fs::remove_dir_all(&root);
     assert!(out.status.success(), "çıkış kodu 0 beklenirdi: {stdout}");
-    assert!(stdout.contains("--fix-tls-perms root gerektirir"), "çıktı: {stdout}");
+    assert!(
+        stdout.contains("--fix-tls-perms root gerektirir"),
+        "çıktı: {stdout}"
+    );
 }
 
 /// Yetki düşürme yolu (user/group verilmiş): geçici dizin tahmin edilebilir `/tmp/zmax` DEĞİL,
@@ -364,7 +387,10 @@ fn kart8_start_with_user_group_prepares_private_tmp_under_root() {
     let ports = TestPorts::pick_unique();
     fs::write(
         root.join("conf").join("zmax.toml"),
-        minimal_conf(ports, "user = \"nobody\"\ngroup = \"nobody\"\ntmp_dir = \"run/gecici\""),
+        minimal_conf(
+            ports,
+            "user = \"nobody\"\ngroup = \"nobody\"\ntmp_dir = \"run/gecici\"",
+        ),
     )
     .unwrap();
     let guard = spawn_zmax(&root).unwrap_or_else(|e| panic!("zmax başlamadı: {}", e));

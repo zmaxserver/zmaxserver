@@ -508,7 +508,15 @@ fn chown_entry_nofollow(
         return Ok(());
     }
     // SAFETY: `name` geçerli C dizesi; AT_SYMLINK_NOFOLLOW son bileşen bağsa bağın hedefine DEĞİL bağın kendisine uygulanır.
-    if unsafe { libc::fchownat(parent_fd, name.as_ptr(), uid, gid, libc::AT_SYMLINK_NOFOLLOW) } != 0
+    if unsafe {
+        libc::fchownat(
+            parent_fd,
+            name.as_ptr(),
+            uid,
+            gid,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
     {
         return Err(format!(
             "Yol sahipliği değiştirilemedi ('{}' -> uid={}, gid={}): {}",
@@ -771,7 +779,9 @@ pub fn drop_privileges_with_paths_and_tls<P: AsRef<std::path::Path>, Q: AsRef<st
 
 /// Yetki düşürme sonrasında bu sürecin okuyamadığı yolları `(yol, hata)` olarak döndürür
 /// (var olmayan yollar atlanır). TLS anahtar izin planının gerçekten işlediğini doğrulamak için kullanılır.
-pub fn unreadable_paths<P: AsRef<std::path::Path>>(paths: &[P]) -> Vec<(std::path::PathBuf, String)> {
+pub fn unreadable_paths<P: AsRef<std::path::Path>>(
+    paths: &[P],
+) -> Vec<(std::path::PathBuf, String)> {
     let mut out = Vec::new();
     for p in paths {
         let path = p.as_ref();
@@ -807,13 +817,8 @@ pub fn prepare_private_tmp_dir(path: &std::path::Path, service_user: &str) -> Re
     #[cfg(not(unix))]
     {
         let _ = service_user;
-        std::fs::create_dir_all(path).map_err(|e| {
-            format!(
-                "Geçici dizin oluşturulamadı ('{}'): {}",
-                path.display(),
-                e
-            )
-        })
+        std::fs::create_dir_all(path)
+            .map_err(|e| format!("Geçici dizin oluşturulamadı ('{}'): {}", path.display(), e))
     }
     #[cfg(unix)]
     {
@@ -1149,7 +1154,11 @@ mod tests {
         assert_eq!(group_read_mode(0o640), 0o640);
         assert_eq!(group_read_mode(0o644), 0o644);
         assert_eq!(group_read_mode(0o400), 0o440);
-        assert_eq!(group_read_mode(0o100600), 0o640, "dosya türü bitleri atılmalı");
+        assert_eq!(
+            group_read_mode(0o100600),
+            0o640,
+            "dosya türü bitleri atılmalı"
+        );
     }
 
     fn k8_unique_dir(tag: &str) -> std::path::PathBuf {
@@ -1204,7 +1213,11 @@ mod tests {
 
         assert_eq!(grant_group_read(&key, own_gid()), Ok(true));
         assert_eq!(mode_of(&key), 0o640);
-        assert_eq!(grant_group_read(&key, own_gid()), Ok(false), "ikinci çağrı değişiklik yapmaz");
+        assert_eq!(
+            grant_group_read(&key, own_gid()),
+            Ok(false),
+            "ikinci çağrı değişiklik yapmaz"
+        );
 
         // Sonradan oluşan (yenilenen) anahtar da aynı çağrıyla okunabilir yapılır.
         let renewed = d.join("renewed.key");
@@ -1240,7 +1253,11 @@ mod tests {
         let err = apply_tls_group_read(own_gid(), &[d.clone(), good.clone()])
             .expect_err("hata yutulmamalı");
         assert!(err.contains("normal dosya değil"), "hata: {err}");
-        assert_eq!(mode_of(&good), 0o640, "hata sonrası kalan yollar da işlenmeli");
+        assert_eq!(
+            mode_of(&good),
+            0o640,
+            "hata sonrası kalan yollar da işlenmeli"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1279,9 +1296,15 @@ mod tests {
         std::os::unix::fs::symlink(&outside, d.join("dirlink")).unwrap();
 
         assert_eq!(chown_single_non_symlink(&d, uid, gid, 2), Ok(()));
-        assert_eq!(chown_single_non_symlink(&d.join("yok"), uid, gid, 2), Ok(()));
+        assert_eq!(
+            chown_single_non_symlink(&d.join("yok"), uid, gid, 2),
+            Ok(())
+        );
         // Üst yol sembolik bağsa (dizin bağı) izlenmez ve hata vermez.
-        assert_eq!(chown_single_non_symlink(&d.join("dirlink"), uid, gid, 2), Ok(()));
+        assert_eq!(
+            chown_single_non_symlink(&d.join("dirlink"), uid, gid, 2),
+            Ok(())
+        );
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&outside);
     }
@@ -1300,7 +1323,9 @@ mod tests {
         assert_eq!(mode_of(&t), 0o700);
         // sahip doğrulama: kendi dizinimiz (euid) kabul edilir
         // SAFETY: `geteuid` salt-okunur POSIX sorgusudur.
-        assert_eq!(std::fs::metadata(&t).unwrap().uid(), unsafe { libc::geteuid() });
+        assert_eq!(std::fs::metadata(&t).unwrap().uid(), unsafe {
+            libc::geteuid()
+        });
         // sembolik bağ reddedilir
         let real = d.join("gercek");
         std::fs::create_dir_all(&real).unwrap();
