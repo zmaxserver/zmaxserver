@@ -23,6 +23,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 ### Son gelişmeler
 
 - Sanal konak REST API'si hotlink ve IP erişim listesi alanlarını destekliyor.
+- Önbellek temizleme (purge) alan adı ve URI bazında çalışıyor; vhost izolasyonu korunuyor.
 - ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
 - HTTP/1.1 ve HTTP/2 aynı güvenlik denetim hattından geçiyor (`[vhost.acl]` dahil).
 - Ters vekil, Basic Auth, WAF olay günlüğü ve ayrıcalık düşürme güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
@@ -39,7 +40,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | Sanal konak yapılandırması (TOML) ve REST API ile yönetimi | Tamamlandı |
 | IP erişim listeleri, hotlink koruması, WAF | Tamamlandı |
 | Erişim günlüğü (NCSA, gerçek bayt sayısı) | Tamamlandı |
-| Bellek ve disk önbelleği (L1/L2) | Tamamlandı |
+| Bellek ve disk önbelleği (L1/L2), alan adı/URI bazlı temizleme | Tamamlandı |
 | FastCGI / PHP (temel) | Tamamlandı |
 | Basic Auth, ters vekil (reverse proxy), WAF olay günlüğü | İncelemede |
 | FastCGI havuzu, `sendfile`, ayrıcalık düşürme | İncelemede |
