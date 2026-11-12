@@ -6,6 +6,7 @@ mod api;
 mod h2_engine;
 mod logger;
 mod modules_runtime;
+pub mod security_pipeline;
 mod web_engine;
 
 use api::{
@@ -862,9 +863,18 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn run_request(state: &Arc<ServerState>, https: bool, raw: &str) -> String {
+        let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        run_request_with_peer(state, peer, https, raw).await
+    }
+
+    async fn run_request_with_peer(
+        state: &Arc<ServerState>,
+        peer: SocketAddr,
+        https: bool,
+        raw: &str,
+    ) -> String {
         let (mut client, server) = tokio::io::duplex(256 * 1024);
         let st = Arc::clone(state);
-        let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
         let port = if https { 443 } else { 80 };
         let task = tokio::spawn(async move {
             web_engine::handle_web_connection(server, peer, st, https, port).await
@@ -2873,6 +2883,374 @@ mod tests {
                     "Satir {i} ({line}) beklenen bayt '{exp_bytes}' vermedi"
                 );
             }
+        }
+
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_kart5_pipeline_http1_and_http2_security() {
+        let base = std::env::temp_dir().join(format!("zmax_bin_k5_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("www").join("k5");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(base.join("modules")).unwrap();
+        std::fs::write(
+            base.join("modules").join("mod_security.toml"),
+            "[module]\nname = \"mod_security\"\nenabled = true\n\n[settings]\nsql_injection_inspection = true\npath_traversal_shield = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("modules").join("mod_coreruleset.toml"),
+            "[module]\nname = \"mod_coreruleset\"\nenabled = true\n\n[settings]\nblock_sql_injection = true\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("resim.png"), "RESIM_ICERIK_PNG_12345").unwrap();
+        std::fs::write(root.join("sayfa.html"), "SAYFA_ICERIK_HTML_67890").unwrap();
+
+        let mut entry = zmax_config::VHostEntry {
+            name: "kart5.test".into(),
+            aliases: vec!["sub.kart5.test".into()],
+            document_root: "www/k5".into(),
+            ..Default::default()
+        };
+        entry.security.force_https = true;
+        entry.hotlink.enabled = true;
+        entry.hotlink.allowed_referers = vec![
+            "kart5.test".into(),
+            "*.kart5.test".into(),
+            "ortak.test".into(),
+        ];
+        entry.hotlink.extensions = vec!["png".into(), "jpg".into(), "webp".into()];
+        entry.security.allow_ips = vec!["127.0.0.1".into(), "10.0.0.0/8".into()];
+        entry.security.deny_ips = vec!["192.168.1.100".into(), "172.16.0.0/16".into()];
+        entry.security.waf_enabled = Some(true);
+        entry.tls.http2 = true;
+
+        let vh = zmax_config::LoadedVHost {
+            resolved_doc_root: resolve_path(&base, &entry.document_root),
+            entry,
+            file_name: "kart5.test.toml".into(),
+        };
+
+        let mut cfg = ZMaxConfig::parse_toml("[waf]\nenabled = true\n").unwrap();
+        cfg.listeners.https.port = 443;
+        cfg.cache.enabled = false;
+        let modules = LoadedModules::load_from_dir(&base.join("modules")).unwrap();
+        let policies = compile_policies(&cfg, &modules);
+        let auth = compute_effective_auth(&cfg);
+
+        let state = Arc::new(ServerState {
+            base_dir: base.clone(),
+            cache: zmax_cache::ZMaxCache::with_disk_dir(
+                4 * 1024 * 1024,
+                60,
+                base.join("cachedata"),
+            ),
+            ban_manager: Arc::new(zmax_security::IpBanManager::new()),
+            limiter: tokio::sync::RwLock::new(zmax_security::RateLimiter::new(1000)),
+            wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(10, 60, 300)),
+            buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
+            upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
+            runtime: RwLock::new(RuntimeState {
+                config: cfg,
+                vhosts: vec![vh],
+                modules,
+                policies,
+                redis_client: None,
+                auth,
+                conf_path: base.join("zmax.toml"),
+                vhosts_dir: base.join("vhosts"),
+                modules_dir: base.join("modules"),
+            }),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(
+                base.join("admin"),
+            )),
+            tls: Arc::new(zmax_tls::SniResolver::new()),
+            admin_tls: Arc::new(zmax_tls::SniResolver::new()),
+            api_tls: Arc::new(zmax_tls::SniResolver::new()),
+            log_manager: Arc::new(logger::AsyncLogManager::new(
+                base.clone(),
+                PathBuf::from("logs/access.log"),
+                PathBuf::from("logs/error.log"),
+                250,
+                64,
+            )),
+            htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
+            shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            access_logs: Mutex::new(VecDeque::with_capacity(64)),
+            stats: ServerStats {
+                start_time: Instant::now(),
+                total_requests: std::sync::atomic::AtomicU64::new(0),
+                cache_hits: std::sync::atomic::AtomicU64::new(0),
+                cache_misses: std::sync::atomic::AtomicU64::new(0),
+            },
+        });
+
+        // -------------------------------------------------------------
+        // KISIM 1: HTTP/1.1 İstek Hattı Güvenlik Denetimleri
+        // -------------------------------------------------------------
+
+        // 1.1 Yabancı Referer -> 403 Forbidden (Hotlink Protection)
+        let r1 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: http://saldirgan.com/sayfa\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r1.starts_with("HTTP/1.1 403 Forbidden"), "H1.1 403 olmalı: {r1}");
+        assert!(r1.contains("Hotlink Protection"), "H1.1 hotlink body içermeli: {r1}");
+
+        // 1.2 Boş Referer -> 200 OK (Doğrudan erişim izinli)
+        let r2 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r2.starts_with("HTTP/1.1 200 OK"), "H1.2 200 olmalı: {r2}");
+        assert!(r2.ends_with("RESIM_ICERIK_PNG_12345"), "H1.2 içerik eşleşmeli: {r2}");
+
+        // 1.3 İzinli Referer -> 200 OK
+        let r3 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: https://kart5.test/sayfa.html\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r3.starts_with("HTTP/1.1 200 OK"), "H1.3 200 olmalı: {r3}");
+
+        // 1.4 Joker İzinli Referer (*.kart5.test) -> 200 OK
+        let r4 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: https://img.kart5.test/galeri\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r4.starts_with("HTTP/1.1 200 OK"), "H1.4 200 olmalı: {r4}");
+
+        // 1.5 Korunmayan Uzantı (HTML) -> 200 OK (Yabancı Referer olsa dahi)
+        let r5 = run_request(
+            &state,
+            true,
+            "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nReferer: http://saldirgan.com/\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r5.starts_with("HTTP/1.1 200 OK"), "H1.5 200 olmalı: {r5}");
+
+        // 1.6 Deny CIDR IP -> 403 Forbidden (IP Access Denied)
+        let peer_denied: SocketAddr = "172.16.5.10:50000".parse().unwrap();
+        let r6 = run_request_with_peer(
+            &state,
+            peer_denied,
+            true,
+            "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r6.starts_with("HTTP/1.1 403 Forbidden"), "H1.6 403 olmalı: {r6}");
+        assert!(r6.contains("IP Access Denied"), "H1.6 ACL body içermeli: {r6}");
+
+        // 1.7 WAF SQLi Engeli -> 403 Forbidden (WAF Blocked)
+        let r7 = run_request(
+            &state,
+            true,
+            "GET /sayfa.html?q=union+select+1 HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r7.starts_with("HTTP/1.1 403 Forbidden"), "H1.7 403 olmalı: {r7}");
+        assert!(r7.contains("WAF Blocked"), "H1.7 WAF body içermeli: {r7}");
+
+        // 1.8 force_https -> 301 Moved Permanently (HTTP isteğinde)
+        let r8 = run_request(
+            &state,
+            false,
+            "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r8.starts_with("HTTP/1.1 301 Moved Permanently"), "H1.8 301 olmalı: {r8}");
+        assert!(r8.contains("Location: https://kart5.test/sayfa.html"), "H1.8 redirect header olmalı: {r8}");
+
+        // -------------------------------------------------------------
+        // KISIM 2: HTTP/2 İstek Hattı Güvenlik Denetimleri (Gerçek h2 Client)
+        // -------------------------------------------------------------
+
+        async fn make_h2_client(
+            state: &Arc<ServerState>,
+            peer: SocketAddr,
+            is_https: bool,
+        ) -> (h2::client::SendRequest<bytes::Bytes>, tokio::task::JoinHandle<()>) {
+            let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+            let st = Arc::clone(state);
+            let port = if is_https { 443 } else { 80 };
+            let srv_task = tokio::spawn(async move {
+                let _ = h2_engine::handle_h2_connection(server_io, peer, st, is_https, port, None).await;
+            });
+            let (client, h2_conn) = h2::client::handshake(client_io)
+                .await
+                .expect("h2 client handshake");
+            let conn_task = tokio::spawn(async move {
+                let _ = h2_conn.await;
+            });
+            let wait_task = tokio::spawn(async move {
+                let _ = srv_task.await;
+                let _ = conn_task.await;
+            });
+            (client, wait_task)
+        }
+
+        let loopback_peer: SocketAddr = "127.0.0.1:51234".parse().unwrap();
+
+        // 2.1 HTTP/2 Yabancı Referer -> 403 Forbidden (Hotlink Protection)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .header("referer", "http://saldirgan.com/sayfa")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "H2.1 403 olmalı");
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            let body_str = String::from_utf8_lossy(&body_buf);
+            assert!(body_str.contains("Hotlink Protection"), "H2.1 hotlink body içermeli: {body_str}");
+        }
+
+        // 2.2 HTTP/2 Boş Referer -> 200 OK
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.2 200 olmalı");
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf, b"RESIM_ICERIK_PNG_12345", "H2.2 içerik eşleşmeli");
+        }
+
+        // 2.3 HTTP/2 İzinli Referer -> 200 OK
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .header("referer", "https://kart5.test/sayfa.html")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.3 200 olmalı");
+        }
+
+        // 2.4 HTTP/2 Joker İzinli Referer (*.kart5.test) -> 200 OK
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .header("referer", "https://sub.kart5.test/galeri")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.4 200 olmalı");
+        }
+
+        // 2.5 HTTP/2 Korunmayan Uzantı (HTML) -> 200 OK (Yabancı Referer olsa dahi)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/sayfa.html")
+                .header("host", "kart5.test")
+                .header("referer", "http://saldirgan.com/")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.5 200 olmalı");
+        }
+
+        // 2.6 HTTP/2 Deny CIDR IP -> 403 Forbidden (IP Access Denied)
+        {
+            let (mut client, _task) = make_h2_client(&state, peer_denied, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/sayfa.html")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "H2.6 403 olmalı");
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            let body_str = String::from_utf8_lossy(&body_buf);
+            assert!(body_str.contains("IP Access Denied"), "H2.6 ACL body içermeli: {body_str}");
+        }
+
+        // 2.7 HTTP/2 WAF SQLi Engeli -> 403 Forbidden (WAF Blocked)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/sayfa.html?q=union+select+1")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN, "H2.7 403 olmalı");
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            let body_str = String::from_utf8_lossy(&body_buf);
+            assert!(body_str.contains("WAF Blocked"), "H2.7 WAF body içermeli: {body_str}");
+        }
+
+        // 2.8 HTTP/2 force_https -> 301 Moved Permanently (HTTP üzerinden geldiğinde)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, false).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("http://kart5.test/sayfa.html")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::MOVED_PERMANENTLY, "H2.8 301 olmalı");
+            let loc = resp.headers().get("location").unwrap().to_str().unwrap();
+            assert_eq!(loc, "https://kart5.test/sayfa.html", "H2.8 location başlığı eşleşmeli");
         }
 
         let _ = std::fs::remove_dir_all(&state.base_dir);

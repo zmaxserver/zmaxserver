@@ -58,8 +58,10 @@ pub struct ResolvedVHostContext {
     pub vhost_aliases: Vec<String>,
     pub force_https: bool,
     pub hotlink_protection: bool,
+    pub hotlink_config: zmax_config::HotlinkConfig,
     pub global_acl: IpAccessList,
     pub vhost_acl: IpAccessList,
+    pub vhost_acl_engine: zmax_security::VhostAcl,
     pub rewrite_enabled: bool,
     pub rewrite_try_files: bool,
     pub rewrite_htaccess: bool,
@@ -245,11 +247,16 @@ where
                     vhost_name: vh.entry.name.clone(),
                     vhost_aliases: vh.entry.aliases.clone(),
                     force_https: vh.entry.security.force_https,
-                    hotlink_protection: vh.entry.security.hotlink_protection,
+                    hotlink_protection: vh.entry.effective_hotlink().enabled,
+                    hotlink_config: vh.entry.effective_hotlink(),
                     global_acl: global_acl.clone(),
                     vhost_acl: IpAccessList::new(
                         vh.entry.security.allow_ips.clone(),
                         vh.entry.security.deny_ips.clone(),
+                    ),
+                    vhost_acl_engine: zmax_security::VhostAcl::new(
+                        vh.entry.effective_acl().allow_ips,
+                        vh.entry.effective_acl().deny_ips,
                     ),
                     rewrite_enabled: vh.entry.rewrite.enabled && policies.rewrite_enabled,
                     rewrite_try_files: vh.entry.rewrite.try_files,
@@ -297,8 +304,10 @@ where
                 vhost_aliases: Vec::new(),
                 force_https: false,
                 hotlink_protection: false,
+                hotlink_config: zmax_config::HotlinkConfig::default(),
                 global_acl,
                 vhost_acl: IpAccessList::default(),
+                vhost_acl_engine: zmax_security::VhostAcl::default(),
                 rewrite_enabled: policies.rewrite_enabled,
                 rewrite_try_files: true,
                 rewrite_htaccess: policies.rewrite_htaccess,
@@ -999,19 +1008,13 @@ where
             path: static_path,
             query: effective_query,
         } => {
-            // [kart-5] hotlink ve ACL kontrolü
-            if vhost_ctx.hotlink_protection
-                && zmax_security::is_hotlink_blocked(
-                    vhost_ctx.hotlink_protection,
-                    &[],
-                    &[],
-                    extract_header(&req.headers, "referer"),
-                    &req.host,
-                    &vhost_ctx.vhost_name,
-                    &vhost_ctx.vhost_aliases,
-                    &static_path,
-                )
-            {
+            // [kart-5] hotlink kontrolü (vHost yapılandırmasından okunan listeler ve ortak boru hattı)
+            if crate::security_pipeline::is_request_hotlink_blocked(
+                &vhost_ctx,
+                extract_header(&req.headers, "referer"),
+                &req.host,
+                &static_path,
+            ) {
                 let err_body = b"403 Forbidden - Hotlink Protection";
                 write_http_response(
                     socket,
@@ -1022,7 +1025,7 @@ where
                     None,
                     is_head,
                     is_https,
-                    keep_alive,
+                    false,
                     keep_alive_timeout_sec,
                     sec_ref,
                     None,
@@ -3043,11 +3046,16 @@ pub async fn handle_h2_dispatched_request(
                 vhost_name: vh.entry.name.clone(),
                 vhost_aliases: vh.entry.aliases.clone(),
                 force_https: vh.entry.security.force_https,
-                hotlink_protection: vh.entry.security.hotlink_protection,
+                hotlink_protection: vh.entry.effective_hotlink().enabled,
+                hotlink_config: vh.entry.effective_hotlink(),
                 global_acl: global_acl.clone(),
                 vhost_acl: IpAccessList::new(
                     vh.entry.security.allow_ips.clone(),
                     vh.entry.security.deny_ips.clone(),
+                ),
+                vhost_acl_engine: zmax_security::VhostAcl::new(
+                    vh.entry.effective_acl().allow_ips,
+                    vh.entry.effective_acl().deny_ips,
                 ),
                 rewrite_enabled: vh.entry.rewrite.enabled && policies.rewrite_enabled,
                 rewrite_try_files: vh.entry.rewrite.try_files,
@@ -3089,8 +3097,10 @@ pub async fn handle_h2_dispatched_request(
                 vhost_aliases: Vec::new(),
                 force_https: false,
                 hotlink_protection: false,
+                hotlink_config: zmax_config::HotlinkConfig::default(),
                 global_acl,
                 vhost_acl: IpAccessList::default(),
+                vhost_acl_engine: zmax_security::VhostAcl::default(),
                 rewrite_enabled: policies.rewrite_enabled,
                 rewrite_try_files: true,
                 rewrite_htaccess: policies.rewrite_htaccess,
@@ -3142,55 +3152,76 @@ pub async fn handle_h2_dispatched_request(
         return Ok((421, headers, resp_body, log_meta));
     }
 
-    // 3. IP ACL Denetimi
+    // 3. Ortak Guvenlik Boru Hatti (BanManager, IP ACL, vHost WAF, WP BruteForce, force_https)
     let custom_dir = if vhost_ctx.error_docs.dir.trim().is_empty() {
         None
     } else {
         Some(Path::new(vhost_ctx.error_docs.dir.trim()))
     };
-    if !vhost_ctx.global_acl.is_allowed(real_ip) || !vhost_ctx.vhost_acl.is_allowed(real_ip) {
-        let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-        let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
-            handler
-                .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
-                .unwrap_or_else(|_| b"403 Forbidden - IP Access Denied\n".to_vec())
-        } else {
-            b"403 Forbidden - IP Access Denied\n".to_vec()
-        };
-        let headers = vec![
-            ("content-type".into(), "text/html; charset=utf-8".into()),
-            ("x-request-id".into(), req_id.to_string()),
-        ];
-        return Ok((403, headers, bytes::Bytes::from(body), log_meta));
-    }
 
-    // 4. WAF / Alan Adina Ozel WAF Politikasi
-    let vhost_waf_policy = zmax_security::VHostWafPolicy {
-        waf_enabled: vhost_ctx.waf_enabled,
-        exclude_paths: &vhost_ctx.waf_exclude_paths,
+    let https_port = {
+        let rt = state.runtime.read().await;
+        rt.config.listeners.https.port
     };
-    if let Err(violation) = policies.waf.inspector.inspect_with_policy(
+
+    let verdict = crate::security_pipeline::evaluate_request_security(
+        &vhost_ctx,
+        real_ip,
+        real_ip,
         &req.method,
         &req.path,
         &req.query,
+        effective_host,
         &req.headers,
         &req.body,
-        &vhost_waf_policy,
-    ) {
-        let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-        let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
-            handler
-                .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
-                .unwrap_or_else(|_| b"403 Forbidden - WAF Blocked\n".to_vec())
-        } else {
-            b"403 Forbidden - WAF Blocked\n".to_vec()
-        };
-        let headers = vec![
-            ("content-type".into(), "text/html; charset=utf-8".into()),
-            ("x-waf-violation".into(), violation.to_string()),
-            ("x-request-id".into(), req_id.to_string()),
-        ];
-        return Ok((403, headers, bytes::Bytes::from(body), log_meta));
+        is_https,
+        https_port,
+        &state.ban_manager,
+        &policies.waf.inspector,
+        &state.wp_guard,
+        policies.waf.wp_brute_force_enabled,
+    );
+
+    match verdict {
+        crate::security_pipeline::SecurityVerdict::Blocked { reason } => {
+            let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
+            let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
+                handler
+                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                    .unwrap_or_else(|_| format!("{}\n", reason).into_bytes())
+            } else {
+                format!("{}\n", reason).into_bytes()
+            };
+            let headers = vec![
+                ("content-type".into(), "text/html; charset=utf-8".into()),
+                ("x-request-id".into(), req_id.to_string()),
+            ];
+            return Ok((403, headers, bytes::Bytes::from(body), log_meta));
+        }
+        crate::security_pipeline::SecurityVerdict::WafBlocked { violation } => {
+            let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
+            let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
+                handler
+                    .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                    .unwrap_or_else(|_| b"403 Forbidden - WAF Blocked\n".to_vec())
+            } else {
+                b"403 Forbidden - WAF Blocked\n".to_vec()
+            };
+            let headers = vec![
+                ("content-type".into(), "text/html; charset=utf-8".into()),
+                ("x-waf-violation".into(), violation),
+                ("x-request-id".into(), req_id.to_string()),
+            ];
+            return Ok((403, headers, bytes::Bytes::from(body), log_meta));
+        }
+        crate::security_pipeline::SecurityVerdict::RedirectHttps { location } => {
+            let headers = vec![
+                ("location".into(), location),
+                ("x-request-id".into(), req_id.to_string()),
+            ];
+            return Ok((301, headers, bytes::Bytes::new(), log_meta));
+        }
+        crate::security_pipeline::SecurityVerdict::Allowed => {}
     }
 
     // 5. Rewrite & .htaccess Cozumleme
@@ -3321,6 +3352,32 @@ pub async fn handle_h2_dispatched_request(
     let resolved = static_handler.resolve_with_index(&effective_path, &vhost_ctx.index_files);
     match resolved {
         Some(info) => {
+            // [kart-5] HTTP/2 Hotlink Korumasi Denetimi
+            let referer_hdr = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+                .map(|(_, v)| v.as_str());
+            if crate::security_pipeline::is_request_hotlink_blocked(
+                &vhost_ctx,
+                referer_hdr,
+                effective_host,
+                &effective_path,
+            ) {
+                let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
+                    static_handler
+                        .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
+                        .unwrap_or_else(|_| b"403 Forbidden - Hotlink Protection\n".to_vec())
+                } else {
+                    b"403 Forbidden - Hotlink Protection\n".to_vec()
+                };
+                let headers = vec![
+                    ("content-type".into(), "text/html; charset=utf-8".into()),
+                    ("x-request-id".into(), req_id.to_string()),
+                ];
+                return Ok((403, headers, bytes::Bytes::from(body), log_meta));
+            }
+
             // [kart-2] HTTP/2 If-None-Match kontrolu -> 304 Not Modified
             if vhost_ctx.etag_enabled && check_if_none_match(&req.headers, &info.etag) {
                 let mut headers = vec![
