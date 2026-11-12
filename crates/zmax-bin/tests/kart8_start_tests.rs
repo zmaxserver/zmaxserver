@@ -400,3 +400,30 @@ fn kart8_start_with_user_group_prepares_private_tmp_under_root() {
     );
     drop(guard);
 }
+
+/// Yetki düşürme öncesi `acme`/`ssl` dizini oluşturulamazsa hata artık yutulmaz: sunucu açıklayıcı
+/// bir hata ile başlamayı reddeder (önceden `let _ = create_dir_all(..)` ile sessizce geçiliyordu).
+#[test]
+fn kart8_start_fails_when_acme_dir_cannot_be_created() {
+    #[cfg(unix)]
+    // SAFETY: `geteuid` salt-okunur POSIX sorgusudur.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let root = new_root("acmefail");
+    let ports = TestPorts::pick_unique();
+    fs::write(
+        root.join("conf").join("zmax.toml"),
+        minimal_conf(ports, "user = \"nobody\"\ngroup = \"nobody\""),
+    )
+    .unwrap();
+    // `acme` yolu dizin yerine normal dosya: create_dir_all başarısız olur.
+    fs::write(root.join("acme"), b"dosya").unwrap();
+    let err = spawn_zmax(&root)
+        .err()
+        .expect("acme dizini oluşturulamadığında sunucu başlamamalıydı");
+    assert!(
+        err.contains("dizin oluşturulamadı") && err.contains("acme"),
+        "beklenen açıklayıcı hata yok: {err}"
+    );
+}

@@ -4675,9 +4675,13 @@ mod kart8_tests {
             elapsed >= Duration::from_millis(350),
             "politika süresinden önce kesildi: {elapsed:?}"
         );
+        // Zaman ölçümüne (yük altında oynak) değil, bağlantıya UYGULANAN değere bakılır: havuz hata metni
+        // `tokio::time::timeout`a verilen süreyi taşır.
+        let log = std::fs::read_to_string(state.base_dir.join("logs").join("error.log"))
+            .unwrap_or_default();
         assert!(
-            elapsed < Duration::from_millis(1500),
-            "politika dial_timeout_ms=400 uygulanmadı (vhost varsayılanı kazandı): {elapsed:?}"
+            log.contains("baglanti zaman asimi (400 ms)"),
+            "politika dial_timeout_ms=400 bağlantıya uygulanmadı; hata günlüğü: {log}"
         );
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
@@ -4721,9 +4725,11 @@ mod kart8_tests {
             elapsed >= Duration::from_millis(800),
             "vhost değeri (900 ms) uygulanmadı, politika kazandı: {elapsed:?}"
         );
+        let log = std::fs::read_to_string(state.base_dir.join("logs").join("error.log"))
+            .unwrap_or_default();
         assert!(
-            elapsed < Duration::from_millis(1800),
-            "vhost zaman aşımı çok geç: {elapsed:?}"
+            log.contains("baglanti zaman asimi (900 ms)"),
+            "vhost dial_timeout_ms=900 bağlantıya uygulanmadı; hata günlüğü: {log}"
         );
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
