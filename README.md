@@ -13,8 +13,8 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 İlk sürüm kapsamı 13 iş kaleminden oluşuyor. Her kalem kodlandıktan sonra bağımsız denetimden ve testlerden geçiyor.
 
 ```
-Tamamlandı ve test edildi   ███████████░░░░░░░░░  %62
-İnceleme aşamasında         ████░░░░░░░░░░░░░░░░  %23
+Tamamlandı ve test edildi   ████████████░░░░░░░░  %69
+İnceleme aşamasında         ███░░░░░░░░░░░░░░░░░  %16
 Sırada                      ███░░░░░░░░░░░░░░░░░  %15
 ```
 
@@ -27,7 +27,8 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 - ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
 - HTTP/1.1 ve HTTP/2 aynı güvenlik denetim hattından geçiyor (`[vhost.acl]` dahil).
 - Ters vekil güvenlik incelemesinden geçti: HTTP istek kaçırma (smuggling) kapatıldı, HTTP/2 yanıtları akıtılıyor, bağlantı ve WebSocket zaman aşımları çalışıyor.
-- Basic Auth ve ayrıcalık düşürme güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
+- Ayrıcalık düşürme (root olmayan kullanıcıya geçiş), TLS anahtar izni, PHP bağlantı zaman aşımı ve ACME dizin hataları düzeltildi; gerçek Linux sunucuda doğrulama sürüyor.
+- Basic Auth güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
 
 ### Bileşen durumu
 
@@ -45,7 +46,8 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | FastCGI / PHP (temel) | Tamamlandı |
 | Ters vekil (reverse proxy): HTTP/1.1 ve HTTP/2, WebSocket, SSE | Tamamlandı |
 | Basic Auth, WAF olay günlüğü | İncelemede |
-| FastCGI havuzu, `sendfile`, ayrıcalık düşürme | İncelemede |
+| Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (Linux sunucuda doğrulanacak) |
+| FastCGI havuzu, `sendfile` | İncelemede |
 | OpenLiteSpeed ile yan yana denklik testleri | Sırada |
 | Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Sırada |
 
