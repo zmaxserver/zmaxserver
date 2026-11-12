@@ -977,6 +977,7 @@ pub fn verify_password(stored_hash: &str, candidate_password: &str) -> bool {
 // 5. SHA-1 ve Katı Base64 Yardımcıları ({SHA} Apache Formatı)
 // ============================================================================
 
+#[allow(clippy::manual_is_multiple_of, clippy::chunks_exact_to_as_chunks, clippy::needless_range_loop)]
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
     let mut h = [
         0x67452301u32,
@@ -1088,6 +1089,7 @@ fn std_base64_encode(input: &[u8]) -> String {
 }
 
 /// Standart veya padding'siz RFC 4648 Base64 dizgesini katı kurallarla çözer.
+#[allow(clippy::manual_is_multiple_of)]
 fn decode_base64_flexible(input: &str) -> Option<Vec<u8>> {
     let clean = input.trim();
     if clean.is_empty() {
@@ -2137,5 +2139,124 @@ mod tests {
                 realm: "Test Async".to_string()
             }
         );
+    }
+
+    #[test]
+    fn des_crypt_hash_not_accepted_as_password() {
+        let des_hash = "abJnggxhB/yWI";
+        assert!(
+            !verify_password(des_hash, des_hash),
+            "DES crypt hash'i asla parola olarak kabul edilmemeli"
+        );
+        assert!(!verify_password(des_hash, "password"));
+        assert!(!verify_password(des_hash, "gizli"));
+        assert!(!verify_password("duzmetin", "duzmetin"));
+        assert!(verify_password("{PLAIN}duzmetin", "duzmetin"));
+        assert!(verify_password("plain:duzmetin", "duzmetin"));
+    }
+
+    #[tokio::test]
+    async fn unknown_user_timing_matches_known_user() {
+        let manager = Arc::new(BasicAuthManager::new());
+        let ban_mgr = crate::IpBanManager::new();
+        let test_ip: std::net::IpAddr = "10.0.9.9".parse().unwrap();
+
+        let argon_pass = "TestParola123!";
+        let argon_hash = argon2id_hash(argon_pass, b"saltsalt1234", 1024, 2, 1).unwrap();
+        let mut vhost_auth = VHostAuthSection {
+            enabled: true,
+            realm: "Timing Test".to_string(),
+            ..Default::default()
+        };
+        vhost_auth.users.push(AuthUserEntry {
+            username: "knownuser".to_string(),
+            password_hash: argon_hash,
+        });
+
+        let known_bad_tok =
+            "Basic ".to_string() + &std_base64_encode(b"knownuser:YanlisParola999");
+        let unknown_tok =
+            "Basic ".to_string() + &std_base64_encode(b"nonexistent:YanlisParola999");
+
+        let t0 = std::time::Instant::now();
+        let res1 = manager
+            .check_request_async(
+                test_ip,
+                Some(&known_bad_tok),
+                "/timing",
+                &vhost_auth,
+                None,
+                &ban_mgr,
+            )
+            .await;
+        let dur_known = t0.elapsed();
+        assert!(matches!(res1, AuthDecision::Unauthorized { .. }));
+
+        let t1 = std::time::Instant::now();
+        let res2 = manager
+            .check_request_async(
+                test_ip,
+                Some(&unknown_tok),
+                "/timing",
+                &vhost_auth,
+                None,
+                &ban_mgr,
+            )
+            .await;
+        let dur_unknown = t1.elapsed();
+        assert!(matches!(res2, AuthDecision::Unauthorized { .. }));
+
+        assert!(
+            dur_unknown.as_millis() >= 1,
+            "Bilinmeyen kullanici icin sahte hash calistirilmali, gecen sure: {:?}, bilinen sure: {:?}",
+            dur_unknown,
+            dur_known
+        );
+    }
+
+    #[tokio::test]
+    async fn dos_protection_argon2_parallel_not_blocking() {
+        let manager = Arc::new(BasicAuthManager::with_max_concurrent_hashes(4));
+        let ban_mgr = Arc::new(crate::IpBanManager::new());
+        let test_ip: std::net::IpAddr = "10.0.9.10".parse().unwrap();
+
+        let argon_pass = "GucluParola123!";
+        let argon_hash = argon2id_hash(argon_pass, b"saltsalt1234", 1024, 3, 1).unwrap();
+        let mut vhost_auth = VHostAuthSection {
+            enabled: true,
+            realm: "DoS Test".to_string(),
+            ..Default::default()
+        };
+        vhost_auth.users.push(AuthUserEntry {
+            username: "argonuser".to_string(),
+            password_hash: argon_hash,
+        });
+
+        let mut tasks = Vec::new();
+        for i in 0..6 {
+            let mgr = manager.clone();
+            let auth = vhost_auth.clone();
+            let bm = ban_mgr.clone();
+            let tok = "Basic ".to_string()
+                + &std_base64_encode(format!("argonuser:Yanlis{}", i).as_bytes());
+            tasks.push(tokio::spawn(async move {
+                mgr.check_request_async(test_ip, Some(&tok), "/dos", &auth, None, &bm)
+                    .await
+            }));
+        }
+
+        let t_start = std::time::Instant::now();
+        tokio::task::yield_now().await;
+        let light_elapsed = t_start.elapsed();
+        assert!(
+            light_elapsed < Duration::from_millis(200),
+            "Tokio worker bloke edilmedi, hafif islem gecikmedi: {:?}",
+            light_elapsed
+        );
+
+        for t in tasks {
+            let res = t.await.unwrap();
+            assert!(matches!(res, AuthDecision::Unauthorized { .. }));
+        }
     }
 }

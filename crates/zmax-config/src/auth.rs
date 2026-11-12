@@ -259,16 +259,22 @@ mod tests {
 
     #[test]
     fn test_auth_validation_rejects_traversal_and_header_injection() {
-        let mut bad_path = VHostAuthSection::default();
-        bad_path.htpasswd_path = Some("../../etc/shadow".to_string());
+        let bad_path = VHostAuthSection {
+            htpasswd_path: Some("../../etc/shadow".to_string()),
+            ..Default::default()
+        };
         assert!(bad_path.validate("vHost 'a'").is_err());
 
-        let mut bad_realm = VHostAuthSection::default();
-        bad_realm.realm = "Panel\r\nX-Inject: 1".to_string();
+        let bad_realm = VHostAuthSection {
+            realm: "Panel\r\nX-Inject: 1".to_string(),
+            ..Default::default()
+        };
         assert!(bad_realm.validate("vHost 'a'").is_err());
 
-        let mut bad_prefix = VHostAuthSection::default();
-        bad_prefix.path_prefix = Some("admin".to_string());
+        let bad_prefix = VHostAuthSection {
+            path_prefix: Some("admin".to_string()),
+            ..Default::default()
+        };
         assert!(bad_prefix.validate("vHost 'a'").is_err());
 
         let entry = AuthUserEntry::new("admin", "super_secret_hash_value");
