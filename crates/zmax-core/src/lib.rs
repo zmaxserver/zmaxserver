@@ -229,6 +229,83 @@ pub fn is_running_as_root() -> bool {
     false
 }
 
+/// Debian/Ubuntu'da `nobody` grubu yoktur (`nogroup` vardır); RHEL/Alma'da `nobody` vardır.
+#[cfg(any(unix, test))]
+const NOBODY_GROUP_FALLBACK: &str = "nogroup";
+
+/// Grup adını çözer; ad `nobody` ise ve yoksa `nogroup` yedeğini dener.
+/// İkisi de yoksa açık hata ve yönerge döner (sessiz geçme yok).
+#[cfg(any(unix, test))]
+fn resolve_group_gid<G>(group: &str, lookup_gid: G) -> Result<u32, String>
+where
+    G: Fn(&str) -> Result<u32, String>,
+{
+    match lookup_gid(group) {
+        Ok(gid) => Ok(gid),
+        Err(first) => {
+            if group == "nobody" {
+                if let Ok(gid) = lookup_gid(NOBODY_GROUP_FALLBACK) {
+                    tracing::info!(
+                        "'nobody' grubu bulunamadı; '{}' yedek grubu kullanılıyor",
+                        NOBODY_GROUP_FALLBACK
+                    );
+                    return Ok(gid);
+                }
+                return Err(format!(
+                    "{first} ('{NOBODY_GROUP_FALLBACK}' yedeği de yok): sistemde var olan bir hizmet grubunu                      server.group değerine yazın (Debian/Ubuntu: nogroup, RHEL/Alma: nobody)                      veya ayrı bir grup oluşturun (groupadd zmax)"
+                ));
+            }
+            Err(format!(
+                "{first}: server.group değerine sistemde var olan bir grup yazın veya grubu oluşturun (groupadd)"
+            ))
+        }
+    }
+}
+
+/// Yetki düşürme / sahiplik devri için hedef `(uid, gid)` çiftini çözer.
+///
+/// - kök değil: düşürülecek yetki yok; arama yapılmaz, `Ok(None)` (atla)
+/// - kök: kullanıcı ve grup mutlaka çözülmeli (`nobody` grubu yoksa `nogroup` yedeği);
+///   çözülemezse `Err` (fail-closed)
+///
+/// # Errors
+/// Kök iken kullanıcı veya grup sistemde bulunamazsa.
+#[cfg(any(unix, test))]
+fn resolve_service_ids<U, G>(
+    user: &str,
+    group: &str,
+    running_as_root: bool,
+    lookup_uid: U,
+    lookup_gid: G,
+) -> Result<Option<(u32, u32)>, String>
+where
+    U: Fn(&str) -> Result<u32, String>,
+    G: Fn(&str) -> Result<u32, String>,
+{
+    if !running_as_root {
+        return Ok(None);
+    }
+    let gid = resolve_group_gid(group, lookup_gid)?;
+    let uid = lookup_uid(user).map_err(|e| {
+        format!("{e}: server.user değerine sistemde var olan bir hizmet kullanıcısı yazın")
+    })?;
+    Ok(Some((uid, gid)))
+}
+
+#[cfg(unix)]
+fn lookup_gid_str(name: &str) -> Result<u32, String> {
+    let c = std::ffi::CString::new(name)
+        .map_err(|_| "Grup adında NUL karakteri bulunamaz".to_string())?;
+    lookup_gid_by_name(&c)
+}
+
+#[cfg(unix)]
+fn lookup_uid_str(name: &str) -> Result<u32, String> {
+    let c = std::ffi::CString::new(name)
+        .map_err(|_| "Kullanıcı adında NUL karakteri bulunamaz".to_string())?;
+    lookup_uid_by_name(&c)
+}
+
 /// `server.user` / `server.group` değerlerine göre yetki düşürme kararı.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegeDropPlan {
@@ -271,21 +348,23 @@ pub fn drop_privileges(user: &str, group: &str) -> Result<(), String> {
 
     let c_user = std::ffi::CString::new(user)
         .map_err(|_| "Kullanıcı adında NUL karakteri bulunamaz".to_string())?;
-    let c_group = std::ffi::CString::new(group)
-        .map_err(|_| "Grup adında NUL karakteri bulunamaz".to_string())?;
 
-    let gid = lookup_gid_by_name(&c_group)?;
-    let uid = lookup_uid_by_name(&c_user)?;
-
-    // Kök yetkisi olmayan ortamlarda (geliştirici testi vb.) kullanıcı/grup varlığı doğrulandıktan sonra güvenle atla
-    if !is_running_as_root() {
+    // Kök değilse düşürülecek yetki yok: hesap araması yapılmaz (ör. Debian'da 'nobody' grubu yok) ve atlanır.
+    let Some((uid, gid)) = resolve_service_ids(
+        user,
+        group,
+        is_running_as_root(),
+        lookup_uid_str,
+        lookup_gid_str,
+    )?
+    else {
         tracing::info!(
             "Kök (root/euid=0) yetkisi bulunmadığından drop_privileges atlandı (user='{}', group='{}')",
             user,
             group
         );
         return Ok(());
-    }
+    };
 
     // 1. Önce root'tan miras kalan tüm ek grupları (supplementary groups) sıfırla.
     // SAFETY: Kök yetkisi (euid == 0) altındayken `setgroups(0, null)` ek grup listesini boşaltır.
@@ -557,22 +636,22 @@ pub fn ensure_paths_ownership<P: AsRef<std::path::Path>>(
 ) -> Result<(), String> {
     let user = validate_account_name("Kullanıcı", user)?;
     let group = validate_account_name("Grup", group)?;
-    let c_user = std::ffi::CString::new(user)
-        .map_err(|_| "Kullanıcı adında NUL karakteri bulunamaz".to_string())?;
-    let c_group = std::ffi::CString::new(group)
-        .map_err(|_| "Grup adında NUL karakteri bulunamaz".to_string())?;
 
-    let gid = lookup_gid_by_name(&c_group)?;
-    let uid = lookup_uid_by_name(&c_user)?;
-
-    if !is_running_as_root() {
+    let Some((uid, gid)) = resolve_service_ids(
+        user,
+        group,
+        is_running_as_root(),
+        lookup_uid_str,
+        lookup_gid_str,
+    )?
+    else {
         tracing::debug!(
             "Kök (root) yetkisi olmadığından ensure_paths_ownership atlandı (user='{}', group='{}')",
             user,
             group
         );
         return Ok(());
-    }
+    };
 
     for path in paths {
         let p = path.as_ref();
@@ -750,9 +829,7 @@ pub fn ensure_tls_keys_readable_by_group<P: AsRef<std::path::Path>>(
         return Ok(0);
     }
     let group = validate_account_name("Grup", group)?;
-    let c_group = std::ffi::CString::new(group)
-        .map_err(|_| "Grup adında NUL karakteri bulunamaz".to_string())?;
-    let gid = lookup_gid_by_name(&c_group)?;
+    let gid = resolve_group_gid(group, lookup_gid_str)?;
     apply_tls_group_read(gid, paths)
 }
 
@@ -1075,8 +1152,16 @@ mod tests {
 
         #[cfg(unix)]
         {
-            assert!(drop_privileges("zmax_nonexistent_user_99999", "nobody").is_err());
-            assert!(drop_privileges("nobody", "zmax_nonexistent_group_99999").is_err());
+            // Kök değilse düşürülecek yetki yok: hesap aranmaz, atlanır; kökken eksik hesap fail-closed hatadır.
+            let missing_is_err = is_running_as_root();
+            assert_eq!(
+                drop_privileges("zmax_nonexistent_user_99999", "nobody").is_err(),
+                missing_is_err
+            );
+            assert_eq!(
+                drop_privileges("nobody", "zmax_nonexistent_group_99999").is_err(),
+                missing_is_err
+            );
         }
 
         #[cfg(not(unix))]
@@ -1146,6 +1231,88 @@ mod tests {
             plan_privilege_drop("nobody", "nobody", false),
             Ok(PrivilegeDropPlan::Drop)
         );
+    }
+
+    /// Debian/Ubuntu benzeri: `nobody` grubu yok, `nogroup` var; `nobody` kullanıcısı var.
+    fn debian_uid(name: &str) -> Result<u32, String> {
+        if name == "nobody" {
+            Ok(65534)
+        } else {
+            Err(format!("Kullanıcı bulunamadı: '{name}'"))
+        }
+    }
+
+    fn debian_gid(name: &str) -> Result<u32, String> {
+        if name == "nogroup" {
+            Ok(65533)
+        } else {
+            Err(format!("Grup bulunamadı: '{name}'"))
+        }
+    }
+
+    #[test]
+    fn resolve_ids_non_root_missing_group_is_skipped() {
+        let none = |n: &str| Err::<u32, String>(format!("Grup bulunamadı: '{n}'"));
+        assert_eq!(
+            resolve_service_ids("nobody", "nobody", false, debian_uid, none),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_service_ids("yok", "yok", false, debian_uid, debian_gid),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn resolve_ids_root_nobody_missing_falls_back_to_nogroup() {
+        assert_eq!(
+            resolve_service_ids("nobody", "nobody", true, debian_uid, debian_gid),
+            Ok(Some((65534, 65533)))
+        );
+    }
+
+    #[test]
+    fn resolve_ids_root_prefers_nobody_group_when_present() {
+        let gid = |n: &str| match n {
+            "nobody" => Ok(65534),
+            "nogroup" => Ok(65533),
+            _ => Err(format!("Grup bulunamadı: '{n}'")),
+        };
+        assert_eq!(
+            resolve_service_ids("nobody", "nobody", true, debian_uid, gid),
+            Ok(Some((65534, 65534)))
+        );
+    }
+
+    #[test]
+    fn resolve_ids_root_no_nobody_no_nogroup_is_error_with_guidance() {
+        let none = |n: &str| Err::<u32, String>(format!("Grup bulunamadı: '{n}'"));
+        let err = resolve_service_ids("nobody", "nobody", true, debian_uid, none)
+            .expect_err("kökken grup yoksa fail-closed olmalı");
+        assert!(err.contains("nobody") && err.contains("nogroup"), "{err}");
+        assert!(err.contains("server.group"), "{err}");
+    }
+
+    #[test]
+    fn resolve_ids_root_other_missing_group_or_user_is_error_with_guidance() {
+        let err = resolve_service_ids("nobody", "zmax", true, debian_uid, debian_gid)
+            .expect_err("nobody dışı eksik grup yedeksiz hata olmalı");
+        assert!(
+            err.contains("zmax") && err.contains("server.group"),
+            "{err}"
+        );
+        let err = resolve_service_ids("zmaxu", "nobody", true, debian_uid, debian_gid)
+            .expect_err("eksik kullanıcı kökken hata olmalı");
+        assert!(
+            err.contains("zmaxu") && err.contains("server.user"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolve_group_gid_falls_back_for_tls_path_too() {
+        assert_eq!(resolve_group_gid("nobody", debian_gid), Ok(65533));
+        assert!(resolve_group_gid("", debian_gid).is_err());
     }
 
     #[test]
