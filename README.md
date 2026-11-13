@@ -8,13 +8,13 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 
 ## İlerleme
 
-**Son güncelleme: 2026-11-13 · sürüm 1.0.02**
+**Son güncelleme: 2026-11-13 · sürüm 1.0.03**
 
-İlk sürüm kapsamı 13 iş kaleminden oluşuyor. Her kalem kodlandıktan sonra bağımsız denetimden ve testlerden geçiyor.
+İlerleme oranı, aşağıdaki bileşen tablosundaki 20 satırın durumundan hesaplanır. Her kalem kodlandıktan sonra incelemeden ve testlerden geçiyor.
 
 ```
-Tamamlandı ve test edildi   ██████████████░░░░░░  %77
-İnceleme aşamasında         ██░░░░░░░░░░░░░░░░░░  %8
+Tamamlandı ve test edildi   ████████████████░░░░  %80
+İnceleme aşamasında         █░░░░░░░░░░░░░░░░░░░  %5
 Sırada                      ███░░░░░░░░░░░░░░░░░  %15
 ```
 
@@ -46,10 +46,14 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | FastCGI / PHP (temel) | Tamamlandı |
 | Ters vekil (reverse proxy): HTTP/1.1 ve HTTP/2, WebSocket, SSE | Tamamlandı |
 | Basic Auth (apr1, Argon2id, brute-force koruması) | Tamamlandı |
-| WAF olay günlüğü | İncelemede |
+| WAF olay günlüğü (sızıntısız, token maskeleme, kuyruk taşması) | Tamamlandı |
+| Slowloris koruması (başlık ve gövde için mutlak son tarih) | Tamamlandı |
+| Statik 404, WordPress permalink, bilinmeyen host güvenliği, dizin listeleme koruması | Tamamlandı |
+| Yük altında reload, HTTP/2 çoklu akış, TLS 1.2/1.3, upstream toparlanma testleri | Tamamlandı |
 | Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (yerel Linux testinde doğrulandı) |
-| FastCGI havuzu, `sendfile` | İncelemede |
+| FastCGI havuzu, `sendfile` | İncelemede (`sendfile` Linux testinde doğrulandı, havuz yük testi sürüyor) |
 | OpenLiteSpeed ile yan yana denklik testleri | Sırada |
+| zPanel entegrasyonu (panelin vhost üretimi) | Sırada |
 | Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Sırada |
 
 ## Yönetim paneli
