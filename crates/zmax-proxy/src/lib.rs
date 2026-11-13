@@ -238,34 +238,24 @@ impl ReverseProxy {
             )?;
 
         let _ = upstream_stream.set_nodelay(true);
-        if let Err(e) = upstream_stream.write_all(&rewritten_head).await {
-            return Err(StreamForwardError {
-                error: ProxyError::Io(e),
-                headers_sent: false,
-                status: None,
-                body_bytes_sent: 0,
-            });
-        }
-        if !request_body.is_empty() {
-            if let Err(e) = upstream_stream.write_all(request_body).await {
-                return Err(StreamForwardError {
-                    error: ProxyError::Io(e),
-                    headers_sent: false,
-                    status: None,
-                    body_bytes_sent: 0,
-                });
-            }
-        }
-        if let Err(e) = upstream_stream.flush().await {
-            return Err(StreamForwardError {
-                error: ProxyError::Io(e),
-                headers_sent: false,
-                status: None,
-                body_bytes_sent: 0,
-            });
-        }
+        // Arka uc govdeyi okumadan erken yanit verip (or. 413) baglantiyi kapatabilir; yazarken yaniti da dinle.
+        let (early, request_fully_sent) =
+            match send_request_watching_response(upstream_stream, &rewritten_head, request_body)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(StreamForwardError {
+                        error: ProxyError::Io(e),
+                        headers_sent: false,
+                        status: None,
+                        body_bytes_sent: 0,
+                    })
+                }
+            };
 
-        let mut head_buf = Vec::with_capacity(4096);
+        let mut head_buf = early;
+        head_buf.reserve(4096);
         let mut buf = [0u8; STREAM_BUF_BYTES];
         let header_deadline = tokio::time::Instant::now() + self.init_timeout;
 
@@ -351,7 +341,7 @@ impl ReverseProxy {
 
         let should_stream_unbuffered = !self.resp_buffer || head_info.is_sse;
         let idle_timeout = self.init_timeout;
-        let mut can_keep_alive = head_info.header_allows_keep_alive;
+        let mut can_keep_alive = head_info.header_allows_keep_alive && request_fully_sent;
         let body_allowed = !(is_head || head_info.status == 204 || head_info.status == 304);
 
         if !should_stream_unbuffered {
@@ -387,6 +377,7 @@ impl ReverseProxy {
                             body_bytes_sent: body_len,
                         });
                     }
+                    let upstream_ok = upstream_ok && request_fully_sent;
                     let client_keep = client_wants_keep_alive && upstream_ok;
                     return Ok(StreamForwardResult {
                         status: head_info.status,
@@ -669,22 +660,13 @@ impl ReverseProxy {
                 .ok_or_else(|| before_headers(ProxyError::BadRequest))?;
 
         let _ = upstream_stream.set_nodelay(true);
-        upstream_stream
-            .write_all(&rewritten_head)
-            .await
-            .map_err(|e| before_headers(ProxyError::Io(e)))?;
-        if !request_body.is_empty() {
-            upstream_stream
-                .write_all(request_body)
+        let (early, request_fully_sent) =
+            send_request_watching_response(upstream_stream, &rewritten_head, request_body)
                 .await
                 .map_err(|e| before_headers(ProxyError::Io(e)))?;
-        }
-        upstream_stream
-            .flush()
-            .await
-            .map_err(|e| before_headers(ProxyError::Io(e)))?;
 
-        let mut head_buf = Vec::with_capacity(4096);
+        let mut head_buf = early;
+        head_buf.reserve(4096);
         let mut buf = [0u8; STREAM_BUF_BYTES];
         let header_deadline = tokio::time::Instant::now() + self.init_timeout;
         let (header_end, head_info) = loop {
@@ -747,7 +729,7 @@ impl ReverseProxy {
             remaining: 0,
             pending,
             finished: false,
-            reusable: head_info.header_allows_keep_alive,
+            reusable: head_info.header_allows_keep_alive && request_fully_sent,
             idle_timeout: self.init_timeout,
         };
         match reader.framing {
@@ -1760,6 +1742,84 @@ where
     Ok(())
 }
 
+/// `HTTP/1.x 100 ...` ara yanit bloklarini atlayip kalan (nihai yanita ait) bayt var mi bakar.
+fn has_final_response_bytes(buf: &[u8]) -> bool {
+    let mut rest = buf;
+    loop {
+        if rest.starts_with(b"HTTP/1.1 100") || rest.starts_with(b"HTTP/1.0 100") {
+            match rest.windows(4).position(|w| w == b"\r\n\r\n") {
+                Some(p) => rest = &rest[p + 4..],
+                None => return false,
+            }
+        } else {
+            return !rest.is_empty();
+        }
+    }
+}
+
+/// Istek basini ve govdesini arka uca yazarken yaniti da dinler. Arka uc govdeyi okumadan erken yanit verip
+/// (or. 413 Payload Too Large) baglantiyi kapatirsa yazma kesilir ve o yanit dondurulur.
+/// Donus: (erken okunan yanit baytlari, istek tamamen yazildi mi). Istek tam yazilmadiysa soket yeniden kullanilamaz.
+/// Yanit hic alinamazsa ozgun yazma/okuma hatasi doner.
+async fn send_request_watching_response<S>(
+    stream: &mut S,
+    head: &[u8],
+    body: &[u8],
+) -> io::Result<(Vec<u8>, bool)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    let write = async {
+        wr.write_all(head).await?;
+        if !body.is_empty() {
+            wr.write_all(body).await?;
+        }
+        wr.flush().await
+    };
+    tokio::pin!(write);
+    let mut buf = [0u8; STREAM_BUF_BYTES];
+    let mut early: Vec<u8> = Vec::new();
+    let write_res = loop {
+        tokio::select! {
+            w = &mut write => break w,
+            r = rd.read(&mut buf) => match r {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Arka uc yanit gondermeden baglantiyi kapatti",
+                    ));
+                }
+                Ok(n) => {
+                    early.extend_from_slice(&buf[..n]);
+                    if has_final_response_bytes(&early) {
+                        return Ok((early, false));
+                    }
+                }
+                Err(e) => return Err(e),
+            },
+        }
+    };
+    match write_res {
+        Ok(()) => Ok((early, true)),
+        Err(e) => {
+            // Yazma koptu: arka uc yaniti kapanmadan once gondermis olabilir.
+            if let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_millis(500), rd.read(&mut buf)).await
+            {
+                if n > 0 {
+                    early.extend_from_slice(&buf[..n]);
+                }
+            }
+            if has_final_response_bytes(&early) {
+                Ok((early, false))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 async fn read_with_deadline(
     stream: &mut TcpStream,
     buf: &mut [u8],
@@ -2062,6 +2122,69 @@ where
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    /// Arka uc govdeyi okumadan 413 yazip kapatir: dar `duplex` tamponu yazimi deterministik tikar/koparir (OS'tan bagimsiz).
+    async fn early_413_peer(mut peer: tokio::io::DuplexStream) {
+        let mut head = [0u8; 64];
+        let _ = peer.read(&mut head).await;
+        let _ = peer
+            .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno")
+            .await;
+        drop(peer);
+    }
+
+    #[tokio::test]
+    async fn erken_yanit_yazma_koparsa_da_yanit_donulur_20_tekrar() {
+        let body = vec![b'x'; 1024 * 1024];
+        for i in 0..20 {
+            let (mut client, peer) = tokio::io::duplex(128);
+            tokio::spawn(early_413_peer(peer));
+            let (early, fully_sent) = send_request_watching_response(&mut client, b"POST / HTTP/1.1\r\n\r\n", &body)
+                .await
+                .unwrap_or_else(|e| panic!("tekrar {i}: yanit kaybedildi: {e}"));
+            assert!(!fully_sent, "istek tam yazilamadi, soket yeniden kullanilmamali");
+            assert!(early.starts_with(b"HTTP/1.1 413"), "tekrar {i}: {:?}", String::from_utf8_lossy(&early));
+        }
+    }
+
+    /// Negatif kontrol: eski davranis (yanit dinlemeden ardisik `write_all`) ayni senaryoda yaniti kaybeder.
+    #[tokio::test]
+    async fn eski_ardisik_yazma_ayni_senaryoda_hata_verir() {
+        let body = vec![b'x'; 1024 * 1024];
+        let (mut client, peer) = tokio::io::duplex(128);
+        tokio::spawn(early_413_peer(peer));
+        let r = async {
+            client.write_all(b"POST / HTTP/1.1\r\n\r\n").await?;
+            client.write_all(&body).await?;
+            client.flush().await
+        }
+        .await;
+        assert!(r.is_err(), "eski yazma yolu burada hata vermeli (-> 502)");
+    }
+
+    #[tokio::test]
+    async fn ara_100_continue_yaniti_yazmayi_kesmez() {
+        let body = vec![b'y'; 256 * 1024];
+        let (mut client, mut peer) = tokio::io::duplex(1024);
+        let total = body.len();
+        let t = tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let mut got = 0usize;
+            let _ = peer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+            while got < total {
+                match peer.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got += n,
+                }
+            }
+            got
+        });
+        let (early, fully_sent) =
+            send_request_watching_response(&mut client, b"", &body).await.unwrap();
+        assert!(fully_sent, "100 Continue istek yazimini kesmemeli");
+        assert!(has_final_response_bytes(&early) == false);
+        assert!(t.await.unwrap() >= total);
+    }
 
     #[tokio::test]
     async fn test_node_reverse_proxy_forwarding() {
