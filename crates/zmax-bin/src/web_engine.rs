@@ -246,11 +246,13 @@ where
     let is_head = req.method.eq_ignore_ascii_case("HEAD");
     let keep_alive = req.keep_alive;
 
-    let (policies, redis_client, vhost_ctx) = {
+    let (policies, redis_client, vhost_ctx, is_unknown_host) = {
         let rt = state.runtime.read().await;
         let policies = rt.policies.clone();
         let redis_client = rt.redis_client.clone();
         let vh_opt = match_vhost(&rt.vhosts, &req.host);
+        let is_unknown_host =
+            !rt.vhosts.is_empty() && !req.host.trim().is_empty() && vh_opt.is_none();
         let global_acl = IpAccessList::new(
             rt.config.security.allow_ips.clone(),
             rt.config.security.deny_ips.clone(),
@@ -401,7 +403,7 @@ where
                 ),
             },
         };
-        (policies, redis_client, ctx)
+        (policies, redis_client, ctx, is_unknown_host)
     };
 
     let real_ip: IpAddr = if policies.realip.enabled {
@@ -428,6 +430,45 @@ where
     } else {
         String::new()
     };
+
+    // [kart-12-a] Bilinmeyen Host: server_name eşleşmeyen istek için güvenli varsayılan 403 Forbidden
+    if is_unknown_host {
+        let err_body = b"403 Forbidden - Unknown Host\n";
+        write_http_response(
+            socket,
+            403,
+            "Forbidden",
+            &[
+                ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                ("Connection".into(), "close".into()),
+            ],
+            err_body,
+            Some(err_body.len()),
+            is_head,
+            is_https,
+            false,
+            0,
+            sec_ref,
+            None,
+        )
+        .await?;
+        record_and_log(
+            state,
+            &real_ip_str,
+            &req.method,
+            &req.path,
+            403,
+            started,
+            None,
+            if is_head { 0 } else { err_body.len() },
+            referer_hdr,
+            ua_hdr,
+            "HTTP/1.1",
+            &req_id,
+        )
+        .await;
+        return Ok(false);
+    }
 
     // [v1-1b] Ortak Guvenlik Boru Hatti (BanManager, Global/vHost ACL, vHost WAF, WP BruteForce, force_https)
     let verdict = crate::security_pipeline::evaluate_request_security(
@@ -3609,19 +3650,39 @@ where
     S: AsyncWrite + Unpin,
 {
     let body_bytes: Vec<u8> = if let Some(ctx) = vhost_ctx {
-        if let Some(rel_page) = ctx.error_docs.pages.get(&status) {
+        let rel_page_opt = ctx.error_docs.pages.get(&status).or_else(|| {
+            if status == 404 {
+                ctx.error_docs.not_found.as_ref()
+            } else {
+                None
+            }
+        });
+        if let Some(rel_page) = rel_page_opt {
             let custom_dir = if ctx.error_docs.dir.trim().is_empty() {
                 None
             } else {
                 Some(Path::new(ctx.error_docs.dir.trim()))
             };
             let handler = StaticFileHandler::new(&ctx.doc_root);
-            handler
+            let loaded = handler
                 .resolve_error_doc_file(&ctx.doc_root, custom_dir, rel_page)
-                .unwrap_or_else(|_| default_msg.to_vec())
+                .unwrap_or_else(|_| default_msg.to_vec());
+            if loaded.is_empty() {
+                if default_msg.is_empty() {
+                    format!("{} {}\n", status, reason).into_bytes()
+                } else {
+                    default_msg.to_vec()
+                }
+            } else {
+                loaded
+            }
+        } else if default_msg.is_empty() {
+            format!("{} {}\n", status, reason).into_bytes()
         } else {
             default_msg.to_vec()
         }
+    } else if default_msg.is_empty() {
+        format!("{} {}\n", status, reason).into_bytes()
     } else {
         default_msg.to_vec()
     };
@@ -3761,10 +3822,12 @@ pub async fn handle_h2_dispatched_request(
         host_header
     };
 
-    let (policies, vhost_ctx) = {
+    let (policies, vhost_ctx, is_unknown_host) = {
         let rt = state.runtime.read().await;
         let policies = rt.policies.clone();
         let vh_opt = match_vhost(&rt.vhosts, effective_host);
+        let is_unknown_host =
+            !rt.vhosts.is_empty() && !effective_host.trim().is_empty() && vh_opt.is_none();
         let global_acl = IpAccessList::new(
             rt.config.security.allow_ips.clone(),
             rt.config.security.deny_ips.clone(),
@@ -3888,7 +3951,7 @@ pub async fn handle_h2_dispatched_request(
                 ),
             },
         };
-        (policies, ctx)
+        (policies, ctx, is_unknown_host)
     };
 
     let log_meta = LogMeta {
@@ -3904,6 +3967,16 @@ pub async fn handle_h2_dispatched_request(
         also_write_global: vhost_ctx.logging.also_write_global,
         max_log_size_bytes: vhost_ctx.max_log_size_bytes,
     };
+
+    // [kart-12-a] Bilinmeyen Host: server_name eşleşmeyen istek için güvenli varsayılan 403 Forbidden
+    if is_unknown_host {
+        let resp_body = bytes::Bytes::from_static(b"403 Forbidden - Unknown Host\n");
+        let headers = vec![
+            ("content-type".into(), "text/plain; charset=utf-8".into()),
+            ("x-request-id".into(), req_id.to_string()),
+        ];
+        return Ok((403, headers, resp_body, log_meta));
+    }
 
     // 2. HTTP/2 Kapali vHost Denetimi
     if is_https && !vhost_ctx.tls_http2 {
@@ -4094,7 +4167,12 @@ pub async fn handle_h2_dispatched_request(
             }
             RouteOutcome::NotFound => {
                 let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-                let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&404) {
+                let rel_opt = vhost_ctx
+                    .error_docs
+                    .pages
+                    .get(&404)
+                    .or(vhost_ctx.error_docs.not_found.as_ref());
+                let body = if let Some(rel) = rel_opt {
                     handler
                         .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                         .unwrap_or_else(|_| b"404 Not Found\n".to_vec())
@@ -4279,7 +4357,12 @@ pub async fn handle_h2_dispatched_request(
             }
         }
         None => {
-            let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&404) {
+            let rel_opt = vhost_ctx
+                .error_docs
+                .pages
+                .get(&404)
+                .or(vhost_ctx.error_docs.not_found.as_ref());
+            let body = if let Some(rel) = rel_opt {
                 static_handler
                     .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                     .unwrap_or_else(|_| b"404 Not Found - ZMax Server\n".to_vec())

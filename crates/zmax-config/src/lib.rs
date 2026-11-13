@@ -538,8 +538,14 @@ impl VHostEntry {
         if !self.error_docs.enabled {
             return None;
         }
-        let raw_page = self.error_docs.pages.get(&status)?;
-        if !is_safe_relative_subpath(raw_page) {
+        let raw_page = self.error_docs.pages.get(&status).cloned().or_else(|| {
+            if status == 404 {
+                self.error_docs.not_found.clone()
+            } else {
+                None
+            }
+        })?;
+        if !is_safe_relative_subpath(&raw_page) {
             return None;
         }
         let page_rel = Path::new(raw_page.trim());
@@ -870,6 +876,8 @@ pub struct VHostErrorDocsSection {
     pub dir: String,
     #[serde(default, with = "serde_status_pages")]
     pub pages: std::collections::BTreeMap<u16, String>,
+    #[serde(default)]
+    pub not_found: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1576,6 +1584,7 @@ pub fn match_vhost<'a>(vhosts: &'a [LoadedVHost], host_header: &str) -> Option<&
         .to_ascii_lowercase();
 
     if !clean_host.is_empty() {
+        // 1. Önce doğrudan alan adı veya alias tam eşleşmesi ara
         if let Some(found) = vhosts.iter().find(|v| {
             v.entry.name.eq_ignore_ascii_case(&clean_host)
                 || v.entry
@@ -1585,6 +1594,19 @@ pub fn match_vhost<'a>(vhosts: &'a [LoadedVHost], host_header: &str) -> Option<&
         }) {
             return Some(found);
         }
+
+        // 2. Tam eşleşme yoksa catch-all (_ veya *) vHost ara
+        if let Some(catch_all) = vhosts.iter().find(|v| {
+            v.entry.name == "_"
+                || v.entry.name == "*"
+                || v.entry.aliases.iter().any(|a| a == "_" || a == "*")
+        }) {
+            return Some(catch_all);
+        }
+
+        // [kart-12-a] Tanımlı host başlığı hiçbir vHost veya catch-all kaydı ile eşleşmiyorsa,
+        // başka sitelerin içeriğini sızdırmamak için güvenli olarak None döner.
+        return None;
     }
 
     vhosts

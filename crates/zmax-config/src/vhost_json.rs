@@ -420,6 +420,9 @@ pub fn merge_vhost_json_patch(
     if let Some(v) = obj.get("error_docs_pages").or_else(|| obj.get("pages")) {
         entry.error_docs.pages = val_as_status_pages(v, "error_docs_pages")?;
     }
+    if let Some(v) = obj.get("error_docs_not_found").or_else(|| obj.get("not_found")) {
+        entry.error_docs.not_found = Some(val_as_str(v, "error_docs_not_found")?);
+    }
 
     // TLS
     if let Some(v) = obj.get("http2") {
@@ -495,6 +498,11 @@ pub fn merge_vhost_json_patch(
                 "Geçersiz error_docs.pages dosya yolu (kod {}): '{}'",
                 code, page_path
             ));
+        }
+    }
+    if let Some(ref nf) = entry.error_docs.not_found {
+        if has_parent_dir_traversal(nf) {
+            return Err(format!("Geçersiz error_docs.not_found dosya yolu: '{}'", nf));
         }
     }
 
@@ -732,6 +740,9 @@ pub fn format_vhost_entry_json(
         "error_docs_pages".to_string(),
         serde_json::json!(entry.error_docs.pages),
     );
+    if let Some(ref nf) = entry.error_docs.not_found {
+        root.insert("error_docs_not_found".to_string(), Value::String(nf.clone()));
+    }
 
     root.insert("http2".to_string(), Value::Bool(entry.tls.http2));
     root.insert("strict_sni".to_string(), Value::Bool(entry.tls.strict_sni));
@@ -855,6 +866,7 @@ pub fn vhost_entry_diff(a: &VHostEntry, b: &VHostEntry) -> Option<String> {
     if a.error_docs.enabled != b.error_docs.enabled
         || a.error_docs.dir != b.error_docs.dir
         || a.error_docs.pages != b.error_docs.pages
+        || a.error_docs.not_found != b.error_docs.not_found
     {
         return Some(format!(
             "error_docs: '{:?}' != '{:?}'",
