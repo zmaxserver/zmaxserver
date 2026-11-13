@@ -824,7 +824,8 @@ where
             (rt.vhosts.len(), rt.modules.len())
         };
         let json = format!(
-            r#"{{"ok":true,"status":"ok","engine":"zmax","version":"1.0.01","pid":{},"uptime_seconds":{},"vhosts":{},"modules":{}}}"#,
+            r#"{{"ok":true,"status":"ok","engine":"zmax","version":"{}","pid":{},"uptime_seconds":{},"vhosts":{},"modules":{}}}"#,
+            env!("ZMAX_VERSION"),
             std::process::id(),
             uptime_secs,
             vhosts_len,
@@ -905,7 +906,8 @@ where
         };
         let cfg = &rt.config;
         let json = format!(
-            r#"{{"ok":true,"running":true,"engine":"zmax","version":"1.0.01","pid":{},"uptime_seconds":{},"total_requests":{},"cache_hits":{},"cache_misses":{},"workers":{},"ram_mb":12,"vhosts_loaded":{},"active_sites":{},"modules_loaded":{},"banned_count":{},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"cache":{{"enabled":{},"memory_cache_mb":{},"default_ttl_seconds":{},"disk_enabled":{}}},"security":{{"rate_limit_enabled":{},"rate_limit_per_minute":{},"keep_alive_timeout_sec":{},"slowloris_header_timeout_sec":{},"max_body_size_mb":{}}},"vhosts_dir":"{}","config_path":"{}"}}"#,
+            r#"{{"ok":true,"running":true,"engine":"zmax","version":"{}","pid":{},"uptime_seconds":{},"total_requests":{},"cache_hits":{},"cache_misses":{},"workers":{},"ram_mb":12,"vhosts_loaded":{},"active_sites":{},"modules_loaded":{},"banned_count":{},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"cache":{{"enabled":{},"memory_cache_mb":{},"default_ttl_seconds":{},"disk_enabled":{}}},"security":{{"rate_limit_enabled":{},"rate_limit_per_minute":{},"keep_alive_timeout_sec":{},"slowloris_header_timeout_sec":{},"max_body_size_mb":{}}},"vhosts_dir":"{}","config_path":"{}"}}"#,
+            env!("ZMAX_VERSION"),
             std::process::id(),
             uptime_secs,
             total,

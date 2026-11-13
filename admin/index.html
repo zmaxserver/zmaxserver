@@ -165,7 +165,7 @@
                                 <div>
                                     <div class="welcome-title">{{ t('welcome_title') }}</div>
                                     <div class="welcome-meta">
-                                        panel.zmaxserver.local · <strong class="text-orange">ZMax Server v1.0.01</strong> · {{ t('card_uptime') }}: {{ formattedUptime }}
+                                        panel.zmaxserver.local · <strong class="text-orange">ZMax Server v{{ engineVersion }}</strong> · {{ t('card_uptime') }}: {{ formattedUptime }}
                                     </div>
                                 </div>
                             </div>
@@ -288,7 +288,7 @@
                                     <div class="info-kv-list">
                                         <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_hostname') }}</span> <strong>zmaxserver.local</strong></div>
                                         <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_ip_port') }}</span> <strong>{{ stats.listeners.http }}</strong></div>
-                                        <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v1.0.01 ({{ t('footer_engine') }})</strong></div>
+                                        <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v{{ engineVersion }} ({{ t('footer_engine') }})</strong></div>
                                     </div>
                                 </div>
                             </div>
@@ -762,7 +762,7 @@
             <!-- Sabit Alt Bilgi (Fixed Footer) -->
             <footer class="app-footer">
                 <div class="footer-left">
-                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v1.0.01</strong> <span class="d-none d-md-inline">({{ t('footer_enterprise') }})</span></span>
+                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v{{ engineVersion }}</strong> <span class="d-none d-md-inline">({{ t('footer_enterprise') }})</span></span>
                 </div>
                 <div class="footer-right">
                     <span class="footer-badge d-none d-lg-inline-flex">{{ t('footer_engine') }}</span>

@@ -235,7 +235,7 @@ fn parse_bind_addr(ip: &str, port: u16) -> Result<SocketAddr, String> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli_args();
     if cli.show_version {
-        println!("ZMax Server v1.0.01 (ZePanel Universal Engine)");
+        println!("ZMax Server v{} (ZePanel Universal Engine)", env!("ZMAX_VERSION"));
         return Ok(());
     }
 
@@ -302,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "{}",
-        zpoly!("  ⚡ ZMax Server v1.0.01 - ZePanel Universal Web Engine").as_str()
+        zpoly!(concat!("  ⚡ ZMax Server v", env!("ZMAX_VERSION"), " - ZePanel Universal Web Engine")).as_str()
     );
     println!(
         "{}",

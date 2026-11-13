@@ -108,7 +108,7 @@ pub type ServerConfig = ServerGlobalConfig;
 impl Default for ServerGlobalConfig {
     fn default() -> Self {
         Self {
-            server_name: "ZMax/1.0.01".to_string(),
+            server_name: concat!("ZMax/", env!("ZMAX_VERSION")).to_string(),
             user: "nobody".to_string(),
             group: "nobody".to_string(),
             tmp_dir: String::new(),
@@ -1981,7 +1981,7 @@ mod tests {
     fn test_parse_real_zmax_toml_schema() {
         let sample = r#"
 [server]
-server_name = "ZMax/1.0.01"
+server_name = "ZMax"
 workers = 4
 
 [listeners.http]

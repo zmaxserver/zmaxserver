@@ -92,6 +92,7 @@ createApp({
             mobileMenuOpen.value = false;
         };
 
+        const engineVersion = ref('…');
         const stats = ref({
             uptime_seconds: 0,
             total_requests: 0,
@@ -353,6 +354,7 @@ createApp({
                 ]);
 
                 if (statusData) {
+                    if (typeof statusData.version === 'string' && statusData.version) engineVersion.value = statusData.version;
                     if (typeof statusData.uptime_seconds === 'number') stats.value.uptime_seconds = statusData.uptime_seconds;
                     if (typeof statusData.total_requests === 'number') stats.value.total_requests = statusData.total_requests;
                     if (typeof statusData.cache_hits === 'number') stats.value.cache_hits = statusData.cache_hits;
@@ -629,6 +631,7 @@ createApp({
             toggleMobileMenu,
             closeMobileMenu,
             stats,
+            engineVersion,
             vhosts,
             filteredVhosts,
             modules,
