@@ -56,3 +56,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 [[test]]
 name = "kart12_statik_tests"
 path = "tests/kart12_statik_tests.rs"
+
+[[test]]
+name = "ols_protocol_resilience_tests"
+path = "tests/ols_protocol_resilience_tests.rs"
