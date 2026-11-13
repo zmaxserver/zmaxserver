@@ -569,6 +569,9 @@ pub async fn reload_runtime_state_with_alpn(
         rt.vhosts_dir = resolved_vhosts_dir;
     }
 
+    // [ek-dinleyici] ek dinleyicileri yeni yapılandırmayla uzlaştır (hata reload'u bozmaz; günlüğe yazılır)
+    let _ = crate::web_engine::reconcile_extra_listeners(state).await;
+
     Ok((vhost_count, alpn_protocols))
 }
 

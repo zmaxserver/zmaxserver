@@ -5,6 +5,7 @@
 mod cache_policy;
 mod cached_response;
 mod context;
+mod extra_listeners;
 mod http_write;
 #[cfg(test)]
 mod kart8_tests;
@@ -21,6 +22,7 @@ mod static_stream;
 
 pub use crate::api::ParsedHttpRequest;
 pub use context::ResolvedVHostContext;
+pub use extra_listeners::reconcile as reconcile_extra_listeners;
 pub use http_write::write_http_response;
 pub use pipeline_h1::handle_web_connection;
 pub use pipeline_h2::handle_h2_dispatched_request;

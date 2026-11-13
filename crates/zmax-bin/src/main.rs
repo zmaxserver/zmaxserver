@@ -168,7 +168,16 @@ fn collect_tls_key_paths(
         &config.listeners.admin.tls_cert,
         &config.listeners.api.tls_key,
         &config.listeners.api.tls_cert,
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        config
+            .listeners
+            .extra
+            .iter()
+            .filter_map(|e| e.ssl.as_ref())
+            .flat_map(|s| [&s.key, &s.cert]),
+    ) {
         if !raw.trim().is_empty() {
             paths.push(resolve_path(base_dir, raw));
         }
@@ -647,6 +656,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // [ek-dinleyici] [[listeners.extra]]: sabit arka uçlu TLS ters vekil dinleyicileri (fail-closed)
+    let extra_errors = web_engine::reconcile_extra_listeners(&state).await;
+    if !extra_errors.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, extra_errors.join("; ")).into());
     }
 
     #[cfg(unix)]
