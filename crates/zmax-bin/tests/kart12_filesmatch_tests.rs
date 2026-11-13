@@ -12,6 +12,33 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[derive(Clone, Copy)]
+struct TestPorts {
+    http: u16,
+    https: u16,
+    api: u16,
+    admin: u16,
+}
+
+impl TestPorts {
+    fn pick_unique() -> Self {
+        let mut ports = Vec::with_capacity(4);
+        let mut listeners = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("port baglanamadi");
+            ports.push(l.local_addr().expect("local_addr alinamadi").port());
+            listeners.push(l);
+        }
+        drop(listeners);
+        Self {
+            http: ports[0],
+            https: ports[1],
+            api: ports[2],
+            admin: ports[3],
+        }
+    }
+}
+
 struct ProcessAndDirGuard {
     child: Option<Child>,
     base_dir: PathBuf,
@@ -288,10 +315,11 @@ async fn send_http1_req(port: u16, host: &str, req: &str) -> (u16, Vec<(String, 
 
 #[tokio::test]
 async fn dot_env_blocked_403() {
-    let http_port = 21210;
-    let https_port = 21211;
-    let api_port = 21212;
-    let admin_port = 21213;
+    let ports = TestPorts::pick_unique();
+    let http_port = ports.http;
+    let https_port = ports.https;
+    let api_port = ports.api;
+    let admin_port = ports.admin;
 
     let workspace = create_temp_workspace("dotenv");
     write_test_certs(&workspace);
@@ -324,10 +352,11 @@ async fn dot_env_blocked_403() {
 
 #[tokio::test]
 async fn dot_git_blocked_403() {
-    let http_port = 21220;
-    let https_port = 21221;
-    let api_port = 21222;
-    let admin_port = 21223;
+    let ports = TestPorts::pick_unique();
+    let http_port = ports.http;
+    let https_port = ports.https;
+    let api_port = ports.api;
+    let admin_port = ports.admin;
 
     let workspace = create_temp_workspace("dotgit");
     write_test_certs(&workspace);
@@ -349,10 +378,11 @@ async fn dot_git_blocked_403() {
 
 #[tokio::test]
 async fn sql_extension_blocked_403() {
-    let http_port = 21230;
-    let https_port = 21231;
-    let api_port = 21232;
-    let admin_port = 21233;
+    let ports = TestPorts::pick_unique();
+    let http_port = ports.http;
+    let https_port = ports.https;
+    let api_port = ports.api;
+    let admin_port = ports.admin;
 
     let workspace = create_temp_workspace("sqlext");
     write_test_certs(&workspace);
@@ -388,10 +418,11 @@ async fn sql_extension_blocked_403() {
 
 #[tokio::test]
 async fn directory_listing_disabled_403() {
-    let http_port = 21240;
-    let https_port = 21241;
-    let api_port = 21242;
-    let admin_port = 21243;
+    let ports = TestPorts::pick_unique();
+    let http_port = ports.http;
+    let https_port = ports.https;
+    let api_port = ports.api;
+    let admin_port = ports.admin;
 
     let workspace = create_temp_workspace("dirlist");
     write_test_certs(&workspace);
@@ -415,10 +446,11 @@ async fn directory_listing_disabled_403() {
 
 #[tokio::test]
 async fn normal_file_served_200() {
-    let http_port = 21250;
-    let https_port = 21251;
-    let api_port = 21252;
-    let admin_port = 21253;
+    let ports = TestPorts::pick_unique();
+    let http_port = ports.http;
+    let https_port = ports.https;
+    let api_port = ports.api;
+    let admin_port = ports.admin;
 
     let workspace = create_temp_workspace("normal");
     write_test_certs(&workspace);
@@ -439,4 +471,44 @@ async fn normal_file_served_200() {
     let (status_idx, _, body_idx) = send_http1_req(http_port, "kart12.test", "GET / HTTP/1.1\r\n").await;
     assert_eq!(status_idx, 200, "Kok dizin index.html ile 200 OK donmeli");
     assert!(body_idx.contains("Hello from Kart12 index!"), "Index icerigi dogru donmeli");
+}
+
+#[tokio::test]
+async fn autoindex_rewrite_precedence_pretty_200() {
+    let ports = TestPorts::pick_unique();
+    let http_port = ports.http;
+    let https_port = ports.https;
+    let api_port = ports.api;
+    let admin_port = ports.admin;
+
+    let workspace = create_temp_workspace("pretty200");
+    let doc_root = workspace.join("www").join("kart12site");
+
+    // Fiziksel indekssiz pretty/ dizini oluştur
+    let pretty_dir = doc_root.join("pretty");
+    std::fs::create_dir_all(&pretty_dir).unwrap();
+    std::fs::write(pretty_dir.join("inner.txt"), "inner file").unwrap();
+
+    // .htaccess içinde rewrite kuralı: ^pretty/?$ -> /normal.html
+    let htaccess = "RewriteEngine On\nRewriteRule ^pretty/?$ /normal.html [L]\n";
+    std::fs::write(doc_root.join(".htaccess"), htaccess).unwrap();
+
+    write_test_certs(&workspace);
+    let conf_path = write_test_configs(&workspace, http_port, https_port, api_port, admin_port);
+
+    let child = spawn_zmax_and_wait_ready(&workspace, &conf_path);
+    let _guard = ProcessAndDirGuard {
+        child: Some(child),
+        base_dir: workspace.clone(),
+    };
+
+    // İndekssiz pretty/ dizinine istek: rewrite kuralı autoindex'ten önce çalışıp normal.html sunmalı (200 OK)
+    let (status, _, body) = send_http1_req(http_port, "kart12.test", "GET /pretty/ HTTP/1.1\r\n").await;
+    assert_eq!(status, 200, "Rewrite kurali autoindex 403 oncesinde calismali ve 200 OK donmeli");
+    assert!(body.contains("Normal HTML Content"), "normal.html icerigi sunulmali!");
+
+    // Slashsiz /pretty istegi de 200 OK donmeli
+    let (status2, _, body2) = send_http1_req(http_port, "kart12.test", "GET /pretty HTTP/1.1\r\n").await;
+    assert_eq!(status2, 200, "Rewrite kurali /pretty icin 200 OK donmeli");
+    assert!(body2.contains("Normal HTML Content"), "normal.html icerigi sunulmali!");
 }

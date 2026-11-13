@@ -6,14 +6,62 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const TEST_HTTP_PORT: u16 = 21020;
-const TEST_HTTPS_PORT: u16 = 21021;
-const TEST_API_PORT: u16 = 21022;
-const TEST_ADMIN_PORT: u16 = 21023;
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+#[derive(Debug)]
+struct NoVerify;
+
+impl ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+fn pick_unused_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("port baglanamadi");
+    let port = listener.local_addr().expect("local_addr alinamadi").port();
+    drop(listener);
+    port
+}
 
 struct ProcessAndDirGuard {
     child: Option<Child>,
@@ -58,7 +106,13 @@ fn write_test_certs(base_dir: &Path) {
     .unwrap();
 }
 
-fn write_test_configs(base_dir: &Path) -> PathBuf {
+fn write_test_configs(
+    base_dir: &Path,
+    http_port: u16,
+    https_port: u16,
+    api_port: u16,
+    admin_port: u16,
+) -> PathBuf {
     std::fs::write(base_dir.join("admin").join("index.html"), "ADMIN_OK").unwrap();
 
     let doc_root = base_dir.join("www").join("b5site");
@@ -80,9 +134,6 @@ ErrorDocument 403 /custom403.html
 
 RewriteEngine On
 
-RewriteCond %{HTTPS} off
-RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
-
 RewriteCond %{HTTP_HOST} ^www\.(.+)$ [NC]
 RewriteRule ^ https://%1%{REQUEST_URI} [L,R=301]
 "#;
@@ -98,27 +149,27 @@ workers = 2
 [listeners.http]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_HTTP_PORT}
+port = {http_port}
 reuse_port = false
 
 [listeners.https]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_HTTPS_PORT}
+port = {https_port}
 ssl = true
 alpn = ["h2", "http/1.1"]
 
 [listeners.api]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_API_PORT}
+port = {api_port}
 require_token = false
 token = ""
 
 [listeners.admin]
 enabled = true
 address = "127.0.0.1"
-port = {TEST_ADMIN_PORT}
+port = {admin_port}
 document_root = "admin"
 require_token = false
 token = ""
@@ -296,11 +347,73 @@ async fn send_http1_req(port: u16, host: &str, req: &str) -> (u16, Vec<(String, 
     (status, headers, body)
 }
 
+async fn send_h2_req(
+    port: u16,
+    host: &str,
+    path: &str,
+) -> (u16, Vec<(String, String)>, String) {
+    let tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .expect("HTTPS H2 TCP baglantisi saglanamadi");
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerify))
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let sni = ServerName::try_from(host.to_string()).unwrap();
+    let tls = connector.connect(sni, tcp).await.expect("TLS el sikisma");
+
+    let (mut client, conn) = h2::client::handshake(tls).await.expect("h2 handshake");
+    let conn_task = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let uri = format!("https://{}{}", host, path);
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("host", host)
+        .body(())
+        .unwrap();
+
+    let (resp_fut, _) = client.send_request(req, true).expect("send_request");
+    let resp = resp_fut.await.expect("response");
+    let status = resp.status().as_u16();
+
+    let mut headers = Vec::new();
+    for (k, v) in resp.headers() {
+        headers.push((k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string()));
+    }
+
+    let mut body_stream = resp.into_body();
+    let mut body_bytes = Vec::new();
+    while let Some(chunk) = body_stream.data().await {
+        let b = chunk.unwrap();
+        body_bytes.extend_from_slice(&b);
+        let _ = body_stream.flow_control().release_capacity(b.len());
+    }
+    drop(client);
+    conn_task.abort();
+
+    let body = String::from_utf8_lossy(&body_bytes).to_string();
+    (status, headers, body)
+}
+
 #[tokio::test]
 async fn test_ols_b5_htaccess_pipeline_http1_and_http2() {
+    let http_port = pick_unused_port();
+    let https_port = pick_unused_port();
+    let api_port = pick_unused_port();
+    let admin_port = pick_unused_port();
+
     let workspace = create_temp_workspace("b5_test");
     write_test_certs(&workspace);
-    let conf_path = write_test_configs(&workspace);
+    let conf_path = write_test_configs(&workspace, http_port, https_port, api_port, admin_port);
 
     let child = spawn_zmax_and_wait_ready(&workspace, &conf_path);
     let _guard = ProcessAndDirGuard {
@@ -308,56 +421,103 @@ async fn test_ols_b5_htaccess_pipeline_http1_and_http2() {
         base_dir: workspace.clone(),
     };
 
-    // 1. Normal statik dosya: 200 veya 301
-    let (status, _, _) =
-        send_http1_req(TEST_HTTP_PORT, "b5.test", "GET /public.txt HTTP/1.1\r\n").await;
-    assert!(
-        status == 200 || status == 301,
-        "public.txt 200 veya 301 olmali (status={})",
-        status
-    );
+    // --- HTTP/1.1 TESTLERİ ---
 
-    // 2. <FilesMatch "\.(secret|key|conf)$">: 403 Forbidden
-    let (status, _, body) =
-        send_http1_req(TEST_HTTP_PORT, "b5.test", "GET /config.secret HTTP/1.1\r\n").await;
-    assert_eq!(
-        status, 403,
-        "config.secret dosyasina FilesMatch 403 donmeli"
-    );
-    assert!(
-        body.contains("Custom 403") || body.contains("Forbidden"),
-        "ErrorDocument 403 ozel sayfasi sunulmali"
-    );
-
-    // 3. Options -Indexes: İndekssiz fiziksel dizine istek 403 Forbidden
-    let (status, _, body) =
-        send_http1_req(TEST_HTTP_PORT, "b5.test", "GET /secret_dir/ HTTP/1.1\r\n").await;
-    assert_eq!(
-        status, 403,
-        "secret_dir/ indeks dosyasiz dizinine Options -Indexes 403 donmeli"
-    );
-    assert!(
-        body.contains("Custom 403") || body.contains("Forbidden"),
-        "ErrorDocument 403 sayfasi sunulmali"
-    );
-
-    // 4. www.%1 yönlendirmesi
-    let (status, headers, _) = send_http1_req(
-        TEST_HTTP_PORT,
+    // 1. RewriteCond %{HTTP_HOST} ^www\.(.+)$ [NC] kuralı ve %1 geri başvurusu (TAM EŞİTLİK)
+    let (status_www, headers_www, _) = send_http1_req(
+        http_port,
         "www.b5.test",
         "GET /public.txt HTTP/1.1\r\n",
     )
     .await;
-    if status == 301 {
-        let loc = headers
-            .iter()
-            .find(|(k, _)| k == "location")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
-        assert!(
-            loc.contains("b5.test/public.txt"),
-            "www kaldirilip %1 kuraliyla b5.test'e yonlendirilmeli (Location={})",
-            loc
-        );
-    }
+    assert_eq!(status_www, 301, "www istekleri %1 kuraliyla 301 Moved Permanently donmeli");
+    let loc_www = headers_www
+        .iter()
+        .find(|(k, _)| k == "location")
+        .map(|(_, v)| v.as_str())
+        .expect("Location basligi bulunamadi");
+    assert_eq!(
+        loc_www, "https://b5.test/public.txt",
+        "RewriteCond %1 ile www basariyla kaldirilip tam olarak https://b5.test/public.txt hedefine yonlenmeli!"
+    );
+
+    // 2. Normal statik dosya erisimi (HTTP/1.1): 200 OK
+    let (status_pub, _, body_pub) = send_http1_req(
+        http_port,
+        "b5.test",
+        "GET /public.txt HTTP/1.1\r\n",
+    )
+    .await;
+    assert_eq!(status_pub, 200, "HTTP uzerinden normal statik dosya 200 OK donmeli");
+    assert!(
+        body_pub.contains("Public file content"),
+        "Statik dosya icerigi dogru donmeli"
+    );
+
+    // 3. <FilesMatch "\.(secret|key|conf)$">: 403 Forbidden ve ErrorDocument 403 ozel govdesi
+    let (status_sec, _, body_sec) =
+        send_http1_req(http_port, "b5.test", "GET /config.secret HTTP/1.1\r\n").await;
+    assert_eq!(
+        status_sec, 403,
+        "config.secret dosyasina FilesMatch 403 donmeli"
+    );
+    assert!(
+        body_sec.contains("Custom 403 Forbidden Page"),
+        "ErrorDocument 403 ozel sayfasi sunulmali, alinan: {}",
+        body_sec
+    );
+
+    // 4. Options -Indexes: Indekssiz fiziksel dizine istek 403 Forbidden ve ErrorDocument 403 ozel govdesi
+    let (status_dir, _, body_dir) =
+        send_http1_req(http_port, "b5.test", "GET /secret_dir/ HTTP/1.1\r\n").await;
+    assert_eq!(
+        status_dir, 403,
+        "secret_dir/ indeks dosyasiz dizinine Options -Indexes 403 donmeli"
+    );
+    assert!(
+        body_dir.contains("Custom 403 Forbidden Page"),
+        "Dizin listeleme engeli icin ErrorDocument 403 ozel sayfasi sunulmali, alinan: {}",
+        body_dir
+    );
+
+    // --- GERÇEK HTTP/2 TESTLERİ (h2::client ile HTTPS) ---
+
+    // 5. HTTP/2 uzerinden statik dosya erisimi -> 200 OK
+    let (h2_status_pub, _, h2_body_pub) = send_h2_req(https_port, "b5.test", "/public.txt").await;
+    assert_eq!(h2_status_pub, 200, "HTTP/2 statik dosya 200 OK donmeli");
+    assert!(
+        h2_body_pub.contains("Public file content"),
+        "HTTP/2 dosya icerigi dogru donmeli"
+    );
+
+    // 6. HTTP/2 <FilesMatch "\.(secret|key|conf)$">: 403 Forbidden ve ErrorDocument 403
+    let (h2_status_sec, _, h2_body_sec) = send_h2_req(https_port, "b5.test", "/config.secret").await;
+    assert_eq!(h2_status_sec, 403, "HTTP/2 FilesMatch 403 Forbidden donmeli");
+    assert!(
+        h2_body_sec.contains("Custom 403 Forbidden Page"),
+        "HTTP/2 ErrorDocument 403 ozel sayfasi sunulmali, alinan: {}",
+        h2_body_sec
+    );
+
+    // 7. HTTP/2 Options -Indexes: Indekssiz fiziksel dizine 403 Forbidden ve ErrorDocument 403
+    let (h2_status_dir, _, h2_body_dir) = send_h2_req(https_port, "b5.test", "/secret_dir/").await;
+    assert_eq!(h2_status_dir, 403, "HTTP/2 Options -Indexes 403 Forbidden donmeli");
+    assert!(
+        h2_body_dir.contains("Custom 403 Forbidden Page"),
+        "HTTP/2 ErrorDocument 403 ozel sayfasi sunulmali, alinan: {}",
+        h2_body_dir
+    );
+
+    // 8. HTTP/2 www.%1 yönlendirmesi -> 301 Moved Permanently ve tam Location esitligi
+    let (h2_status_www, h2_headers_www, _) = send_h2_req(https_port, "www.b5.test", "/public.txt").await;
+    assert_eq!(h2_status_www, 301, "HTTP/2 www istekleri %1 kuraliyla 301 donmeli");
+    let h2_loc_www = h2_headers_www
+        .iter()
+        .find(|(k, _)| k == "location")
+        .map(|(_, v)| v.as_str())
+        .expect("HTTP/2 Location basligi bulunamadi");
+    assert_eq!(
+        h2_loc_www, "https://b5.test/public.txt",
+        "HTTP/2 RewriteCond %1 ile www basariyla kaldirilip tam olarak https://b5.test/public.txt olmali!"
+    );
 }

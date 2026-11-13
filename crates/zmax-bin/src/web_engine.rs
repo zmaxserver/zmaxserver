@@ -92,6 +92,7 @@ pub struct ResolvedVHostContext {
     // [kart-8] FastCGI bağlantı zaman aşımı (milisaniye)
     pub php_dial_timeout_ms: u64,
     pub autoindex: bool,
+    pub block_dangerous_files: bool,
 }
 
 /// [kart-cache-1] Önbellek etiketlerine alan adı varyantlarını ve ham URI etiketlerini ekler.
@@ -345,6 +346,7 @@ where
                         policies.fastcgi.dial_timeout_ms,
                     ),
                     autoindex: vh.entry.static_files.autoindex,
+                    block_dangerous_files: vh.entry.security.block_dangerous_files,
                 }
             }
             None => ResolvedVHostContext {
@@ -402,6 +404,7 @@ where
                     policies.fastcgi.dial_timeout_ms,
                 ),
                 autoindex: policies.static_policy.directory_browsing,
+                block_dangerous_files: false,
             },
         };
         (policies, redis_client, ctx)
@@ -716,15 +719,17 @@ where
         php_enabled: vhost_ctx.php_enabled,
         try_files_enabled: vhost_ctx.rewrite_enabled && vhost_ctx.rewrite_try_files,
         autoindex: vhost_ctx.autoindex,
+        block_dangerous_files: vhost_ctx.block_dangerous_files,
     };
 
-    let (outcome, path_info) = if is_acme_challenge(&req.path) {
+    let (outcome, path_info, error_documents) = if is_acme_challenge(&req.path) {
         (
             RouteOutcome::StaticFile {
                 path: req.path.clone(),
                 query: req.query.clone(),
             },
             String::new(),
+            std::collections::BTreeMap::new(),
         )
     } else {
         let htaccess_resolver = if vhost_ctx.rewrite_enabled && vhost_ctx.rewrite_htaccess {
@@ -734,7 +739,7 @@ where
         };
         let resolution = RewriteEngine::new()
             .resolve_with_htaccess_info(&route_req, htaccess_resolver.htaccess());
-        (resolution.outcome, resolution.path_info)
+        (resolution.outcome, resolution.path_info, resolution.error_documents)
     };
 
     let wants_gzip = policies.gzip.enabled
@@ -779,19 +784,44 @@ where
             Ok(keep_alive)
         }
         RouteOutcome::Forbidden => {
-            let written_bytes = write_error_response(
-                socket,
-                403,
-                "Forbidden",
-                b"403 Forbidden",
-                Some(&vhost_ctx),
-                is_head,
-                is_https,
-                keep_alive,
-                keep_alive_timeout_sec,
-                sec_ref,
-            )
-            .await?;
+            let custom_err_body = if let Some(custom_err) = error_documents.get(&403) {
+                let clean = custom_err.trim_start_matches('/');
+                std::fs::read(vhost_ctx.doc_root.join(clean)).ok()
+            } else {
+                None
+            };
+            let written_bytes = if let Some(body_bytes) = custom_err_body {
+                write_http_response(
+                    socket,
+                    403,
+                    "Forbidden",
+                    &[("Content-Type".into(), "text/html; charset=utf-8".into())],
+                    &body_bytes,
+                    Some(body_bytes.len()),
+                    is_head,
+                    is_https,
+                    keep_alive,
+                    keep_alive_timeout_sec,
+                    sec_ref,
+                    None,
+                )
+                .await?;
+                body_bytes.len()
+            } else {
+                write_error_response(
+                    socket,
+                    403,
+                    "Forbidden",
+                    b"403 Forbidden",
+                    Some(&vhost_ctx),
+                    is_head,
+                    is_https,
+                    keep_alive,
+                    keep_alive_timeout_sec,
+                    sec_ref,
+                )
+                .await?
+            };
             record_and_log(
                 state,
                 &real_ip_str,
@@ -3844,6 +3874,7 @@ pub async fn handle_h2_dispatched_request(
                     policies.fastcgi.dial_timeout_ms,
                 ),
                 autoindex: vh.entry.static_files.autoindex,
+                block_dangerous_files: vh.entry.security.block_dangerous_files,
             },
             None => ResolvedVHostContext {
                 doc_root: state.base_dir.join("www").join("html"),
@@ -3892,6 +3923,7 @@ pub async fn handle_h2_dispatched_request(
                     policies.fastcgi.dial_timeout_ms,
                 ),
                 autoindex: policies.static_policy.directory_browsing,
+                block_dangerous_files: false,
             },
         };
         (policies, ctx)
@@ -4059,12 +4091,13 @@ pub async fn handle_h2_dispatched_request(
         php_enabled: vhost_ctx.php_enabled,
         try_files_enabled: vhost_ctx.rewrite_try_files,
         autoindex: vhost_ctx.autoindex,
+        block_dangerous_files: vhost_ctx.block_dangerous_files,
     };
     let (effective_path, is_php_route, eff_query) = if is_acme_challenge(&req.path) {
         (req.path.clone(), false, req.query.clone())
     } else {
-        let route_res = state.htaccess_resolver.resolve(&route_req);
-        match route_res {
+        let route_res = state.htaccess_resolver.resolve_with_info(&route_req);
+        match route_res.outcome {
             RouteOutcome::Redirect { status, location } => {
                 let headers = vec![
                     ("location".into(), location),
@@ -4076,7 +4109,11 @@ pub async fn handle_h2_dispatched_request(
             RouteOutcome::StaticFile { path, query } => (path, false, query),
             RouteOutcome::Forbidden => {
                 let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
-                let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
+                let body = if let Some(custom_err) = route_res.error_documents.get(&403) {
+                    let clean = custom_err.trim_start_matches('/');
+                    std::fs::read(vhost_ctx.doc_root.join(clean))
+                        .unwrap_or_else(|_| b"403 Forbidden\n".to_vec())
+                } else if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
                     handler
                         .resolve_error_doc_file(&vhost_ctx.doc_root, custom_dir, rel)
                         .unwrap_or_else(|_| b"403 Forbidden\n".to_vec())

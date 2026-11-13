@@ -718,8 +718,8 @@ pub struct VHostSecuritySection {
     pub wp_brute_force: bool,
     #[serde(default)]
     pub waf_exclude_paths: Vec<String>,
-    /// [kart-12-hazirlik-b] OLS B5 denkliği: .env, .git, wp-config, tehlikeli uzantılar koruması
-    #[serde(default = "default_true")]
+    /// [kart-12-hazirlik-b] OLS B5 denkliği: .env, .git, wp-config, tehlikeli uzantılar koruması (varsayılan kapalı)
+    #[serde(default)]
     pub block_dangerous_files: bool,
 }
 
@@ -733,7 +733,7 @@ impl Default for VHostSecuritySection {
             waf_enabled: None,
             wp_brute_force: true,
             waf_exclude_paths: Vec::new(),
-            block_dangerous_files: true,
+            block_dangerous_files: false,
         }
     }
 }

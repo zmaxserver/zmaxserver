@@ -48,66 +48,6 @@ pub enum SecurityVerdict {
     WafBlocked { violation: String },
 }
 
-/// [ols-b5] OLS B5 Denkliği ve WordPress koruması:
-/// `.env`, `.git`, `wp-config.php`, `xmlrpc.php`, `readme.html`, `license.txt`
-/// ve `\.(sql|bak|log|sh|swp)$` tehlikeli uzantılara sahip dosyalara erişim 403 döner.
-pub fn is_protected_or_dangerous_path(raw_path: &str) -> bool {
-    // ACME HTTP-01 doğrulama dizini her zaman muaf
-    if is_acme_challenge(raw_path) {
-        return false;
-    }
-
-    let clean = raw_path.split('?').next().unwrap_or(raw_path);
-    let trimmed = clean.trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // 1. Dizin segmentleri kontrolü
-    for seg in trimmed.split('/') {
-        if seg.is_empty() {
-            continue;
-        }
-        let seg_lower = seg.to_ascii_lowercase();
-        // .git dizini veya dosyaları (örn. .git, .gitignore, .git/config, .git/HEAD)
-        if seg_lower == ".git" || seg_lower.starts_with(".git/") || seg_lower == ".gitignore" {
-            return true;
-        }
-        // .env dosyaları (örn. .env, .env.local, .env.production)
-        if seg_lower == ".env" || seg_lower.starts_with(".env.") {
-            return true;
-        }
-        // .ht dosyaları (.htaccess, .htpasswd)
-        if seg_lower.starts_with(".ht") {
-            return true;
-        }
-    }
-
-    // 2. Dosya adı ve uzantı kontrolleri
-    let filename = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let filename_lower = filename.to_ascii_lowercase();
-
-    // Hassas WordPress / sistem dosyaları
-    if filename_lower == "wp-config.php"
-        || filename_lower == "xmlrpc.php"
-        || filename_lower == "readme.html"
-        || filename_lower == "license.txt"
-        || filename_lower == "licence.txt"
-    {
-        return true;
-    }
-
-    // Tehlikeli uzantılar: .(sql|bak|log|sh|swp)
-    if let Some((_, ext)) = filename_lower.rsplit_once('.') {
-        match ext {
-            "sql" | "bak" | "log" | "sh" | "swp" => return true,
-            _ => {}
-        }
-    }
-
-    false
-}
-
 /// HTTP/1.1 ve HTTP/2 boru hatlarında istek gövdesi işlenmeden ÖNCE çalıştırılan ortak güvenlik kapısı.
 pub fn evaluate_request_security(
     vhost_ctx: &ResolvedVHostContext,
@@ -126,8 +66,8 @@ pub fn evaluate_request_security(
     wp_guard: &WpBruteForceGuard,
     wp_brute_force_enabled: bool,
 ) -> SecurityVerdict {
-    // 0. OLS B5 Denkliği: Korunan hassas kaynaklar, gizli dizinler (.git, .env) ve tehlikeli uzantılar
-    if is_protected_or_dangerous_path(path) {
+    // 0. OLS B5 Denkliği: Korunan hassas kaynaklar, gizli dizinler (.git, .env) ve vhost yapılandırmasına göre tehlikeli dosyalar
+    if zmax_rewrite::is_protected_or_dangerous_path(path, vhost_ctx.block_dangerous_files) {
         return SecurityVerdict::Blocked {
             reason: "403 Forbidden - Protected Resource",
         };
