@@ -93,6 +93,13 @@ createApp({
         };
 
         const engineVersion = ref('…');
+        // Sürüm bilgisi token istemeyen genel uçtan gelir; hata olursa '…' kalır.
+        fetch('api/version')
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+                if (d && typeof d.version === 'string' && d.version) engineVersion.value = d.version;
+            })
+            .catch(() => {});
         const stats = ref({
             uptime_seconds: 0,
             total_requests: 0,

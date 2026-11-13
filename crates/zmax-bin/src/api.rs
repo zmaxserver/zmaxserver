@@ -836,6 +836,14 @@ where
         return Ok(true);
     }
 
+    // 1a. Genel sürüm ucu: token'sız, salt okunur, yalnız sürüm (WebAdmin başlığı/alt bilgisi için).
+    // Muafiyet yalnız bu tam yol + GET içindir; başka hiçbir uç nokta token kapısından muaf değildir.
+    if req_path == "/api/version" && req.method == "GET" {
+        let json = format!(r#"{{"version":"{}"}}"#, env!("ZMAX_VERSION"));
+        send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
+        return Ok(true);
+    }
+
     // Token kontrolü (yapılandırılmışsa veya dinleyici loopback dışındaysa zorunlu)
     if !is_authorized(req, &expected_token, require_token) {
         let err =
