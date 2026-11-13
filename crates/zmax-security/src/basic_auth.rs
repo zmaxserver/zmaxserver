@@ -1279,7 +1279,14 @@ pub fn normalize_auth_path(raw_path: &str) -> String {
             ".." => {
                 segments.pop();
             }
-            s => segments.push(s),
+            s => {
+                // Windows dosya sistemi segment sonundaki nokta ve boşlukları yok sayar
+                // (`/gizli./` ile `/gizli/` aynı dizin): eşleştirme için aynı şekilde atılır.
+                let trimmed = s.trim_end_matches(['.', ' ']);
+                if !trimmed.is_empty() {
+                    segments.push(trimmed);
+                }
+            }
         }
     }
     if segments.is_empty() {
@@ -1289,15 +1296,61 @@ pub fn normalize_auth_path(raw_path: &str) -> String {
     }
 }
 
+/// `seg` bir Windows 8.3 kısa adı kalıbıysa (`GIZLI~1`, `GIZLI~1.HTM`) `~` öncesi gövdeyi döndürür.
+fn short_name_base(seg: &str) -> Option<&str> {
+    let (base, rest) = seg.split_once('~')?;
+    let (digits, ext) = match rest.split_once('.') {
+        Some((d, e)) => (d, Some(e)),
+        None => (rest, None),
+    };
+    let base_ok = !base.is_empty() && base.chars().count() <= 6;
+    let digits_ok = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+    let ext_ok = ext.is_none_or(|e| e.chars().count() <= 3);
+    (base_ok && digits_ok && ext_ok).then_some(base)
+}
+
+/// Yol segmenti, öneki oluşturan `prefix_seg` ile eşleşir mi? Birebir eşitlik ya da (fail-closed)
+/// `prefix_seg` için üretilebilecek 8.3 kısa ad kalıbı (`GIZLI~1` ~ `gizli`): kısa ad gövdesi uzun
+/// adın başıyla örtüşüyorsa korumalı sayılır (gerçek eşleşme dosya sistemine bağlı olduğundan
+/// belirsizlikte kimlik doğrulaması istenir).
+fn segment_matches(path_seg: &str, prefix_seg: &str) -> bool {
+    if path_seg == prefix_seg {
+        return true;
+    }
+    let Some(base) = short_name_base(path_seg) else {
+        return false;
+    };
+    let squash = |s: &str| -> String { s.chars().filter(|c| *c != '.' && *c != ' ').collect() };
+    let base = squash(base);
+    !base.is_empty() && squash(prefix_seg).starts_with(&base)
+}
+
 /// Normalize edilmiş yolun verilen dizin önekiyle eşleşip eşleşmediğini denetler.
 pub fn matches_path_prefix(normalized_path: &str, raw_prefix: &str) -> bool {
     let norm_prefix = normalize_auth_path(raw_prefix);
     if norm_prefix == "/" {
         return true;
     }
-    normalized_path == norm_prefix
-        || (normalized_path.starts_with(&norm_prefix)
-            && normalized_path.as_bytes().get(norm_prefix.len()) == Some(&b'/'))
+    let mut path_segs = normalized_path.split('/').filter(|s| !s.is_empty());
+    norm_prefix
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .all(|p| path_segs.next().is_some_and(|s| segment_matches(s, p)))
+}
+
+/// ACME HTTP-01 muafiyeti (`/.well-known/acme-challenge/...`) yalnız yol, normalleştirildikten sonra
+/// da bu dizinin altında kalıyorsa ve `..` (veya yalnız nokta/boşluktan oluşan) segment içermiyorsa
+/// geçerlidir. Ham yola bakmak `/.well-known/acme-challenge/../../gizli/` ile korumayı atlatır.
+pub fn is_acme_challenge_exempt(raw_path: &str) -> bool {
+    let path_only = raw_path.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode_for_auth(path_only).replace('\\', "/");
+    let has_dot_segment = decoded
+        .split('/')
+        .any(|seg| seg != "." && !seg.is_empty() && seg.chars().all(|c| c == '.' || c == ' '));
+    if has_dot_segment {
+        return false;
+    }
+    normalize_auth_path(raw_path).starts_with("/.well-known/acme-challenge/")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1352,9 +1405,11 @@ struct AttemptEntry {
 /// `attempts` tablosunun süresi dolmuş kayıtlarının en geç bu aralıkla temizlenmesi.
 const ATTEMPTS_PURGE_INTERVAL_SECS: u64 = 30;
 
-/// IP başına eşzamanlı doğrulama sınırı koruyucusu; düşünce sayacı geri azaltır.
+/// IP başına eşzamanlı doğrulama sınırı koruyucusu; düşünce sayacı geri azaltır ve yuva
+/// bekleyenleri uyandırır.
 pub struct InflightGuard<'a> {
     map: &'a DashMap<IpAddr, AtomicU32>,
+    released: &'a tokio::sync::Notify,
     ip: IpAddr,
 }
 
@@ -1365,6 +1420,7 @@ impl Drop for InflightGuard<'_> {
         }
         self.map
             .remove_if(&self.ip, |_, c| c.load(Ordering::Acquire) == 0);
+        self.released.notify_waiters();
     }
 }
 
@@ -1375,6 +1431,8 @@ impl Drop for InflightGuard<'_> {
 pub struct BasicAuthBruteForceGuard {
     attempts: DashMap<IpAddr, AttemptEntry>,
     inflight: DashMap<IpAddr, AtomicU32>,
+    /// Bir IP yuvası boşaldığında bekleyenleri uyandırır (`enter_with_wait`).
+    slot_released: tokio::sync::Notify,
     base: Instant,
     last_purge_secs: AtomicU64,
 }
@@ -1390,6 +1448,7 @@ impl BasicAuthBruteForceGuard {
         Self {
             attempts: DashMap::new(),
             inflight: DashMap::new(),
+            slot_released: tokio::sync::Notify::new(),
             base: Instant::now(),
             last_purge_secs: AtomicU64::new(0),
         }
@@ -1408,8 +1467,33 @@ impl BasicAuthBruteForceGuard {
         }
         Some(InflightGuard {
             map: &self.inflight,
+            released: &self.slot_released,
             ip,
         })
+    }
+
+    /// `try_enter` ile aynı, ancak yuva doluysa en çok `wait` süre boşalmasını bekler (sınırlı kuyruk).
+    /// Doğru parolalı tarayıcının paralel bağlantıları anında 429 yerine sırayla doğrulanır;
+    /// süre dolunca yine `None` (429) döner, bekleme asla sınırsız değildir.
+    pub async fn enter_with_wait(
+        &self,
+        ip: IpAddr,
+        max_concurrent: u32,
+        wait: Duration,
+    ) -> Option<InflightGuard<'_>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            // Önce kaydol, sonra dene: yuva ikisi arasında boşalırsa uyandırma kaçmaz.
+            let notified = self.slot_released.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(guard) = self.try_enter(ip, max_concurrent) {
+                return Some(guard);
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.try_enter(ip, max_concurrent);
+            }
+        }
     }
 
     /// Doğrulamadan ÖNCE çağrılır: denemeyi sayar. Eşik aşıldıysa IP banlanır ve `false` döner
@@ -1496,11 +1580,75 @@ struct CachedUsersEntry {
     users: HashMap<String, String>,
 }
 
+/// Başarılı doğrulamaların önbellekte tutulma süresi.
+const SUCCESS_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Önbellekteki en çok kayıt sayısı (dolunca yeni başarı önbelleğe alınmaz, doğrulama yine yapılır).
+const SUCCESS_CACHE_MAX_ENTRIES: usize = 1024;
+
+/// Başarılı (kullanıcı, parola, kayıtlı özet) doğrulamalarının kısa ömürlü önbelleği.
+///
+/// Tarayıcı aynı sayfa için onlarca paralel istek gönderir; her birinde Argon2'yi yeniden hesaplamak
+/// hem gereksizdir hem de IP başına eşzamanlı doğrulama sınırına takılır. Parola düz saklanmaz:
+/// anahtar, süreç başına rastgele tuzlu BLAKE2b özetidir (uzunluk önekli kullanıcı, parola ve kayıtlı
+/// özet). Kayıtlı özet anahtarın parçası olduğundan htpasswd/yapılandırmada parola değişince
+/// eski başarı kendiliğinden geçersizdir. Yalnızca BAŞARILI doğrulamalar eklenir; yanlış parola
+/// ASLA önbelleğe girmez.
+struct SuccessCache {
+    salt: [u8; 32],
+    entries: DashMap<[u8; 32], Instant>,
+}
+
+impl SuccessCache {
+    fn new() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        let mut salt = [0u8; 32];
+        for (i, chunk) in salt.chunks_mut(8).enumerate() {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_usize(i);
+            if let Ok(d) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+                h.write_u128(d.as_nanos());
+            }
+            chunk.copy_from_slice(&h.finish().to_le_bytes());
+        }
+        Self {
+            salt,
+            entries: DashMap::new(),
+        }
+    }
+
+    fn key(&self, user: &str, pass: &str, stored_hash: &str) -> [u8; 32] {
+        let mut data = Vec::with_capacity(user.len() + pass.len() + stored_hash.len() + 24);
+        for part in [user, pass, stored_hash] {
+            data.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            data.extend_from_slice(part.as_bytes());
+        }
+        let digest = blake2b(32, &self.salt, &data);
+        data.fill(0);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&digest);
+        key
+    }
+
+    fn is_fresh(&self, key: &[u8; 32], now: Instant) -> bool {
+        self.entries.get(key).is_some_and(|exp| *exp > now)
+    }
+
+    fn insert(&self, key: [u8; 32], now: Instant) {
+        if self.entries.len() >= SUCCESS_CACHE_MAX_ENTRIES {
+            self.entries.retain(|_, exp| *exp > now);
+        }
+        if self.entries.len() < SUCCESS_CACHE_MAX_ENTRIES {
+            self.entries.insert(key, now + SUCCESS_CACHE_TTL);
+        }
+    }
+}
+
 /// htpasswd dosyalarını diskten okuyup `(mtime, boyut, TTL)` denetimi ile önbellekleyen yönetici.
 pub struct BasicAuthManager {
     file_cache: RwLock<HashMap<PathBuf, CachedUsersEntry>>,
     pub semaphore: Arc<tokio::sync::Semaphore>,
     pub brute_force_guard: BasicAuthBruteForceGuard,
+    success_cache: SuccessCache,
 }
 
 impl Default for BasicAuthManager {
@@ -1519,7 +1667,22 @@ impl BasicAuthManager {
             file_cache: RwLock::new(HashMap::new()),
             semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1))),
             brute_force_guard: BasicAuthBruteForceGuard::default(),
+            success_cache: SuccessCache::new(),
         }
+    }
+
+    /// `verify_password` + başarı önbelleği: önbellekte taze kayıt varsa hash hesaplanmaz.
+    /// Yanlış parola ne önbelleğe girer ne de önbellekten geçer.
+    fn verify_password_cached(&self, user: &str, stored_hash: &str, candidate: &str) -> bool {
+        let key = self.success_cache.key(user, candidate, stored_hash);
+        if self.success_cache.is_fresh(&key, Instant::now()) {
+            return true;
+        }
+        let ok = verify_password(stored_hash, candidate);
+        if ok {
+            self.success_cache.insert(key, Instant::now());
+        }
+        ok
     }
 
     fn resolve_htpasswd_path(base_dir: Option<&Path>, raw: &str) -> PathBuf {
@@ -1699,7 +1862,7 @@ impl BasicAuthManager {
             self.resolve_user_hash(matched_dir, vhost_auth, base_dir, &user);
         // Süre eşitleme `check_request_async` içinde `fail_min_ms` tabanıyla yapılır.
         let user_verified = match found_hash {
-            Some(hash) if !file_err => verify_password(&hash, &pass),
+            Some(hash) if !file_err => self.verify_password_cached(&user, &hash, &pass),
             _ => false,
         };
 
@@ -1781,7 +1944,12 @@ impl BasicAuthManager {
         // 1. IP başına eşzamanlı doğrulama sınırı (yuva, yanıt sonuna kadar tutulur)
         let Some(_slot) = self
             .brute_force_guard
-            .try_enter(client_ip, limits.max_concurrent_per_ip)
+            .enter_with_wait(
+                client_ip,
+                limits.max_concurrent_per_ip,
+                Duration::from_millis(limits.queue_timeout_ms),
+            )
+            .await
         else {
             return AuthDecision::TooManyRequests {
                 retry_after_secs: 1,
@@ -2500,5 +2668,142 @@ mod tests {
             .await;
         assert!(matches!(r, AuthDecision::TooManyRequests { .. }), "{r:?}");
         drop(slot);
+    }
+
+    #[test]
+    fn r9b_normalize_folds_windows_trailing_dot_and_space() {
+        for raw in [
+            "/gizli./index.html",
+            "/gizli../index.html",
+            "/gizli.../index.html",
+            "/gizli%20/index.html",
+            "/gizli%2e/index.html",
+            "/gizli. ./index.html",
+            "/GIZLI./index.html",
+        ] {
+            assert_eq!(normalize_auth_path(raw), "/gizli/index.html", "{raw}");
+        }
+        assert_eq!(normalize_auth_path("/a/b/../c"), "/a/c");
+        assert_eq!(normalize_auth_path("/dosya.txt"), "/dosya.txt");
+        assert_eq!(normalize_auth_path("/.well-known/x"), "/.well-known/x");
+    }
+
+    #[test]
+    fn r9b_short_name_83_is_protected_fail_closed() {
+        assert!(matches_path_prefix("/gizli~1/index.html", "/gizli"));
+        assert!(matches_path_prefix(
+            &normalize_auth_path("/GIZLI~1/a"),
+            "/gizli"
+        ));
+        assert!(matches_path_prefix("/gizli~2", "/gizli"));
+        assert!(matches_path_prefix("/gizli~1/x", "/gizliayarlari"));
+        assert!(matches_path_prefix("/gizli~1.htm", "/gizli.html"));
+        assert!(matches_path_prefix("/panel/gizli~1/x", "/panel/gizli"));
+        // 8.3 kalıbına uymayan veya başka adlı yollar eşleşmez
+        assert!(!matches_path_prefix("/baska~1/x", "/gizli"));
+        assert!(!matches_path_prefix("/gizlix~1/x", "/gizli"));
+        assert!(!matches_path_prefix("/gizli~/x", "/gizli"));
+        assert!(!matches_path_prefix("/gizli~a/x", "/gizli"));
+        assert!(!matches_path_prefix("/gizlix/x", "/gizli"));
+        // Eski davranış korunur
+        assert!(matches_path_prefix("/admin/index.html", "/admin"));
+        assert!(!matches_path_prefix("/administrator", "/admin"));
+        assert!(matches_path_prefix("/x/y", "/"));
+    }
+
+    #[test]
+    fn r9b_acme_exemption_requires_normalized_path_under_challenge_dir() {
+        assert!(is_acme_challenge_exempt(
+            "/.well-known/acme-challenge/tok123"
+        ));
+        assert!(is_acme_challenge_exempt(
+            "/.well-known/acme-challenge/tok?x=1"
+        ));
+        for raw in [
+            "/.well-known/acme-challenge/../../gizli/index.html",
+            "/.well-known/acme-challenge/%2e%2e/%2e%2e/gizli/index.html",
+            "/.well-known/acme-challenge/%2E%2E/gizli",
+            "/.well-known/acme-challenge/..%2fgizli",
+            "/.well-known/acme-challenge/..\\gizli",
+            "/.well-known/acme-challenge/.../gizli",
+            "/.well-known/acme-challenge/.. /gizli",
+            "/gizli/index.html",
+            "/.well-known/security.txt",
+            "/.well-known/acme-challenge",
+        ] {
+            assert!(!is_acme_challenge_exempt(raw), "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn r9b_enter_with_wait_waits_for_release_then_times_out() {
+        let guard = Arc::new(BasicAuthBruteForceGuard::new());
+        let ip: std::net::IpAddr = "10.0.9.20".parse().unwrap();
+        let held = guard.try_enter(ip, 1).expect("ilk yuva");
+
+        // Yuva 80 ms sonra bırakılır: bekleyen, süre dolmadan yuvayı alır.
+        let g2 = Arc::clone(&guard);
+        let waiter = tokio::spawn(async move {
+            g2.enter_with_wait(ip, 1, Duration::from_secs(5))
+                .await
+                .is_some()
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        drop(held);
+        assert!(waiter.await.unwrap(), "yuva bosalinca bekleyen girmeli");
+
+        // Yuva dolu kalırsa bekleme sınırlıdır ve None döner.
+        let _held2 = guard.try_enter(ip, 1).expect("yuva");
+        let t = Instant::now();
+        let r = guard
+            .enter_with_wait(ip, 1, Duration::from_millis(60))
+            .await;
+        assert!(r.is_none());
+        assert!(t.elapsed() >= Duration::from_millis(50));
+        assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn r9b_success_cache_only_stores_successes_and_follows_stored_hash() {
+        let manager = BasicAuthManager::new();
+        let h1 = apr1_hash("dogru", "salt1111");
+        assert!(!manager.verify_password_cached("u", &h1, "yanlis"));
+        assert_eq!(
+            manager.success_cache.entries.len(),
+            0,
+            "yanlis parola onbellege girmez"
+        );
+        assert!(manager.verify_password_cached("u", &h1, "dogru"));
+        assert_eq!(manager.success_cache.entries.len(), 1);
+        assert!(manager.verify_password_cached("u", &h1, "dogru"));
+        assert_eq!(manager.success_cache.entries.len(), 1);
+        // Başka kullanıcı veya yanlış parola önbellekten geçmez
+        assert!(!manager.verify_password_cached("v", &h1, "yanlis"));
+        assert!(!manager.verify_password_cached("u", &h1, "dogru2"));
+        // Kayıtlı özet değişince eski başarı geçersiz (yeni özet başka parola ister)
+        let h2 = apr1_hash("yeni", "salt2222");
+        assert!(!manager.verify_password_cached("u", &h2, "dogru"));
+        assert!(manager.verify_password_cached("u", &h2, "yeni"));
+    }
+
+    #[test]
+    fn r9b_success_cache_is_bounded_and_expires() {
+        let cache = SuccessCache::new();
+        let now = Instant::now();
+        let k = cache.key("u", "p", "h");
+        assert!(!cache.is_fresh(&k, now));
+        cache.insert(k, now);
+        assert!(cache.is_fresh(&k, now + Duration::from_secs(29)));
+        assert!(!cache.is_fresh(&k, now + SUCCESS_CACHE_TTL + Duration::from_secs(1)));
+        // Alan sınırı: uzunluk önekli anahtar ("ab","c") ile ("a","bc") çakışmaz
+        assert_ne!(cache.key("ab", "c", "h"), cache.key("a", "bc", "h"));
+        for i in 0..(SUCCESS_CACHE_MAX_ENTRIES + 50) {
+            cache.insert(cache.key("u", &format!("p{i}"), "h"), now);
+        }
+        assert!(cache.entries.len() <= SUCCESS_CACHE_MAX_ENTRIES);
+        // Süresi dolmuş kayıtlar dolu tabloda temizlenir
+        let later = now + SUCCESS_CACHE_TTL + Duration::from_secs(5);
+        cache.insert(cache.key("yeni", "p", "h"), later);
+        assert!(cache.entries.len() < SUCCESS_CACHE_MAX_ENTRIES);
     }
 }

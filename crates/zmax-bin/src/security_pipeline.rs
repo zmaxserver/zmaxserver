@@ -163,7 +163,8 @@ pub async fn evaluate_basic_auth(
     base_dir: &std::path::Path,
     ban_manager: &zmax_security::IpBanManager,
 ) -> zmax_security::AuthDecision {
-    if !vhost_ctx.auth.enabled || is_acme_challenge(request_path) {
+    // ACME muafiyeti ham yola değil normalleştirilmiş yola bakar (`..` ile atlatma engellenir).
+    if !vhost_ctx.auth.enabled || zmax_security::is_acme_challenge_exempt(request_path) {
         return zmax_security::AuthDecision::Allowed;
     }
     let auth_header = headers
