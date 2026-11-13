@@ -3636,35 +3636,45 @@ mod tests {
             false,
             "[security]\nslowloris_header_timeout_sec = 1\nslowloris_body_timeout_sec = 10\nkeep_alive_timeout_sec = 10\n",
         );
-        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (client, server) = tokio::io::duplex(64 * 1024);
         let st = Arc::clone(&state);
         let peer: SocketAddr = "127.0.0.1:50001".parse().unwrap();
         let task = tokio::spawn(async move {
             web_engine::handle_web_connection(server, peer, st, false, 80).await
         });
 
+        let start = Instant::now();
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
         // Başlık kısmı gönderiliyor ama bitirilmiyor (\r\n\r\n yok)
-        client
+        client_write
             .write_all(
                 b"GET /index.html HTTP/1.1\r\nHost: site.test\r\nUser-Agent: Slowloris-Sim\r\n",
             )
             .await
             .unwrap();
 
-        // Saldırgan her 200 ms'de bir başlık damlatıyor; toplam süre 1 sn'yi aşınca kesilmeli
-        for i in 0..10 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            if client
-                .write_all(format!("X-Slow-Header-{i}: val\r\n").as_bytes())
-                .await
-                .is_err()
-            {
-                break;
+        // Saldırgan 25 adım boyunca her 150 ms'de bir başlık damlatıyor (toplam 3.75 saniye sürecek damlatma)
+        let drip_task = tokio::spawn(async move {
+            for i in 0..25 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                if client_write
+                    .write_all(format!("X-Slow-Header-{i}: val\r\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
-        }
+        });
 
+        // İstemci damlatma sürerken eşzamanlı olarak sunucunun yanıtını okur.
+        // Yeni koddaki kümülatif header_deadline sayesinde ~1.0-1.1 sn içinde 408 gelip soket kapatılmalıdır.
         let mut out = Vec::new();
-        let _ = client.read_to_end(&mut out).await;
+        let _ = client_read.read_to_end(&mut out).await;
+        let elapsed = start.elapsed();
+        let _ = drip_task.await;
+
         let resp = String::from_utf8_lossy(&out);
         assert!(
             resp.starts_with("HTTP/1.1 408 Request Timeout"),
@@ -3673,6 +3683,14 @@ mod tests {
         assert!(
             resp.contains("Connection: close"),
             "Zaman aşımında bağlantı kapatılmalı: {resp}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "408 Request Timeout damlatma bitmeden (< 1.5 sn) gelmelidir! Geçen süre: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "408 zaman aşımı 1 saniyeden önce tetiklenmemelidir! Geçen süre: {elapsed:?}"
         );
 
         let _ = task.await;
@@ -3687,31 +3705,39 @@ mod tests {
             false,
             "[security]\nslowloris_header_timeout_sec = 10\nslowloris_body_timeout_sec = 1\nkeep_alive_timeout_sec = 10\n",
         );
-        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (client, server) = tokio::io::duplex(64 * 1024);
         let st = Arc::clone(&state);
         let peer: SocketAddr = "127.0.0.1:50002".parse().unwrap();
         let task = tokio::spawn(async move {
             web_engine::handle_web_connection(server, peer, st, false, 80).await
         });
 
-        // Başlık tamam, 1000 baytlık gövde vaat ediliyor
-        client
+        let start = Instant::now();
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        // Başlık tamam, 10000 baytlık gövde vaat ediliyor
+        client_write
             .write_all(
-                b"POST /index.html HTTP/1.1\r\nHost: site.test\r\nContent-Length: 1000\r\n\r\n",
+                b"POST /index.html HTTP/1.1\r\nHost: site.test\r\nContent-Length: 10000\r\n\r\n",
             )
             .await
             .unwrap();
 
-        // Yavaş gövde damlatma (her 250 ms'de 5 bayt, toplam 1000 bayt gelmeyecek)
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            if client.write_all(b"CHUNK").await.is_err() {
-                break;
+        // Yavaş gövde damlatma (25 adım * 150 ms = 3.75 saniye sürecek damlatma)
+        let drip_task = tokio::spawn(async move {
+            for _ in 0..25 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                if client_write.write_all(b"CHUNK").await.is_err() {
+                    break;
+                }
             }
-        }
+        });
 
         let mut out = Vec::new();
-        let _ = client.read_to_end(&mut out).await;
+        let _ = client_read.read_to_end(&mut out).await;
+        let elapsed = start.elapsed();
+        let _ = drip_task.await;
+
         let resp = String::from_utf8_lossy(&out);
         assert!(
             resp.starts_with("HTTP/1.1 408 Request Timeout"),
@@ -3720,6 +3746,14 @@ mod tests {
         assert!(
             resp.contains("Connection: close"),
             "Gövde aşımında bağlantı kapatılmalı: {resp}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "Gövde 408 damlatma bitmeden (< 1.5 sn) gelmelidir! Geçen süre: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "Gövde 408 zaman aşımı 1 saniyeden önce tetiklenmemelidir! Geçen süre: {elapsed:?}"
         );
 
         let _ = task.await;
@@ -3779,6 +3813,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_h2_handshake_timeout_drops_unresponsive_raw_tcp_client() {
+        // Matris P1: HTTP/2 el sıkışması göndermeyen ham TCP istemcinin 10 saniyelik
+        // handshake zaman aşımı dolduğunda kesildiğini ve soketin kapatıldığını kanıtlayan test.
+        let state = test_state("h2_hs_raw");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let st = Arc::clone(&state);
+        let server_task = tokio::spawn(async move {
+            let (sock, peer) = listener.accept().await.unwrap();
+            h2_engine::handle_h2_connection(sock, peer, st, false, local_addr.port(), None).await
+        });
+
+        // Ham TCP istemcisi bağlanır ancak hiçbir HTTP/2 Preface / Handshake göndermez
+        let mut raw_client = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+
+        let start = Instant::now();
+        let mut out = Vec::new();
+        let _ = raw_client.read_to_end(&mut out).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(9),
+            "Handshake zaman aşımı 10s dolmadan kesilmemeli: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "Handshake zaman aşımı 10s dolunca soketi kesmeli: {elapsed:?}"
+        );
+
+        let res = server_task.await.unwrap();
+        assert!(
+            res.is_err(),
+            "Sunucu handshake zaman aşımı hatası üretmelidir"
+        );
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("zaman aşımı") || err_msg.contains("TimedOut") || err_msg.contains("timed out"),
+            "Zaman aşımı mesajı içermelidir: {err_msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_h2_idle_stream_timeout_closes_connection() {
+        // Matris P1: HTTP/2 bağlantısı kurulduktan sonra ilk stream'i göndermeyen istemcinin
+        // header_timeout dolunca accept döngüsünden çıkıp bağlantıyı kapattığı doğrulanır.
+        let state = test_state_with(
+            "h2_idle",
+            false,
+            "[security]\nslowloris_header_timeout_sec = 1\nslowloris_body_timeout_sec = 10\nkeep_alive_timeout_sec = 1\n",
+        );
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let st = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:50005".parse().unwrap();
+        let server_task = tokio::spawn(async move {
+            h2_engine::handle_h2_connection(server, peer, st, false, 80, None).await
+        });
+
+        // İstemci HTTP/2 el sıkışmasını tamamlar
+        let (_send_req, client_conn) = h2::client::handshake(client).await.unwrap();
+        let client_task = tokio::spawn(async move {
+            let _ = client_conn.await;
+        });
+
+        // İstemci hiçbir stream açmaz (boşta bekler). Sunucudaki header_timeout (1s) dolunca
+        // sunucu accept döngüsünden çıkar ve bağlantıyı kapatır.
+        let start = Instant::now();
+        let _ = client_task.await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "H2 stream bekleme zaman aşımından önce kesilmemeli: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "H2 stream bekleme zaman aşımı zamanında kesmeli: {elapsed:?}"
+        );
+
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
     async fn test_matrix_bounds_defaults_and_validation() {
         // Matris §1 / §8: Varsayılan 10s header, 30s body, 65s keep-alive doğrulaması
         let def = zmax_config::ZMaxConfig::default();
@@ -3798,6 +3916,5 @@ mod tests {
         let mut bad_ka = zmax_config::ZMaxConfig::default();
         bad_ka.security.keep_alive_timeout_sec = 0;
         assert!(bad_ka.validate().is_err());
-    }
     }
 }
