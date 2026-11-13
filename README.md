@@ -27,7 +27,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 - ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
 - HTTP/1.1 ve HTTP/2 aynı güvenlik denetim hattından geçiyor (`[vhost.acl]` dahil).
 - Ters vekil güvenlik incelemesinden geçti: HTTP istek kaçırma (smuggling) kapatıldı, HTTP/2 yanıtları akıtılıyor, bağlantı ve WebSocket zaman aşımları çalışıyor.
-- Ayrıcalık düşürme (root olmayan kullanıcıya geçiş), TLS anahtar izni, PHP bağlantı zaman aşımı ve ACME dizin hataları düzeltildi; gerçek Linux sunucuda doğrulama sürüyor.
+- Ayrıcalık düşürme (root olmayan kullanıcıya geçiş), TLS anahtar izni, PHP bağlantı zaman aşımı ve ACME dizin hataları düzeltildi; yerel Linux (root) testinde doğrulandı, uzak sunucu testi sırada.
 - Basic Auth güvenlik incelemesinde; bulunan açıklar düzeltiliyor.
 
 ### Bileşen durumu
@@ -46,7 +46,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | FastCGI / PHP (temel) | Tamamlandı |
 | Ters vekil (reverse proxy): HTTP/1.1 ve HTTP/2, WebSocket, SSE | Tamamlandı |
 | Basic Auth, WAF olay günlüğü | İncelemede |
-| Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (Linux sunucuda doğrulanacak) |
+| Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (yerel Linux testinde doğrulandı) |
 | FastCGI havuzu, `sendfile` | İncelemede |
 | OpenLiteSpeed ile yan yana denklik testleri | Sırada |
 | Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Sırada |
