@@ -1128,3 +1128,80 @@ fn h2_php_cache_hit_and_purge_covers_both_schemes() {
     );
     assert_eq!(get(&env, "site1.test", "/app.php").x_cache(), "MISS");
 }
+
+/// Etiket bazlı PURGE: ZMax iç etiketleri (`domain::alan`, `alan::*`, `__uri:yol`) ve backend etiketi
+/// (`post:42`, `tag=post:42`) gerçekten siler; başka vhost'un etiketiyle silme olmaz (izolasyon).
+#[test]
+fn purge_by_internal_and_backend_tags_deletes_and_keeps_vhost_isolation() {
+    let env = key_env();
+    let purge = |host: &str, tag: &str| {
+        h1(
+            env.http,
+            "PURGE",
+            host,
+            "/",
+            &[(KEY_HDR, PURGE_KEY), ("X-LiteSpeed-Purge", tag)],
+        )
+    };
+    warm(&env, "site1.test", "/");
+    warm(&env, "site2.test", "/");
+
+    // İzolasyon: site1'den site2'nin iç etiketleri ASLA site2 girdisini silmez.
+    for foreign in [
+        "domain::site2.test",
+        "domain:site2.test",
+        "site2.test",
+        "site2.test::*",
+    ] {
+        let r = purge("site1.test", foreign);
+        assert_eq!(r.status, 200, "{foreign}: {r:?}");
+        assert_eq!(r.body, "Purged 0 entries\n", "{foreign}: {r:?}");
+        assert_hit(&env, "site2.test", "/", &format!("site1'den '{foreign}'"));
+        assert_hit(&env, "site1.test", "/", &format!("site1'den '{foreign}'"));
+    }
+
+    // Kendi iç etiketleri gerçekten siler (bug: "Purged 0 entries" dönüp hiçbir şey silmiyordu).
+    for own in [
+        "domain::site1.test",
+        "domain:site1.test",
+        "site1.test::*",
+        "__uri:/",
+        "__path:/",
+    ] {
+        let r = purge("site1.test", own);
+        assert_eq!(r.status, 200, "{own}: {r:?}");
+        assert_eq!(r.body, "Purged 1 entries\n", "{own}: {r:?}");
+        assert_eq!(
+            get(&env, "site1.test", "/").x_cache(),
+            "MISS",
+            "{own}: site1 girdisi silinmeli"
+        );
+        assert_hit(
+            &env,
+            "site1.test",
+            "/",
+            &format!("{own} sonrası yeniden dolum"),
+        );
+        assert_hit(&env, "site2.test", "/", &format!("site1'den '{own}'"));
+    }
+
+    // Backend etiketi: düz (`post:42`) ve OLS yazımı (`tag=post:42`).
+    warm(&env, "site1.test", "/tag.php");
+    warm(&env, "site2.test", "/tag.php");
+    for tag in ["post:42", "tag=post:42"] {
+        let r = purge("site1.test", tag);
+        assert_eq!(r.body, "Purged 1 entries\n", "{tag}: {r:?}");
+        assert_eq!(
+            get(&env, "site1.test", "/tag.php").x_cache(),
+            "MISS",
+            "{tag}"
+        );
+        assert_hit(&env, "site1.test", "/tag.php", "yeniden dolum");
+        assert_hit(
+            &env,
+            "site2.test",
+            "/tag.php",
+            &format!("site1'den '{tag}'"),
+        );
+    }
+}

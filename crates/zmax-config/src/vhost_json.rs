@@ -273,7 +273,12 @@ pub fn merge_vhost_json_patch(
         entry.php.lb_policy = val_as_str(v, "lb_policy")?;
     }
     if let Some(v) = obj.get("dial_timeout_ms") {
-        entry.php.dial_timeout_ms = val_as_u64(v, "dial_timeout_ms")?;
+        // `null` = vhost değer vermiyor (mod_fastcgi politikası kullanılır)
+        entry.php.dial_timeout_ms = if v.is_null() {
+            None
+        } else {
+            Some(val_as_u64(v, "dial_timeout_ms")?)
+        };
     }
     if let Some(v) = obj.get("io_timeout_secs") {
         entry.php.io_timeout_secs = val_as_u64(v, "io_timeout_secs")?;
@@ -578,7 +583,10 @@ pub fn format_vhost_entry_json(
     );
     root.insert(
         "dial_timeout_ms".to_string(),
-        Value::from(entry.php.dial_timeout_ms),
+        match entry.php.dial_timeout_ms {
+            Some(ms) => Value::from(ms),
+            None => Value::Null,
+        },
     );
     root.insert(
         "io_timeout_secs".to_string(),

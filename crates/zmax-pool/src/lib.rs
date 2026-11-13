@@ -196,7 +196,15 @@ impl UpstreamSocketPool {
     ) -> io::Result<TcpStream> {
         let stream = tokio::time::timeout(dial_timeout, TcpStream::connect(addr))
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Arka uc baglanti zaman asimi"))??;
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "Arka uc baglanti zaman asimi ({} ms)",
+                        dial_timeout.as_millis()
+                    ),
+                )
+            })??;
         let _ = stream.set_nodelay(true);
         Ok(stream)
     }

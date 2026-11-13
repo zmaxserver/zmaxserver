@@ -1274,6 +1274,9 @@ pub fn normalize_auth_path(raw_path: &str) -> String {
     let decoded = fold_case_for_auth(&percent_decode_for_auth(path_only).replace('\\', "/"));
     let mut segments: Vec<&str> = Vec::new();
     for seg in decoded.split('/') {
+        // NTFS alternatif veri akışı (`gizli::$INDEX_ALLOCATION`, `gizli:$I30:...`) ve yol parametresi
+        // (`..;`) aynı dizine çözülür: `:` ve `;` sonrası atılır (korumayı genişletir, fail-closed).
+        let seg = seg.split([':', ';']).next().unwrap_or(seg);
         match seg {
             "" | "." => {}
             ".." => {
@@ -1346,6 +1349,7 @@ pub fn is_acme_challenge_exempt(raw_path: &str) -> bool {
     let decoded = percent_decode_for_auth(path_only).replace('\\', "/");
     let has_dot_segment = decoded
         .split('/')
+        .map(|seg| seg.split([':', ';']).next().unwrap_or(seg))
         .any(|seg| seg != "." && !seg.is_empty() && seg.chars().all(|c| c == '.' || c == ' '));
     if has_dot_segment {
         return false;
@@ -2668,6 +2672,16 @@ mod tests {
             .await;
         assert!(matches!(r, AuthDecision::TooManyRequests { .. }), "{r:?}");
         drop(slot);
+    }
+
+    #[test]
+    fn r9b_normalize_strips_ntfs_streams_and_path_params() {
+        assert_eq!(normalize_auth_path("/gizli::$INDEX_ALLOCATION/index.html"), "/gizli/index.html");
+        assert_eq!(normalize_auth_path("/gizli:$I30:$INDEX_ALLOCATION/x"), "/gizli/x");
+        assert_eq!(normalize_auth_path("/gizli%3a%3a$INDEX_ALLOCATION/index.html"), "/gizli/index.html");
+        assert_eq!(normalize_auth_path("/a/..;/gizli"), "/gizli");
+        assert!(!is_acme_challenge_exempt("/.well-known/acme-challenge/..;/..;/gizli/index.html"));
+        assert!(is_acme_challenge_exempt("/.well-known/acme-challenge/tok123"));
     }
 
     #[test]
