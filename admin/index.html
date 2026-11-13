@@ -258,7 +258,7 @@
                                             <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
                                             <span>{{ t('server_status_title') }}</span>
                                         </div>
-                                        <span class="status-capsule status-active">{{ t('status_stable') }}</span>
+                                        <span class="status-capsule" :class="svcView.overall.cls">{{ t(svcView.overall.labelKey) }}</span>
                                     </div>
 
                                     <div class="meter-row">
@@ -301,7 +301,7 @@
                                             <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                                             <span>{{ t('service_status_title') }}</span>
                                         </div>
-                                        <span class="status-capsule status-active">{{ t('status_all_running') }}</span>
+                                        <span class="status-capsule" :class="svcView.summary.cls">{{ svcSummaryText }}</span>
                                     </div>
 
                                     <div class="row g-2">
@@ -314,7 +314,7 @@
                                                         <div class="service-port">{{ t('th_port') }}: {{ stats.ports.http }}</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.web_core.cls" :title="svcHint(svcView.rows.web_core)">{{ t(svcView.rows.web_core.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -327,7 +327,7 @@
                                                         <div class="service-port">{{ t('th_port') }}: {{ stats.ports.admin }}</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.webadmin.cls" :title="svcHint(svcView.rows.webadmin)">{{ t(svcView.rows.webadmin.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -340,7 +340,7 @@
                                                         <div class="service-port">127.0.0.1:9000</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.php.cls" :title="svcHint(svcView.rows.php)">{{ t(svcView.rows.php.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -353,7 +353,7 @@
                                                         <div class="service-port">{{ t('srv_pool') }}</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.l1_cache.cls" :title="svcHint(svcView.rows.l1_cache)">{{ t(svcView.rows.l1_cache.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -366,7 +366,7 @@
                                                         <div class="service-port">Token Bucket</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.waf.cls" :title="svcHint(svcView.rows.waf)">{{ t(svcView.rows.waf.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -376,10 +376,10 @@
                                                     <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20"></path></svg>
                                                     <div>
                                                         <div class="service-name">{{ t('srv_http3') }}</div>
-                                                        <div class="service-port">UDP: {{ stats.ports.https }}</div>
+                                                        <div class="service-port">{{ t('srv_http3_sub') }}</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.http3.cls" :title="svcHint(svcView.rows.http3)">{{ t(svcView.rows.http3.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -392,7 +392,7 @@
                                                         <div class="service-port">{{ t('srv_compression_sub') }}</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.compress.cls" :title="svcHint(svcView.rows.compress)">{{ t(svcView.rows.compress.labelKey) }}</span>
                                             </div>
                                         </div>
 
@@ -405,7 +405,7 @@
                                                         <div class="service-port">WebSocket / Node</div>
                                                     </div>
                                                 </div>
-                                                <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                                <span class="status-capsule" :class="svcView.rows.proxy.cls" :title="svcHint(svcView.rows.proxy)">{{ t(svcView.rows.proxy.labelKey) }}</span>
                                             </div>
                                         </div>
                                     </div>

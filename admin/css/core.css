@@ -1110,3 +1110,10 @@ code {
         font-size: 12px;
     }
 }
+
+/* Nötr gri: durum bilinmiyor / desteklenmiyor */
+.status-unknown {
+    background: var(--bg-inner);
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+}

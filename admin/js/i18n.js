@@ -61,7 +61,27 @@ const translations = {
 
         // Hizmet Durumları
         service_status_title: "Hizmet Durumları",
-        status_all_running: "● 8/8 Çalışıyor",
+        status_unknown: "Bilinmiyor",
+
+        status_unsupported: "Desteklenmiyor",
+
+        status_warning: "Uyarı",
+
+        status_unknown_caps: "BİLİNMİYOR",
+
+        status_warning_caps: "UYARI",
+
+        svc_summary_running: "● {n}/{total} Çalışıyor",
+
+        svc_summary_unknown: "{n} Bilinmiyor",
+
+        svc_hint_need_key: "API anahtarı gerekli",
+
+        svc_hint_api_error: "API'ye erişilemedi",
+
+        svc_hint_no_probe: "Canlı PHP-FPM denetimi yok",
+
+        srv_http3_sub: "UDP/QUIC yok",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -281,7 +301,27 @@ const translations = {
 
         // Service Status
         service_status_title: "Service Status",
-        status_all_running: "● 8/8 Running",
+        status_unknown: "Unknown",
+
+        status_unsupported: "Unsupported",
+
+        status_warning: "Warning",
+
+        status_unknown_caps: "UNKNOWN",
+
+        status_warning_caps: "WARNING",
+
+        svc_summary_running: "● {n}/{total} Running",
+
+        svc_summary_unknown: "{n} Unknown",
+
+        svc_hint_need_key: "API key required",
+
+        svc_hint_api_error: "API unreachable",
+
+        svc_hint_no_probe: "No live PHP-FPM check",
+
+        srv_http3_sub: "No UDP/QUIC",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -491,7 +531,27 @@ const translations = {
         unit_m: "Min",
         unit_s: "Sek",
         service_status_title: "Dienststatus",
-        status_all_running: "● 8/8 Aktiv",
+        status_unknown: "Unbekannt",
+
+        status_unsupported: "Nicht unterstützt",
+
+        status_warning: "Warnung",
+
+        status_unknown_caps: "UNBEKANNT",
+
+        status_warning_caps: "WARNUNG",
+
+        svc_summary_running: "● {n}/{total} Läuft",
+
+        svc_summary_unknown: "{n} Unbekannt",
+
+        svc_hint_need_key: "API-Schlüssel erforderlich",
+
+        svc_hint_api_error: "API nicht erreichbar",
+
+        svc_hint_no_probe: "Keine Live-PHP-FPM-Prüfung",
+
+        srv_http3_sub: "Kein UDP/QUIC",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -683,7 +743,27 @@ const translations = {
         unit_m: "min",
         unit_s: "s",
         service_status_title: "État des Services",
-        status_all_running: "● 8/8 Actifs",
+        status_unknown: "Inconnu",
+
+        status_unsupported: "Non pris en charge",
+
+        status_warning: "Alerte",
+
+        status_unknown_caps: "INCONNU",
+
+        status_warning_caps: "ALERTE",
+
+        svc_summary_running: "● {n}/{total} En cours",
+
+        svc_summary_unknown: "{n} inconnu",
+
+        svc_hint_need_key: "Clé API requise",
+
+        svc_hint_api_error: "API inaccessible",
+
+        svc_hint_no_probe: "Pas de contrôle PHP-FPM en direct",
+
+        srv_http3_sub: "Pas d'UDP/QUIC",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -875,7 +955,27 @@ const translations = {
         unit_m: "м",
         unit_s: "с",
         service_status_title: "Статус служб",
-        status_all_running: "● 8/8 Работает",
+        status_unknown: "Неизвестно",
+
+        status_unsupported: "Не поддерживается",
+
+        status_warning: "Предупреждение",
+
+        status_unknown_caps: "НЕИЗВЕСТНО",
+
+        status_warning_caps: "ВНИМАНИЕ",
+
+        svc_summary_running: "● {n}/{total} Работает",
+
+        svc_summary_unknown: "{n} неизвестно",
+
+        svc_hint_need_key: "Требуется ключ API",
+
+        svc_hint_api_error: "API недоступен",
+
+        svc_hint_no_probe: "Нет проверки PHP-FPM в реальном времени",
+
+        srv_http3_sub: "Нет UDP/QUIC",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",

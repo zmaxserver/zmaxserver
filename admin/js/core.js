@@ -26,6 +26,85 @@ const MODULE_CATEGORY_MAP = {
 
 const VALID_MODULE_CATEGORIES = new Set(['core', 'perf', 'sec', 'proto', 'net', 'route']);
 
+// <svc-status>
+// Hizmet Durumları / Sunucu Durumu rozetlerini MEVCUT API verisinden hesaplayan saf fonksiyon.
+// Kural: veri yoksa (token yok/401/hata) durum 'unknown' olur, ASLA 'running' sayılmaz.
+// Durumlar: running | off (yapılandırmada kapalı) | warning | unknown | unsupported.
+function computeServiceStatus(input) {
+    const src = input || {};
+    const st = src.status && typeof src.status === 'object' ? src.status : null;
+    const vh = Array.isArray(src.vhosts) ? src.vhosts : null;
+    const mods = Array.isArray(src.modules) ? src.modules : null;
+    const noDataHint = src.hasToken ? 'svc_hint_api_error' : 'svc_hint_need_key';
+    const LABEL = {
+        running: 'status_running',
+        off: 'status_off',
+        warning: 'status_warning',
+        unknown: 'status_unknown',
+        unsupported: 'status_unsupported'
+    };
+    const CLS = {
+        running: 'status-active',
+        off: 'status-orange',
+        warning: 'status-danger',
+        unknown: 'status-unknown',
+        unsupported: 'status-unknown'
+    };
+    const make = (state, hintKey) => ({ state, labelKey: LABEL[state], cls: CLS[state], hintKey: hintKey || '' });
+    const noData = () => make('unknown', noDataHint);
+    const modEnabled = (name) => {
+        const m = mods.find((x) => x && x.name === name);
+        return Boolean(m && m.enabled === true);
+    };
+
+    const rows = {};
+    // Web Core: api/status "running"
+    rows.web_core = !st ? noData()
+        : (st.running === true ? make('running') : (st.running === false ? make('warning') : noData()));
+    // WebAdmin: sayfa yüklendi (bu kod çalışıyor) + api/status erişilebilir
+    rows.webadmin = st ? make('running') : noData();
+    // PHP-FPM: canlı sağlık denetimi yok; hiçbir zaman "Çalışıyor" denmez
+    rows.php = st ? make('unknown', 'svc_hint_no_probe') : noData();
+    // L1 RAM önbellek: api/status cache.enabled
+    rows.l1_cache = st && st.cache && typeof st.cache.enabled === 'boolean'
+        ? make(st.cache.enabled ? 'running' : 'off') : noData();
+    // WAF & DoS: security.rate_limit_enabled veya herhangi bir vHost waf_enabled
+    const rate = st && st.security && typeof st.security.rate_limit_enabled === 'boolean'
+        ? st.security.rate_limit_enabled : null;
+    const vhWaf = vh ? vh.some((v) => v && v.waf_enabled === true) : null;
+    rows.waf = (rate === true || vhWaf === true) ? make('running')
+        : (rate === false && vhWaf === false ? make('off') : noData());
+    // HTTP/3 & QUIC: ZMax'te yok
+    rows.http3 = make('unsupported');
+    // Brotli / Gzip: mod_brotli veya mod_gzip etkin
+    rows.compress = !mods ? noData()
+        : (modEnabled('mod_brotli') || modEnabled('mod_gzip') ? make('running') : make('off'));
+    // Ters Proxy: mod_proxy etkin
+    rows.proxy = !mods ? noData() : (modEnabled('mod_proxy') ? make('running') : make('off'));
+
+    const counted = Object.keys(rows).filter((k) => rows[k].state !== 'unsupported');
+    const total = counted.length;
+    const count = (s) => counted.filter((k) => rows[k].state === s).length;
+    const running = count('running');
+    const unknown = count('unknown');
+    const warning = count('warning');
+    let summaryCls = 'status-orange';
+    if (warning > 0) summaryCls = 'status-danger';
+    else if (total > 0 && running === total) summaryCls = 'status-active';
+    else if (running === 0) summaryCls = 'status-unknown';
+
+    let overallState = 'unknown';
+    if (st && (st.running === false || warning > 0)) overallState = 'warning';
+    else if (st && st.running === true) overallState = 'stable';
+    const overall = {
+        state: overallState,
+        labelKey: { stable: 'status_stable', warning: 'status_warning_caps', unknown: 'status_unknown_caps' }[overallState],
+        cls: { stable: 'status-active', warning: 'status-danger', unknown: 'status-unknown' }[overallState]
+    };
+    return { rows, summary: { running, total, unknown, warning, cls: summaryCls }, overall };
+}
+// </svc-status>
+
 createApp({
     setup() {
         const currentTab = ref('overview');
@@ -93,6 +172,15 @@ createApp({
         };
 
         const engineVersion = ref('…');
+        const svcInput = ref({ status: null, vhosts: null, modules: null, hasToken: false });
+        const svcView = computed(() => computeServiceStatus(svcInput.value));
+        const svcSummaryText = computed(() => {
+            const s = svcView.value.summary;
+            let txt = t('svc_summary_running').replace('{n}', String(s.running)).replace('{total}', String(s.total));
+            if (s.unknown > 0) txt += ' · ' + t('svc_summary_unknown').replace('{n}', String(s.unknown));
+            return txt;
+        });
+        const svcHint = (row) => (row && row.hintKey ? t(row.hintKey) : '');
         // Sürüm bilgisi token istemeyen genel uçtan gelir; hata olursa '…' kalır.
         fetch('api/version')
             .then((r) => (r.ok ? r.json() : null))
@@ -360,6 +448,25 @@ createApp({
                     readSettledJson(logRes)
                 ]);
 
+                // Hizmet durumu girdisi: alınamayan veri null kalır (eski veri "Çalışıyor" göstermesin)
+                svcInput.value = {
+                    status: statusData,
+                    vhosts: (() => {
+                        const vl = extractArray(vhData, ['vhosts']);
+                        return vl === null ? null : vl.map((v) => ({
+                            waf_enabled: Boolean(v && (v.waf_enabled ?? (v.waf && v.waf.enabled)))
+                        }));
+                    })(),
+                    modules: (() => {
+                        const ml = extractArray(modData, ['modules']);
+                        return ml === null ? null : ml.map((m) => ({
+                            name: String((m && (m.name || '')) || '').trim(),
+                            enabled: typeof (m && m.enabled) === 'boolean' ? m.enabled : true
+                        }));
+                    })(),
+                    hasToken: Boolean((localStorage.getItem('zmax_api_token') || '').trim())
+                };
+
                 if (statusData) {
                     if (typeof statusData.version === 'string' && statusData.version) engineVersion.value = statusData.version;
                     if (typeof statusData.uptime_seconds === 'number') stats.value.uptime_seconds = statusData.uptime_seconds;
@@ -447,7 +554,8 @@ createApp({
                     logs.value = logList.map(normalizeLogEntry);
                 }
             } catch (e) {
-                // Arka plan anket hatası sessiz geçilir
+                // Arka plan anket hatası: durum doğrulanamadı, eski veri tutulmaz
+                svcInput.value = { status: null, vhosts: null, modules: null, hasToken: svcInput.value.hasToken };
             }
         };
 
@@ -639,6 +747,9 @@ createApp({
             closeMobileMenu,
             stats,
             engineVersion,
+            svcView,
+            svcSummaryText,
+            svcHint,
             vhosts,
             filteredVhosts,
             modules,
