@@ -8,7 +8,7 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 
 ## İlerleme
 
-**Son güncelleme: 2026-11-13 (VM canlı test oturumu) · sürüm 1.0.04**
+**Son güncelleme: 2026-11-13 (VM canlı test oturumu) · sürüm 1.0.07**
 
 İlerleme oranı, aşağıdaki bileşen tablosundaki 20 satırın durumundan hesaplanır. Her kalem kodlandıktan sonra incelemeden ve testlerden geçiyor.
 
