@@ -318,6 +318,7 @@ where
     S: AsyncRead + Unpin,
 {
     let mut tmp = [0u8; 8192];
+    let header_deadline = tokio::time::Instant::now() + limits.header_timeout;
 
     let header_end = loop {
         if let Some(pos) = find_header_end(leftover) {
@@ -331,7 +332,7 @@ where
             return Err(HttpReadError::HeadersTooLarge);
         }
 
-        let read_res = tokio::time::timeout(limits.header_timeout, stream.read(&mut tmp))
+        let read_res = tokio::time::timeout_at(header_deadline, stream.read(&mut tmp))
             .await
             .map_err(|_| HttpReadError::Timeout)?
             .map_err(HttpReadError::Io)?;
@@ -434,8 +435,9 @@ where
         if len == 0 {
             Vec::new()
         } else {
+            let body_deadline = tokio::time::Instant::now() + limits.body_timeout;
             while leftover.len() < len {
-                let n = tokio::time::timeout(limits.body_timeout, stream.read(&mut tmp))
+                let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                     .await
                     .map_err(|_| HttpReadError::Timeout)?
                     .map_err(HttpReadError::Io)?;
@@ -480,6 +482,7 @@ where
 
     let mut decoded = Vec::new();
     let mut tmp = [0u8; 8192];
+    let body_deadline = tokio::time::Instant::now() + body_timeout;
 
     loop {
         let line_end = loop {
@@ -496,7 +499,7 @@ where
                     "Chunk boyut satırında CRLF eksik".to_string(),
                 ));
             }
-            let n = tokio::time::timeout(body_timeout, stream.read(&mut tmp))
+            let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                 .await
                 .map_err(|_| HttpReadError::Timeout)?
                 .map_err(HttpReadError::Io)?;
@@ -522,7 +525,7 @@ where
                     if buf.len() + trailer_bytes > MAX_TRAILER_BYTES {
                         return Err(HttpReadError::HeadersTooLarge);
                     }
-                    let n = tokio::time::timeout(body_timeout, stream.read(&mut tmp))
+                    let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                         .await
                         .map_err(|_| HttpReadError::Timeout)?
                         .map_err(HttpReadError::Io)?;
@@ -555,7 +558,7 @@ where
             .checked_add(2)
             .ok_or(HttpReadError::PayloadTooLarge)?;
         while buf.len() < needed {
-            let n = tokio::time::timeout(body_timeout, stream.read(&mut tmp))
+            let n = tokio::time::timeout_at(body_deadline, stream.read(&mut tmp))
                 .await
                 .map_err(|_| HttpReadError::Timeout)?
                 .map_err(HttpReadError::Io)?;

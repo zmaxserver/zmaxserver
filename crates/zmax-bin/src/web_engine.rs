@@ -159,8 +159,8 @@ where
             let sec = &rt.config.security;
             let web_max_mb = sec.max_body_size_mb.max(1);
             (
-                sec.slowloris_header_timeout_sec.max(2),
-                sec.slowloris_body_timeout_sec.max(5),
+                sec.slowloris_header_timeout_sec.max(1),
+                sec.slowloris_body_timeout_sec.max(1),
                 sec.keep_alive_timeout_sec.max(1),
                 sec.max_header_size_kb.max(8) * 1024,
                 web_max_mb * 1024 * 1024,
@@ -1518,7 +1518,7 @@ where
             vhost_ctx.auto_avif,
             vhost_ctx.auto_webp,
         ) {
-            if let Ok(meta) = std::fs::metadata(&alt_path) {
+            if let Ok(meta) = tokio::fs::metadata(&alt_path).await {
                 let size = meta.len();
                 let last_modified_secs = meta
                     .modified()
@@ -3010,7 +3010,7 @@ async fn revalidate_static_cache(
             vhost_ctx.auto_avif,
             vhost_ctx.auto_webp,
         ) {
-            if let Ok(meta) = std::fs::metadata(&alt_path) {
+            if let Ok(meta) = tokio::fs::metadata(&alt_path).await {
                 let size = meta.len();
                 let last_modified_secs = meta
                     .modified()

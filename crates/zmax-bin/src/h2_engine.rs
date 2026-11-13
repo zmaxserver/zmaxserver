@@ -16,7 +16,6 @@ use crate::logger::AccessLogEntry;
 use crate::web_engine::{self, H2BodyReceiver, ParsedHttpRequest};
 
 const DEFAULT_H2_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-const DEFAULT_H2_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// HTTP/2 bağlantısını karşılar ve gelen tüm akışları (streams) asenkron olarak yürütür.
 pub async fn handle_h2_connection<S>(
@@ -37,10 +36,51 @@ where
         .max_frame_size(16384)
         .max_send_buffer_size(1024 * 1024);
 
-    let mut connection = builder.handshake(stream).await?;
+    let mut connection = match tokio::time::timeout(Duration::from_secs(10), builder.handshake(stream)).await {
+        Ok(res) => res?,
+        Err(_) => {
+            debug!(peer = %peer_addr, "HTTP/2 handshake zaman asimi (10s)");
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "HTTP/2 handshake zaman aşımı (10 saniye)",
+            )));
+        }
+    };
     debug!(peer = %peer_addr, "HTTP/2 el sikismasi tamamlandi");
 
-    while let Some(result) = connection.accept().await {
+    let (header_timeout, keep_alive_timeout) = {
+        let rt = state.runtime.read().await;
+        let sec = &rt.config.security;
+        (
+            Duration::from_secs(sec.slowloris_header_timeout_sec.max(1)),
+            Duration::from_secs(sec.keep_alive_timeout_sec.max(1)),
+        )
+    };
+
+    let mut is_first_stream = true;
+    loop {
+        let stream_timeout = if is_first_stream {
+            header_timeout
+        } else {
+            keep_alive_timeout
+        };
+
+        let accept_res = tokio::time::timeout(stream_timeout, connection.accept()).await;
+        let result = match accept_res {
+            Ok(Some(res)) => res,
+            Ok(None) => break,
+            Err(_) => {
+                debug!(
+                    peer = %peer_addr,
+                    is_first = is_first_stream,
+                    "HTTP/2 stream bekleme zaman asimi (slowloris/keep-alive)"
+                );
+                break;
+            }
+        };
+
+        is_first_stream = false;
+
         let (request, respond) = match result {
             Ok(pair) => pair,
             Err(err) => {
@@ -130,14 +170,17 @@ async fn process_h2_stream(
         headers_vec.push(("host".to_string(), authority_host.clone()));
     }
 
-    let max_body = {
+    let (max_body, body_timeout) = {
         let rt = state.runtime.read().await;
-        rt.config.security.max_body_size_mb * 1024 * 1024
-    };
-    let max_body = if max_body == 0 {
-        DEFAULT_H2_MAX_BODY_BYTES
-    } else {
-        max_body
+        let sec = &rt.config.security;
+        let mb = sec.max_body_size_mb * 1024 * 1024;
+        let mb = if mb == 0 {
+            DEFAULT_H2_MAX_BODY_BYTES
+        } else {
+            mb
+        };
+        let bt = Duration::from_secs(sec.slowloris_body_timeout_sec.max(1));
+        (mb, bt)
     };
 
     let mut body_buf = BytesMut::new();
@@ -157,7 +200,7 @@ async fn process_h2_stream(
         true
     };
 
-    let body_read_ok = tokio::time::timeout(DEFAULT_H2_BODY_TIMEOUT, read_body_future)
+    let body_read_ok = tokio::time::timeout(body_timeout, read_body_future)
         .await
         .unwrap_or(false);
 
