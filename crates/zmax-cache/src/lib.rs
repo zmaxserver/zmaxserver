@@ -1082,6 +1082,13 @@ impl ZMaxCache {
             return self.purge_by_domain(&d).await;
         }
         let normalized_path = extract_path_from_uri(uri);
+        self.purge_by_domain_uri_keys(&d, &normalized_path)
+            .await
+            .len()
+    }
+
+    /// `purge_by_domain_uri` çekirdeği: alan adı (küçük harf, boş değil) ve normalize yol için silinen anahtarları döner.
+    async fn purge_by_domain_uri_keys(&self, d: &str, normalized_path: &str) -> HashSet<String> {
         let mut purged_keys: HashSet<String> = HashSet::new();
 
         let domain_needle_http = format!("http://{d}|");
@@ -1094,7 +1101,7 @@ impl ZMaxCache {
             .filter(|entry| {
                 let k = entry.key();
                 (k.starts_with(&domain_needle_http) || k.starts_with(&domain_needle_https))
-                    && key_matches_uri(k, &normalized_path)
+                    && key_matches_uri(k, normalized_path)
             })
             .map(|entry| entry.key().clone())
             .collect();
@@ -1110,14 +1117,57 @@ impl ZMaxCache {
 
         // L2 disk eşleşmeleri
         if let Some(disk) = &self.disk {
-            for key in disk.purge_by_domain_and_uri_match(&d, &normalized_path).await {
+            for key in disk.purge_by_domain_and_uri_match(d, normalized_path).await {
                 self.cache.invalidate(&key).await;
                 self.unregister_key_tags(&key);
                 purged_keys.insert(key);
             }
         }
 
-        purged_keys.len()
+        purged_keys
+    }
+
+    /// Verilen etiketi `alan` kapsamında siler ve silinen anahtarları döner.
+    ///
+    /// Arama biçimleri: (1) `alan::etiket` (backend `X-LiteSpeed-Tag` etiketi ve `insert_with_tags`);
+    /// (2) alanı kendi içinde taşıyan ZMax iç etiketleri (`alan`, `domain::alan`, `domain:alan`,
+    /// `alan::...`) ham haliyle; (3) `__uri:`/`__path:` yol etiketleri alan kapsamlı yol temizliğiyle.
+    /// Başka alanı taşıyan ya da alansız ortak ham etiketler (`b.com::*`, `domain::b.com`) hiçbir zaman
+    /// doğrudan silinmez: vhost izolasyonu korunur.
+    async fn purge_domain_scoped_tag_keys(&self, domain: &str, tag: &str) -> HashSet<String> {
+        let t = tag.trim();
+        let mut keys: HashSet<String> = HashSet::new();
+        if t.is_empty() {
+            return keys;
+        }
+        keys.extend(
+            self.purge_by_tag_keys(&Self::format_domain_tag(domain, t))
+                .await,
+        );
+        let d = domain.trim().to_ascii_lowercase();
+        if d.is_empty() {
+            return keys;
+        }
+        let tl = t.to_ascii_lowercase();
+        if tl == d
+            || tl == format!("domain::{d}")
+            || tl == format!("domain:{d}")
+            || tl.starts_with(&format!("{d}::"))
+        {
+            keys.extend(self.purge_by_tag_keys(&tl).await);
+        } else if tl.starts_with("__uri:") || tl.starts_with("__path:") {
+            // Yol büyük/küçük harf duyarlıdır: özgün (küçültülmemiş) değer kullanılır; önek ASCII olduğundan
+            // bayt kaydırması güvenlidir.
+            let prefix_len = tl.find(':').map_or(0, |i| i + 1);
+            let raw_path = t[prefix_len..].trim();
+            if !raw_path.is_empty() {
+                keys.extend(
+                    self.purge_by_domain_uri_keys(&d, &extract_path_from_uri(raw_path))
+                        .await,
+                );
+            }
+        }
+        keys
     }
 
     /// Belirli bir alan adına (`domain::tag`) ait önbellek girdilerini temizler.
@@ -1134,12 +1184,8 @@ impl ZMaxCache {
             }
             return self.purge_by_domain(domain).await;
         }
-        let mut purged_keys: HashSet<String> = HashSet::new();
-        let scoped = Self::format_domain_tag(domain, t);
-        // Yalnız `alan::etiket` kayıtları: ham etiket birden çok vhost'un girdisini indekslediğinden
-        // burada silinirse başka vhost'un önbelleği de boşalırdı (vhost izolasyonu).
-        purged_keys.extend(self.purge_by_tag_keys(&scoped).await);
-        purged_keys.len()
+        // Ham ortak etiket birden çok vhost'un girdisini indekslediğinden doğrudan silinmez (vhost izolasyonu).
+        self.purge_domain_scoped_tag_keys(domain, t).await.len()
     }
 
     /// Verilen alan adı için birden çok etiketi tek seferde temizler ve benzersiz silinen kayıt sayısını döner.
@@ -1155,8 +1201,7 @@ impl ZMaxCache {
                 self.purge_all().await;
                 return count.max(purged_keys.len());
             }
-            let scoped = Self::format_domain_tag(domain, t);
-            purged_keys.extend(self.purge_by_tag_keys(&scoped).await);
+            purged_keys.extend(self.purge_domain_scoped_tag_keys(domain, t).await);
         }
         purged_keys.len()
     }
@@ -1166,10 +1211,20 @@ impl ZMaxCache {
         if directive.purge_all {
             let mut tags = Vec::with_capacity(directive.purge_tags.len() + 1);
             tags.push("*".to_string());
-            tags.extend(directive.purge_tags.iter().cloned());
+            tags.extend(
+                directive
+                    .purge_tags
+                    .iter()
+                    .map(|t| strip_purge_tag_prefix(t)),
+            );
             self.purge_by_tags(domain, &tags).await
         } else {
-            self.purge_by_tags(domain, &directive.purge_tags).await
+            let tags: Vec<String> = directive
+                .purge_tags
+                .iter()
+                .map(|t| strip_purge_tag_prefix(t))
+                .collect();
+            self.purge_by_tags(domain, &tags).await
         }
     }
 
@@ -1182,6 +1237,15 @@ impl ZMaxCache {
             disk.purge_all().await;
         }
     }
+}
+
+/// LSCache `X-LiteSpeed-Purge: tag=foo` yazımındaki `tag=` önekini atar (etiket `foo` olur).
+fn strip_purge_tag_prefix(token: &str) -> String {
+    let t = token.trim();
+    strip_prefix_ignore_ascii_case(t, "tag=")
+        .map(str::trim)
+        .unwrap_or(t)
+        .to_string()
 }
 
 fn encode_disk_entry(key: &str, entry: &CacheEntry) -> Vec<u8> {
@@ -2041,5 +2105,106 @@ mod tests {
         assert!(cache.get(&k_d2_p).await.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// web_engine'in yazdığı biçim: etiketler ham (`domain::alan`, `alan::*`, `__uri:yol`) ve
+    /// backend etiketi hem ham hem `alan::etiket` olarak kayıtlıdır.
+    async fn insert_engine_style(
+        cache: &ZMaxCache,
+        host: &str,
+        path: &str,
+        backend_tag: Option<&str>,
+    ) -> String {
+        let key = build_cache_key(host, false, "GET", path, "", None);
+        let mut tags = vec![
+            host.to_string(),
+            format!("domain::{host}"),
+            format!("domain:{host}"),
+            format!("{host}::*"),
+            format!("__uri:{path}"),
+            format!("__path:{path}"),
+        ];
+        if let Some(t) = backend_tag {
+            tags.push(t.to_string());
+            tags.push(ZMaxCache::format_domain_tag(host, t));
+        }
+        let resp = CachedResponse {
+            status: 200,
+            content_type: "text/html".to_string(),
+            body: Bytes::from_static(b"x"),
+            tags,
+        };
+        cache
+            .set_with_ttl_and_stale(key.clone(), resp, 120, 0)
+            .await;
+        key
+    }
+
+    #[tokio::test]
+    async fn purge_by_tags_matches_engine_internal_tag_forms() {
+        for (label, tag) in [
+            ("domain::alan", "domain::a.test"),
+            ("domain:alan", "domain:a.test"),
+            ("alan", "a.test"),
+            ("alan::*", "a.test::*"),
+            ("__uri", "__uri:/readme.html"),
+            ("__path", "__path:/readme.html"),
+        ] {
+            let cache = ZMaxCache::new(1024 * 1024, 60);
+            let k = insert_engine_style(&cache, "a.test", "/readme.html", None).await;
+            let n = cache.purge_by_tags("a.test", &[tag.to_string()]).await;
+            assert_eq!(n, 1, "{label}: silinen sayı");
+            assert!(cache.get(&k).await.is_none(), "{label}: girdi silinmeli");
+        }
+    }
+
+    #[tokio::test]
+    async fn purge_by_tags_backend_tag_and_tag_prefix_still_work() {
+        let cache = ZMaxCache::new(1024 * 1024, 60);
+        let k = insert_engine_style(&cache, "a.test", "/p", Some("foo")).await;
+        assert_eq!(cache.purge_by_tags("a.test", &["foo".to_string()]).await, 1);
+        assert!(cache.get(&k).await.is_none());
+
+        let cache = ZMaxCache::new(1024 * 1024, 60);
+        let k = insert_engine_style(&cache, "a.test", "/p", Some("foo")).await;
+        let dir = parse_lscache_headers([("X-LiteSpeed-Purge", "tag=foo")]);
+        assert_eq!(cache.apply_lscache_purge("a.test", &dir).await, 1);
+        assert!(cache.get(&k).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn purge_by_tags_engine_forms_keep_vhost_isolation() {
+        let cache = ZMaxCache::new(1024 * 1024, 60);
+        let ka = insert_engine_style(&cache, "a.test", "/readme.html", Some("foo")).await;
+        let kb = insert_engine_style(&cache, "b.test", "/readme.html", Some("foo")).await;
+        // A vhost'undan B'nin (ve ortak) etiketleri: hiçbiri B girdisini silmemeli.
+        for tag in [
+            "domain::b.test",
+            "domain:b.test",
+            "b.test",
+            "b.test::*",
+            "b.test::foo",
+        ] {
+            assert_eq!(
+                cache.purge_by_tags("a.test", &[tag.to_string()]).await,
+                0,
+                "{tag}: A başka vhost etiketiyle silmemeli"
+            );
+        }
+        assert!(cache.get(&ka).await.is_some());
+        assert!(cache.get(&kb).await.is_some());
+        // Ortak ham yol etiketi ve backend etiketi yalnız A'nın girdisini siler.
+        assert_eq!(
+            cache
+                .purge_by_tags("a.test", &["__uri:/readme.html".to_string()])
+                .await,
+            1
+        );
+        assert!(cache.get(&ka).await.is_none());
+        assert!(cache.get(&kb).await.is_some());
+        assert_eq!(cache.purge_by_tags("a.test", &["foo".to_string()]).await, 0);
+        assert!(cache.get(&kb).await.is_some());
+        assert_eq!(cache.purge_by_tags("b.test", &["foo".to_string()]).await, 1);
+        assert!(cache.get(&kb).await.is_none());
     }
 }
