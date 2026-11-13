@@ -350,10 +350,14 @@ impl Resp {
 }
 
 async fn read_resp<S: AsyncReadExt + Unpin>(s: &mut S) -> TestResult<Resp> {
+    read_resp_with(s, Duration::from_secs(15)).await
+}
+
+async fn read_resp_with<S: AsyncReadExt + Unpin>(s: &mut S, per_read: Duration) -> TestResult<Resp> {
     let mut raw = Vec::new();
     let mut tmp = [0u8; 65536];
     loop {
-        match tokio::time::timeout(Duration::from_secs(15), s.read(&mut tmp)).await {
+        match tokio::time::timeout(per_read, s.read(&mut tmp)).await {
             Ok(Ok(0)) | Ok(Err(_)) => break,
             Ok(Ok(n)) => raw.extend_from_slice(&tmp[..n]),
             Err(_) => return Err("okuma zaman asimi".into()),
@@ -729,5 +733,192 @@ async fn duz_http_loopback_dinleyici_ve_istemci_baglanti_siniri() -> TestResult 
     drop(first);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(tls_get(p_lim, "/").await?.status, 200);
+    Ok(())
+}
+
+// ------------------------------------------------------------------ panel uyum hataları (413/502 ve zaman aşımı)
+
+/// Gövdeyi OKUMADAN 413 yazıp bağlantıyı hemen kapatan arka uç (Fastify `bodyLimit` davranışı).
+async fn spawn_early_413(close_after: Duration) -> Upstream {
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    // Küçük alıcı tamponu: gövde yazımı arka uç okumayınca hızla tıkanır (kabul edilen soketler devralır).
+    let _ = socket2::SockRef::from(&l).set_recv_buffer_size(4096);
+    let up = Upstream {
+        port: l.local_addr().unwrap().port(),
+        hits: Arc::new(AtomicUsize::new(0)),
+        heads: Arc::new(Mutex::new(Vec::new())),
+    };
+    let u2 = up.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let u = u2.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 16384];
+                while head_end(&buf).is_none() {
+                    match s.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                u.hits.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"statusCode":413,"error":"Payload Too Large"}"#;
+                let resp = format!(
+                    "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                tokio::time::sleep(close_after).await;
+                drop(s); // okunmamış gövde baytları varken kapanış (RST)
+            });
+        }
+    });
+    up
+}
+
+/// İstek başını okuyup `delay` sonra 200 yanıtlayan arka uç.
+async fn spawn_delayed(delay: Duration, tag: &'static str) -> Upstream {
+    let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let up = Upstream {
+        port: l.local_addr().unwrap().port(),
+        hits: Arc::new(AtomicUsize::new(0)),
+        heads: Arc::new(Mutex::new(Vec::new())),
+    };
+    let u2 = up.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let u = u2.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while head_end(&buf).is_none() {
+                    match s.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                u.hits.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(delay).await;
+                let body = format!("SLOW:{tag}");
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    up
+}
+
+async fn post_413_tekrar(close_after: Duration, mb: usize, reps: usize) -> TestResult {
+    let ws = Workspace::new("e413");
+    let up = spawn_early_413(close_after).await;
+    let (api, port) = (free_port(), free_port());
+    let cert = ws.cert("p");
+    std::fs::write(ws.conf(), base_conf(api, &extra_block("panel", port, &upstream_url(&up), &cert, "")))?;
+    let _srv = spawn(&ws)?;
+
+    let body = vec![b'x'; mb * 1024 * 1024];
+    let head = format!(
+        "POST /api/v1/upload HTTP/1.1\r\nHost: panel.example\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut codes = Vec::new();
+    for _ in 0..reps {
+        let t = std::time::Instant::now();
+        let r = tls_raw(port, &head, &body).await?;
+        assert!(t.elapsed() < Duration::from_secs(10), "413 gecikti: {:?}", t.elapsed());
+        codes.push(r.status);
+        if r.status == 413 {
+            assert!(r.text().contains("Payload Too Large"), "{}", r.text());
+        }
+    }
+    assert_eq!(codes, vec![413u16; reps], "tum denemeler 413 olmali: {codes:?}");
+    assert_eq!(up.hits.load(Ordering::SeqCst), reps);
+    Ok(())
+}
+
+/// Arka uç 413 yazıp ~20 ms sonra okunmamış gövdeyle kapatır (RST): 5 MB gövde, 20 tekrar, hepsi 413.
+/// Not: sıfır gecikmeli RST'de Windows alıcı tamponunu atar (yanıt OS düzeyinde kaybolur); Linux'ta tampon korunur.
+#[tokio::test]
+async fn upstream_erken_413_verip_kapatinca_5mb_govdede_413_iletilir_20_tekrar() -> TestResult {
+    post_413_tekrar(Duration::from_millis(20), 5, 20).await
+}
+
+/// Arka uç 413'ü yazar ama gövdeyi HİÇ okumadan bağlantıyı açık tutar: istek yazımı tampon dolunca tıkanır.
+/// Eşzamanlı yanıt dinleme yoksa vekil sonsuza dek yazmada takılır; olmalıdır ki 413 hemen iletilsin (OS'tan bağımsız).
+#[tokio::test]
+async fn upstream_413_yazip_govdeyi_okumayinca_yazma_tikanmaz_413_iletilir() -> TestResult {
+    post_413_tekrar(Duration::from_secs(30), 60, 5).await
+}
+
+#[tokio::test]
+async fn ek_dinleyici_init_timeout_300_35sn_gecikmeli_yanit_200() -> TestResult {
+    let ws = Workspace::new("t35");
+    let up = spawn_delayed(Duration::from_secs(35), "EK").await;
+    let (api, port) = (free_port(), free_port());
+    let cert = ws.cert("p");
+    // proxy_ext alt tablosu ssl tablosundan sonra yazılır (aynı [[listeners.extra]] girdisine bağlanır).
+    let block = format!(
+        "{}[listeners.extra.proxy_ext]\ninit_timeout_sec = 300\n",
+        extra_block("panel", port, &upstream_url(&up), &cert, "")
+    );
+    std::fs::write(ws.conf(), base_conf(api, &block))?;
+    let _srv = spawn(&ws)?;
+    let started = std::time::Instant::now();
+    let mut s = tls_connect(port).await?;
+    s.write_all(b"GET /yavas HTTP/1.1\r\nHost: panel.example\r\nConnection: close\r\n\r\n").await?;
+    let r = read_resp_with(&mut s, Duration::from_secs(120)).await?;
+    assert!(started.elapsed() >= Duration::from_secs(34));
+    assert_eq!(r.status, 200, "{}", r.head);
+    assert!(r.text().contains("SLOW:EK"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ek_dinleyici_kisa_init_timeout_gecikmede_504_negatif_kontrol() -> TestResult {
+    let ws = Workspace::new("t3");
+    let up = spawn_delayed(Duration::from_secs(6), "EK").await;
+    let (api, port) = (free_port(), free_port());
+    let cert = ws.cert("p");
+    let block = format!(
+        "{}[listeners.extra.proxy_ext]\ninit_timeout_sec = 2\n",
+        extra_block("panel", port, &upstream_url(&up), &cert, "")
+    );
+    std::fs::write(ws.conf(), base_conf(api, &block))?;
+    let _srv = spawn(&ws)?;
+    let r = tls_get(port, "/yavas").await?;
+    assert_eq!(r.status, 504, "{}", r.head);
+    Ok(())
+}
+
+#[tokio::test]
+async fn vhost_proxy_init_timeout_300_35sn_gecikmeli_yanit_200() -> TestResult {
+    let ws = Workspace::new("vh35");
+    let up = spawn_delayed(Duration::from_secs(35), "VH").await;
+    let (api, http) = (free_port(), free_port());
+    std::fs::create_dir_all(ws.root.join("www/html"))?;
+    let conf = base_conf(api, "").replace(
+        "[listeners.http]\nenabled = false",
+        &format!("[listeners.http]\nenabled = true\naddress = \"127.0.0.1\"\nport = {http}"),
+    );
+    std::fs::write(ws.conf(), conf)?;
+    std::fs::write(
+        ws.root.join("conf/vhosts/panel.example.toml"),
+        format!(
+            "[vhost]\nname = \"panel.example\"\ndocument_root = \"www/html\"\n\n[vhost.php]\nenabled = false\n\n[vhost.proxy]\nenabled = true\nupstream = \"{}\"\npath_prefix = \"/\"\n\n[vhost.proxy_ext]\nresp_buffer = false\ninit_timeout_sec = 300\n",
+            format!("127.0.0.1:{}", up.port)
+        ),
+    )?;
+    let _srv = spawn(&ws)?;
+    let started = std::time::Instant::now();
+    let mut s = TcpStream::connect(("127.0.0.1", http)).await?;
+    s.write_all(b"GET /yavas HTTP/1.1\r\nHost: panel.example\r\nConnection: close\r\n\r\n").await?;
+    let r = read_resp_with(&mut s, Duration::from_secs(120)).await?;
+    assert_eq!(r.status, 200, "{} {} t={:?}", r.head, r.text(), started.elapsed());
+    assert!(r.text().contains("SLOW:VH"));
     Ok(())
 }
