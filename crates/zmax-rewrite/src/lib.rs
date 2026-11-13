@@ -156,6 +156,8 @@ pub struct RouteRequest<'a> {
     pub index_files: &'a [String],
     pub php_enabled: bool,
     pub try_files_enabled: bool,
+    pub autoindex: bool,
+    pub block_dangerous_files: bool,
 }
 
 impl<'a> RouteRequest<'a> {
@@ -174,6 +176,8 @@ impl<'a> RouteRequest<'a> {
             index_files: &[],
             php_enabled: true,
             try_files_enabled: true,
+            autoindex: false,
+            block_dangerous_files: false,
         }
     }
 }
@@ -522,6 +526,106 @@ fn resolve_filesystem_target(
     None
 }
 
+// [ols-b5] İndeks dosyası içermeyen fiziksel dizin olup olmadığını güvenli kontrol eder (.well-known hariç).
+fn is_existing_dir_without_index(
+    canonical_root: &Path,
+    doc_root: &Path,
+    clean_path: &str,
+    index_files: &[&str],
+) -> bool {
+    let rel = clean_path.trim_matches('/');
+    if rel == ".well-known" || rel.starts_with(".well-known/") {
+        return false;
+    }
+    let target = if rel.is_empty() {
+        canonical_root.to_path_buf()
+    } else {
+        doc_root.join(rel)
+    };
+    let Ok(canon_target) = std::fs::canonicalize(&target) else {
+        return false;
+    };
+    if !canon_target.starts_with(canonical_root) || !canon_target.is_dir() {
+        return false;
+    }
+
+    for idx in index_files {
+        if !is_safe_index_entry(idx) {
+            continue;
+        }
+        let cand = canon_target.join(idx);
+        if let Ok(canon_cand) = std::fs::canonicalize(&cand) {
+            if canon_cand.starts_with(&canon_target) && canon_cand.is_file() {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// [ols-b5] OLS B5 Denkliği ve WordPress güvenlik standardı:
+/// Temel korunan kaynaklar (.git, .env, .htaccess, .htpasswd, wp-config, xmlrpc)
+/// ve isteğe bağlı tehlikeli dosya/uzantı engeli (`block_dangerous_files: true`).
+pub fn is_protected_or_dangerous_path(raw_path: &str, block_dangerous_files: bool) -> bool {
+    if raw_path == "/.well-known"
+        || raw_path.starts_with("/.well-known/")
+        || raw_path.starts_with(".well-known/")
+    {
+        return false;
+    }
+
+    let clean = raw_path.split('?').next().unwrap_or(raw_path);
+    let trimmed = clean.trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // 1. Dizin segmentleri kontrolü (PATH_INFO atlatmalarını da engeller: örn. /xmlrpc.php/x)
+    for seg in trimmed.split('/') {
+        if seg.is_empty() {
+            continue;
+        }
+        let seg_lower = seg.to_ascii_lowercase();
+        if seg_lower == ".git" || seg_lower.starts_with(".git/") || seg_lower == ".gitignore" {
+            return true;
+        }
+        if seg_lower == ".env" || seg_lower.starts_with(".env.") {
+            return true;
+        }
+        // Yalnızca hassas Apache/OLS kontrol dosyaları (.htmx gibi isimleri engellemez)
+        if seg_lower == ".htaccess" || seg_lower == ".htpasswd" || seg_lower == ".htgroup" {
+            return true;
+        }
+        // Hassas WordPress giriş noktaları (PATH_INFO /xmlrpc.php/x veya /wp-config.php/x dahil)
+        if seg_lower == "wp-config.php" || seg_lower == "xmlrpc.php" {
+            return true;
+        }
+    }
+
+    // 2. İsteğe bağlı tehlikeli dosya ve uzantı kontrolleri (yalnızca block_dangerous_files = true ise)
+    if block_dangerous_files {
+        let filename = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        let filename_lower = filename.to_ascii_lowercase();
+
+        if filename_lower == "readme.html"
+            || filename_lower == "license.txt"
+            || filename_lower == "licence.txt"
+        {
+            return true;
+        }
+
+        if let Some((_, ext)) = filename_lower.rsplit_once('.') {
+            match ext {
+                "sql" | "bak" | "log" | "sh" | "swp" => return true,
+                _ => {}
+            }
+        }
+    }
+
+    false
+}
+
 fn merge_env_vars(dst: &mut Vec<(String, String)>, src: Vec<(String, String)>) {
     for (k, v) in src {
         if !dst.iter().any(|(ek, _)| *ek == k) {
@@ -607,6 +711,15 @@ fn resolve_chain_with_info(
         headers: req.headers,
     };
 
+    // [ols-b5] Doğrudan korunan hassas dosya ve tehlikeli uzantı kontrolü (.env, .git, wp-config, .(sql|bak|log|sh|swp))
+    if is_protected_or_dangerous_path(decoded_path, req.block_dangerous_files) {
+        return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+            collected_env,
+            disable_indexes,
+            error_documents,
+        );
+    }
+
     // <FilesMatch> ve <Files> kuralları (RewriteEngine Off olsa dahi hiyerarşik uygulanır)
     let filename = decoded_path.rsplit('/').next().unwrap_or("");
     if !filename.is_empty() {
@@ -688,6 +801,18 @@ fn resolve_chain_with_info(
         req.php_enabled,
     ) {
         return found.with_metadata(collected_env, disable_indexes, error_documents);
+    }
+
+    // [ols-b5] İndeks dosyası içermeyen fiziksel dizin koruması (autoindex off / Options -Indexes -> 403 Forbidden)
+    if is_existing_dir_without_index(canonical_root, req.doc_root, decoded_path, &custom_indexes) {
+        let is_autoindex_off = disable_indexes.unwrap_or(!req.autoindex);
+        if is_autoindex_off {
+            return RouteResolution::from_outcome(RouteOutcome::Forbidden).with_metadata(
+                collected_env,
+                disable_indexes,
+                error_documents,
+            );
+        }
     }
 
     // 4. try_files fallback (/index.php veya statik /index.html)
@@ -2254,5 +2379,84 @@ RewriteRule . /index.php [L]
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_pretty_directory_with_rewrite_rule_precedence() {
+        let root = temp_site("pretty_rewrite_prec");
+        let pretty_dir = root.join("pretty");
+        std::fs::create_dir_all(&pretty_dir).unwrap();
+        // İndeks dosyası yok, sadece alt dosya
+        std::fs::write(pretty_dir.join("sub.txt"), "sub").unwrap();
+        // Hedef normal dosya
+        std::fs::write(root.join("normal.html"), "Normal HTML").unwrap();
+
+        // 1. .htaccess içinde RewriteRule ^pretty/?$ /normal.html [L] var iken
+        let ht_content = "RewriteEngine On\nRewriteRule ^pretty/?$ /normal.html [L]\n";
+        std::fs::write(root.join(".htaccess"), ht_content).unwrap();
+
+        let resolver = HtAccessResolver::from_doc_root(&root);
+        let mut req = RouteRequest::new(&root, "/pretty/");
+        req.autoindex = false;
+
+        let res = resolver.resolve(&req);
+        match res {
+            RouteOutcome::StaticFile { path, .. } => {
+                assert_eq!(path, "/normal.html", "autoindex yerine rewrite oncelikli olmali!");
+            }
+            other => panic!("Beklenen StaticFile /normal.html, alinan: {:?}", other),
+        }
+
+        // 2. Rewrite kuralı olmadan autoindex off durumunda fiziksel indekssiz dizin 403 Forbidden donmeli
+        std::fs::write(root.join(".htaccess"), "Options -Indexes\n").unwrap();
+        let resolver_no_rw = HtAccessResolver::from_doc_root(&root);
+        let mut req_no_rw = RouteRequest::new(&root, "/pretty/");
+        req_no_rw.autoindex = false;
+        let res_no_rw = resolver_no_rw.resolve(&req_no_rw);
+        assert_eq!(res_no_rw, RouteOutcome::Forbidden, "Rewrite kurali yoksa autoindex off 403 Forbidden donmeli");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_protected_and_dangerous_paths() {
+        // Her zaman korunanlar (block_dangerous = false olsa da)
+        assert!(is_protected_or_dangerous_path("/.git", false));
+        assert!(is_protected_or_dangerous_path("/.git/config", false));
+        assert!(is_protected_or_dangerous_path("/.env", false));
+        assert!(is_protected_or_dangerous_path("/.env.local", false));
+        assert!(is_protected_or_dangerous_path("/.htaccess", false));
+        assert!(is_protected_or_dangerous_path("/.htpasswd", false));
+        assert!(is_protected_or_dangerous_path("/wp-config.php", false));
+        assert!(is_protected_or_dangerous_path("/xmlrpc.php", false));
+        // PATH_INFO atlatma koruması
+        assert!(is_protected_or_dangerous_path("/xmlrpc.php/test", false));
+        assert!(is_protected_or_dangerous_path("/wp-config.php/extra", false));
+
+        // .htmx gibi meşru isimler engellenmemeli
+        assert!(!is_protected_or_dangerous_path("/app.htmx", false));
+        assert!(!is_protected_or_dangerous_path("/scripts/htmx.min.js", false));
+
+        // ACME muafiyeti
+        assert!(!is_protected_or_dangerous_path("/.well-known/acme-challenge/token123", false));
+        assert!(!is_protected_or_dangerous_path("/.well-known/acme-challenge/token123", true));
+
+        // block_dangerous = false iken izin verilenler
+        assert!(!is_protected_or_dangerous_path("/backup.sql", false));
+        assert!(!is_protected_or_dangerous_path("/archive.bak", false));
+        assert!(!is_protected_or_dangerous_path("/system.log", false));
+        assert!(!is_protected_or_dangerous_path("/deploy.sh", false));
+        assert!(!is_protected_or_dangerous_path("/file.swp", false));
+        assert!(!is_protected_or_dangerous_path("/readme.html", false));
+        assert!(!is_protected_or_dangerous_path("/license.txt", false));
+
+        // block_dangerous = true iken engellenenler
+        assert!(is_protected_or_dangerous_path("/backup.sql", true));
+        assert!(is_protected_or_dangerous_path("/archive.bak", true));
+        assert!(is_protected_or_dangerous_path("/system.log", true));
+        assert!(is_protected_or_dangerous_path("/deploy.sh", true));
+        assert!(is_protected_or_dangerous_path("/file.swp", true));
+        assert!(is_protected_or_dangerous_path("/readme.html", true));
+        assert!(is_protected_or_dangerous_path("/license.txt", true));
     }
 }

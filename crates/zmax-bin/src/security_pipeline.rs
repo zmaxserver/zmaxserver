@@ -66,6 +66,12 @@ pub fn evaluate_request_security(
     wp_guard: &WpBruteForceGuard,
     wp_brute_force_enabled: bool,
 ) -> SecurityVerdict {
+    // 0. OLS B5 Denkliği: Korunan hassas kaynaklar, gizli dizinler (.git, .env) ve vhost yapılandırmasına göre tehlikeli dosyalar
+    if zmax_rewrite::is_protected_or_dangerous_path(path, vhost_ctx.block_dangerous_files) {
+        return SecurityVerdict::Blocked {
+            reason: "403 Forbidden - Protected Resource",
+        };
+    }
     // 1. Yasaklı IP Denetimi (IpBanManager)
     if ban_manager.is_banned(peer_ip) || ban_manager.is_banned(real_ip) {
         return SecurityVerdict::Blocked {
