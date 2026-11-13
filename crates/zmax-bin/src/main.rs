@@ -419,6 +419,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_manager: log_mgr,
         htaccess_resolver: htaccess_res,
         shutdown: shutdown_coord,
+        waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
         access_logs: Mutex::new(VecDeque::with_capacity(200)),
         stats: ServerStats {
             start_time: Instant::now(),
@@ -1235,6 +1236,7 @@ mod tests {
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
             stats: ServerStats {
                 start_time: Instant::now(),
@@ -2412,6 +2414,7 @@ mod tests {
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
             stats: ServerStats {
                 start_time: Instant::now(),
@@ -2817,6 +2820,7 @@ mod tests {
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
             stats: ServerStats {
                 start_time: Instant::now(),
@@ -3268,6 +3272,7 @@ mod tests {
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
             stats: ServerStats {
                 start_time: Instant::now(),

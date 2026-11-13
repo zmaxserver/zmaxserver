@@ -6,7 +6,8 @@ use crate::web_engine::{is_acme_challenge, ResolvedVHostContext};
 use std::net::IpAddr;
 use zmax_config::{VHostSecuritySection, VhostAclConfig};
 use zmax_security::{
-    is_hotlink_blocked, IpBanManager, VHostWafPolicy, VhostAcl, WafInspector, WpBruteForceGuard,
+    is_hotlink_blocked, IpBanManager, VHostWafPolicy, VhostAcl, WafInspector, WafViolation,
+    WpBruteForceGuard,
 };
 
 /// `[vhost.security]` ve `[vhost.acl]` bölümlerindeki allow/deny kurallarını
@@ -45,7 +46,7 @@ pub enum SecurityVerdict {
     /// İstek IP engeli, ACL veya kaba kuvvet nedeniyle reddedildi (403 Forbidden).
     Blocked { reason: &'static str },
     /// İstek WAF kural ihlali nedeniyle engellendi (403 Forbidden).
-    WafBlocked { violation: String },
+    WafBlocked { violation: WafViolation },
 }
 
 /// HTTP/1.1 ve HTTP/2 boru hatlarında istek gövdesi işlenmeden ÖNCE çalıştırılan ortak güvenlik kapısı.
@@ -103,12 +104,15 @@ pub fn evaluate_request_security(
         waf_enabled: vhost_ctx.waf_enabled,
         exclude_paths: &vhost_ctx.waf_exclude_paths,
     };
-    if let Err(violation) =
-        waf_inspector.inspect_with_policy(method, path, query, headers, body, &vhost_waf_policy)
-    {
-        return SecurityVerdict::WafBlocked {
-            violation: violation.to_string(),
-        };
+    if let Err(violation) = waf_inspector.inspect_with_policy(
+        method,
+        path,
+        query,
+        headers,
+        body,
+        &vhost_waf_policy,
+    ) {
+        return SecurityVerdict::WafBlocked { violation };
     }
 
     // 4. WordPress Kaba Kuvvet Koruması (/wp-login.php, /xmlrpc.php)
@@ -299,6 +303,30 @@ pub fn build_auth_denial(
             "503 Service Unavailable - Authentication queue is busy\n",
             Some(*retry_after_secs),
         )),
+    }
+}
+
+/// WAF engelleme olayını 24 saatlik sayaca ve asenkron WAF olay günlüğüne tek çağrıyla kaydeder.
+pub fn record_waf_block(
+    state: &crate::api::ServerState,
+    vhost_ctx: &ResolvedVHostContext,
+    client_ip: &str,
+    method: &str,
+    path: &str,
+    violation: &WafViolation,
+) {
+    let record = state.waf_events.record_violation(
+        violation,
+        &vhost_ctx.vhost_name,
+        client_ip,
+        method,
+        path,
+    );
+    let ok = state
+        .log_manager
+        .log_waf_event(record, None, vhost_ctx.max_log_size_bytes, true);
+    if !ok {
+        state.waf_events.record_dropped();
     }
 }
 

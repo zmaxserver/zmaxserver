@@ -80,7 +80,7 @@ pub struct ResolvedVHostContext {
     auto_avif: bool,
     etag_enabled: bool,
     last_modified_header: bool,
-    max_log_size_bytes: u64,
+    pub max_log_size_bytes: u64,
     headers_policy: Option<SecurityHeadersPolicy>,
     // 8-Madde Alanlari
     pub waf_enabled: Option<bool>,
@@ -598,9 +598,24 @@ where
             return Ok(false);
         }
         crate::security_pipeline::SecurityVerdict::WafBlocked { violation } => {
+            let target_uri = if req.query.is_empty() {
+                req.path.clone()
+            } else {
+                format!("{}?{}", req.path, req.query)
+            };
+            crate::security_pipeline::record_waf_block(
+                state,
+                &vhost_ctx,
+                &real_ip_str,
+                &req.method,
+                &target_uri,
+                &violation,
+            );
+            let safe_waf_path = zmax_security::waf_events::sanitize_waf_path(&target_uri);
+            let safe_waf_rule = zmax_security::waf_events::format_waf_rule_label(&violation);
             let err_line = format!(
                 "[WAF] [{}] {} {} {} -> {}",
-                vhost_ctx.vhost_name, real_ip_str, req.method, req.path, violation
+                vhost_ctx.vhost_name, real_ip_str, req.method, safe_waf_path, safe_waf_rule
             );
             append_error_log_limit(&state.base_dir, &err_line, vhost_ctx.max_log_size_bytes).await;
             let written_bytes = write_error_response(
@@ -3683,10 +3698,16 @@ async fn record_and_log(
         bytes_sent.to_string()
     };
     let actual_bytes = if is_zero_body { 0 } else { bytes_sent };
+    let safe_path_owned = zmax_security::waf_events::redact_sensitive_url_target(path);
+    let safe_path = if safe_path_owned.is_empty() {
+        "/"
+    } else {
+        safe_path_owned.as_str()
+    };
     state.record_access_log_detailed(
         ip,
         method,
-        path,
+        safe_path,
         status,
         started.elapsed(),
         actual_bytes,
@@ -3695,7 +3716,7 @@ async fn record_and_log(
     );
     let line = format!(
         "{} - - \"{} {} {}\" {} {}\r\n",
-        ip, method, path, http_version, status, bytes_str
+        ip, method, safe_path, http_version, status, bytes_str
     );
     append_access_log_limit(&state.base_dir, &line, max_log_size_bytes).await;
 
@@ -3703,7 +3724,7 @@ async fn record_and_log(
         state,
         ip,
         method,
-        path,
+        safe_path,
         status,
         started,
         actual_bytes,
@@ -4130,6 +4151,26 @@ pub async fn handle_h2_dispatched_request(
             return Ok((403, headers, bytes::Bytes::from(body), log_meta));
         }
         crate::security_pipeline::SecurityVerdict::WafBlocked { violation } => {
+            let target_uri = if req.query.is_empty() {
+                req.path.clone()
+            } else {
+                format!("{}?{}", req.path, req.query)
+            };
+            crate::security_pipeline::record_waf_block(
+                state,
+                &vhost_ctx,
+                &real_ip.to_string(),
+                &req.method,
+                &target_uri,
+                &violation,
+            );
+            let safe_waf_path = zmax_security::waf_events::sanitize_waf_path(&target_uri);
+            let safe_waf_rule = zmax_security::waf_events::format_waf_rule_label(&violation);
+            let err_line = format!(
+                "[WAF] [{}] {} {} {} -> {}",
+                vhost_ctx.vhost_name, real_ip, req.method, safe_waf_path, safe_waf_rule
+            );
+            append_error_log_limit(&state.base_dir, &err_line, vhost_ctx.max_log_size_bytes).await;
             let handler = StaticFileHandler::new(&vhost_ctx.doc_root);
             let body = if let Some(rel) = vhost_ctx.error_docs.pages.get(&403) {
                 handler
@@ -4140,7 +4181,7 @@ pub async fn handle_h2_dispatched_request(
             };
             let headers = vec![
                 ("content-type".into(), "text/html; charset=utf-8".into()),
-                ("x-waf-violation".into(), violation),
+                ("x-waf-violation".into(), safe_waf_rule),
                 ("x-request-id".into(), req_id.to_string()),
             ];
             return Ok((403, headers, bytes::Bytes::from(body), log_meta));
@@ -4660,6 +4701,7 @@ mod kart8_tests {
                 10,
                 16,
             )),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
