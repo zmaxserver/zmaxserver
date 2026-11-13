@@ -19,6 +19,9 @@ pub use acme::AcmeConfig;
 // [kart-10] Sanal konak ters vekil zaman aşımı, keep-alive ve tamponsuz akış şeması
 pub mod proxy_ext;
 pub use proxy_ext::ProxyExtConfig;
+// [ek-dinleyici] [[listeners.extra]] sabit arka uçlu TLS ters vekil dinleyicileri
+pub mod extra_listener;
+pub use extra_listener::{ExtraListenerConfig, ExtraRouteConfig, ExtraSslConfig};
 // [kart-9] vHost HTTP Basic Authentication (Parola Korumalı Dizinler)
 pub mod auth;
 pub use auth::*;
@@ -255,6 +258,8 @@ pub struct ListenersConfig {
     pub https: HttpsListenerConfig,
     pub admin: AdminListenerConfig,
     pub api: ApiListenerConfig,
+    /// `[[listeners.extra]]`: sabit arka uçlu ek TLS ters vekil dinleyicileri (boş = eski davranış).
+    pub extra: Vec<ExtraListenerConfig>,
 }
 
 fn default_stale_while_revalidate_sec() -> u64 {
@@ -1148,6 +1153,13 @@ impl ZMaxConfig {
             }
             active_tcp.push((name, ip, port));
         }
+        extra_listener::validate_extra_listeners(
+            &self.listeners.extra,
+            &active_tcp
+                .iter()
+                .map(|(n, ip, p)| (n.to_string(), *ip, *p))
+                .collect::<Vec<_>>(),
+        )?;
 
         if self.listeners.http.enabled && self.listeners.http.backlog == 0 {
             return Err("listeners.http.backlog değeri 0 olamaz.".to_string());
@@ -1260,6 +1272,8 @@ impl ZMaxConfig {
                 }
             }
         }
+
+        extra_listener::validate_extra_listener_files(&self.listeners.extra, base_dir)?;
 
         for vh in vhosts {
             validate_domain(&vh.entry.name)
