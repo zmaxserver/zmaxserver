@@ -52,3 +52,7 @@ libc = "0.2"
 rcgen = "0.14.10"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+[[test]]
+name = "kart12_statik_tests"
+path = "tests/kart12_statik_tests.rs"

@@ -690,16 +690,47 @@ fn resolve_chain_with_info(
         return found.with_metadata(collected_env, disable_indexes, error_documents);
     }
 
-    // 4. try_files fallback (/index.php)
-    if req.try_files_enabled && req.php_enabled {
-        let fallback = canonical_root.join("index.php");
-        if let Ok(canon_fb) = std::fs::canonicalize(&fallback) {
-            if canon_fb.starts_with(canonical_root) && canon_fb.is_file() {
-                return RouteResolution::from_outcome(RouteOutcome::PhpScript {
-                    path: "/index.php".to_string(),
-                    query: req.query.to_string(),
-                })
-                .with_metadata(collected_env, disable_indexes, error_documents);
+    // 4. try_files fallback (/index.php veya statik /index.html)
+    if req.try_files_enabled {
+        if req.php_enabled {
+            let fallback = canonical_root.join("index.php");
+            if let Ok(canon_fb) = std::fs::canonicalize(&fallback) {
+                if canon_fb.starts_with(canonical_root) && canon_fb.is_file() {
+                    return RouteResolution::from_outcome(RouteOutcome::PhpScript {
+                        path: "/index.php".to_string(),
+                        query: req.query.to_string(),
+                    })
+                    .with_metadata(collected_env, disable_indexes, error_documents);
+                }
+            }
+        }
+
+        // Saf statik fallback: index.html (veya custom_indexes'teki statik index dosyaları)
+        // Yalnızca permalink / dizin istekleri (/hakkimizda/, uzantısız slug'lar) için geçerlidir;
+        // doğrudan var olmayan bir dosya (.html, .css, .js vb.) istendiğinde 404 dönmelidir.
+        let is_file_with_ext = decoded_path
+            .rsplit('/')
+            .next()
+            .map(|name| name.contains('.') && !name.starts_with('.'))
+            .unwrap_or(false);
+
+        if !is_file_with_ext {
+            for idx in &custom_indexes {
+                if idx.ends_with(".php") {
+                    continue;
+                }
+                let fallback = canonical_root.join(idx);
+                if let Ok(canon_fb) = std::fs::canonicalize(&fallback) {
+                    if canon_fb.starts_with(canonical_root) && canon_fb.is_file() {
+                        let mut path = String::from("/");
+                        path.push_str(idx);
+                        return RouteResolution::from_outcome(RouteOutcome::StaticFile {
+                            path,
+                            query: req.query.to_string(),
+                        })
+                        .with_metadata(collected_env, disable_indexes, error_documents);
+                    }
+                }
             }
         }
     }
@@ -1089,8 +1120,15 @@ impl RewriteEngine {
             }
         }
 
-        // 3. Dosya yoksa: OpenCart, XenForo, WordPress veya Laravel ana yönlendiricisine aktar
-        ResolvedRoute::PhpScript("/index.php")
+        // 3. Dosya yoksa: index.php varsa PhpScript, yoksa index.html varsa StaticFile
+        let index_php = doc_root.join("index.php");
+        if index_php.is_file() {
+            ResolvedRoute::PhpScript("/index.php")
+        } else if doc_root.join("index.html").is_file() {
+            ResolvedRoute::StaticFile("/index.html")
+        } else {
+            ResolvedRoute::PhpScript("/index.php")
+        }
     }
 }
 
@@ -1358,6 +1396,21 @@ RewriteRule . /index.php [L]
         let mut req_no_try = RouteRequest::new(&root, "/olmayan-sayfa");
         req_no_try.try_files_enabled = false;
         assert_eq!(engine.resolve_request(&req_no_try), RouteOutcome::NotFound);
+
+        // [kart-12-a] Saf statik vHost permalink (PHP kapalı, index.html mevcut)
+        let root_static = temp_site("static_try");
+        std::fs::create_dir_all(&root_static).unwrap();
+        std::fs::write(root_static.join("index.html"), "<h1>Static Home</h1>").unwrap();
+        let mut req_static = RouteRequest::new(&root_static, "/hakkimizda/");
+        req_static.php_enabled = false;
+        assert_eq!(
+            engine.resolve_request(&req_static),
+            RouteOutcome::StaticFile {
+                path: "/index.html".into(),
+                query: String::new()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root_static);
 
         let _ = std::fs::remove_dir_all(&root);
     }
