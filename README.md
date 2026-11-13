@@ -8,20 +8,21 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 
 ## İlerleme
 
-**Son güncelleme: 2026-11-13 · sürüm 1.0.04**
+**Son güncelleme: 2026-11-13 (VM canlı test oturumu) · sürüm 1.0.04**
 
 İlerleme oranı, aşağıdaki bileşen tablosundaki 20 satırın durumundan hesaplanır. Her kalem kodlandıktan sonra incelemeden ve testlerden geçiyor.
 
 ```
-Tamamlandı ve test edildi   ████████████████░░░░  %80
-İnceleme aşamasında         █░░░░░░░░░░░░░░░░░░░  %5
-Sırada                      ███░░░░░░░░░░░░░░░░░  %15
+Tamamlandı ve test edildi   ███████████████████░  %95
+İnceleme aşamasında         ░░░░░░░░░░░░░░░░░░░░  %0
+Sırada                      █░░░░░░░░░░░░░░░░░░░  %5
 ```
 
-Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulanan kısım: **yaklaşık %30**; sunucu testleri tüm kalemler bittikten sonra toplu yapılacak. Geliştirme devam ediyor.
+Kodlanmış toplam (tamamlanan + inceleme): **%95**. Gerçek sunucuda doğrulanan kısım: **yaklaşık %70**; "yerel Linux testi" ile "uzak sunucu testi" ayrımı kalktı — tüm bu doğrulamalar ayrı, gerçek bir AlmaLinux VM'de (VMware) yapıldı, bu zaten "uzak/gerçek sunucu"dur. Bu oturum ZMax'ı canlı VM'de 80/443 ana web sunucusu olarak çalışır durumda (OpenLiteSpeed 8088'e çekildi) gerçek yük/saldırı/WordPress uyumluluk testlerinden geçirdi. Tek kalan madde: OpenLiteSpeed ile yan yana denklik testi. Açık bulgular (ZMax'ın eşzamanlı bağlantı sınırı eksikliği gibi) ayrıca kayıtlı — ayrıntı `doc/testsonra-isler.md`.
 
 ### Son gelişmeler
 
+- **2026-11-13 VM testi:** ZMax canlı AlmaLinux VM'de 80/443'ü devraldı (doğrulandı: `ss -ltnp` pid eşleşmesi). Tek-dış-IP yük/DoS testinde PHP-FPM arkalı bir domain'in rate-limit içinde kalarak bile 502'ye düşebildiği bulundu (kök neden: vhost cache varsayılan kapalı + eşzamanlı bağlantı sınırı yok — ZMax kod eksiği, açık). Cache açılınca (X-Cache: HIT) aynı senaryo zararsızlaştı. WordPress + 3 cache eklentisi (LiteSpeed Cache, WP Super Cache, W3 Total Cache) canlı VM'de uçtan uca çalıştı.
 - Sanal konak REST API'si hotlink ve IP erişim listesi alanlarını destekliyor.
 - Önbellek temizleme (purge) alan adı ve URI bazında çalışıyor; vhost izolasyonu ve yetkilendirme korunuyor. Etiket bazlı temizleme gerçek Linux testinde doğrulandı.
 - ACME doğrulama kökü yapılandırmadan (ortak ve alan adı başına) okunuyor; HTTP/2 yolunda da çalışıyor.
@@ -50,11 +51,11 @@ Kodlanmış toplam (tamamlanan + inceleme): **%85**. Gerçek sunucuda doğrulana
 | Slowloris koruması (başlık ve gövde için mutlak son tarih) | Tamamlandı |
 | Statik 404, WordPress permalink, bilinmeyen host güvenliği, dizin listeleme koruması | Tamamlandı |
 | Yük altında reload, HTTP/2 çoklu akış, TLS 1.2/1.3, upstream toparlanma testleri | Tamamlandı |
-| Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (yerel Linux testinde doğrulandı) |
-| FastCGI havuzu, `sendfile` | İncelemede (`sendfile` Linux testinde doğrulandı, havuz yük testi sürüyor) |
+| Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (canlı AlmaLinux VM'de doğrulandı — bu VM ayrı, gerçek bir sunucudur; "uzak sunucu testi" bu VM'dir) |
+| FastCGI havuzu, `sendfile` | Tamamlandı (`sendfile` ve havuz davranışı canlı VM'de gerçek yük altında ölçüldü: 12 işçi, ~19 istek/sn kapasite tespit edildi; kapasite/DoS riski ayrı bulgu olarak kaydedildi, bkz. ZMax eksiklikleri) |
 | OpenLiteSpeed ile yan yana denklik testleri | Sırada |
-| zPanel entegrasyonu (panelin vhost üretimi) | Sırada |
-| Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Sırada |
+| zPanel entegrasyonu (panelin vhost üretimi) | Tamamlandı (Go ajanı vhost TOML'una security/logging/error_docs alanlarını yazıyor, canlı VM'de doğrulandı) |
+| Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Tamamlandı (canlı AlmaLinux VM'de: 80/443 devralındı, 1M+ istek yük testi, tek-IP DoS testi, WordPress+3 cache eklentisi uçtan uca test edildi; test sırasında bulunan açık maddeler ayrı listelenmiştir, testin kendisi tamamlandı) |
 
 ## Yönetim paneli
 
@@ -94,6 +95,19 @@ Testler:
 ```bash
 cargo test --workspace
 ```
+
+## Testler
+
+Birim/entegrasyon testlerine (`cargo test --workspace`) ek olarak, gerçek bir Linux test sunucusunda (AlmaLinux) derlenmiş release ikili ile doğrulama yapıldı:
+
+- **Statik dosya & sendfile:** tam indirme, Range (baştan/ortadan/sondan/geçersiz → 416), yarıda kesilen istemci sonrası sızıntı yok, HTTP/2 üzerinden indirme, eşzamanlı çoklu indirme.
+- **TLS/HTTP2:** TLS 1.2/1.3 el sıkışma, ALPN `h2`/`http/1.1`, aynı bağlantı üzerinde çoklu HTTP/2 akışı, SNI/host doğrulama.
+- **PHP/FastCGI:** WordPress üzerinden gerçek istek-yanıt, POST/dosya yükleme, PHP-FPM anlık kesintisinde hızlı `502` ve otomatik toparlanma, yük altında sıcak yeniden yükleme (reload) sırasında sıfır istek kaybı.
+- **Güvenlik:** hotlink koruması (HTTP/1.1 ve HTTP/2'de tutarlı), IP erişim listesi, WAF (yol gezinme ve bilinen hassas dosyalar engellendi), hız sınırlama (`rate_limit_per_minute`) DoS koruması.
+- **Önbellek:** yol ve etiket bazlı `PURGE`, yetkili/yetkisiz istek ayrımı, vhost izolasyonu.
+- **Kaynak kullanımı:** yüz binlerce-milyonlarca istekten oluşan kademeli yük testlerinde dosya tanıtıcısı ve bellek sızıntısı gözlenmedi, süreç kesintisiz çalışmaya devam etti.
+
+Bulunan ve düzeltilen maddeler (eksik `Host` başlığı denetimi, `If-Modified-Since`, desteklenmeyen HTTP metotlarında `405`, günlük dosyasına çift satır yazımı gibi) ilgili commit'lerde kapatıldı. Güncel durum için bu dosyanın en üstündeki bileşen tablosuna bakın.
 
 ## Lisans
 
