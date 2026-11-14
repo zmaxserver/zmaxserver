@@ -131,3 +131,56 @@ pub fn compute_effective_auth(config: &ZMaxConfig) -> EffectiveAuthTokens {
         auto_generated_notices: notices,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("secret123", "secret123"));
+        assert!(!constant_time_eq("secret123", "secret124"));
+        assert!(!constant_time_eq("secret", "secret123"));
+    }
+
+    #[test]
+    fn test_is_authorized() {
+        let req = ParsedHttpRequest {
+            method: "GET".to_string(),
+            path: "/api/status".to_string(),
+            query: String::new(),
+            version: 1,
+            host: "127.0.0.1".to_string(),
+            headers: vec![("Authorization".to_string(), "Bearer my-secret-token".to_string())],
+            body: Vec::new(),
+            keep_alive: false,
+        };
+        assert!(is_authorized(&req, "my-secret-token", true));
+        assert!(!is_authorized(&req, "wrong-token", true));
+        assert!(is_authorized(&req, "", false));
+    }
+
+    #[test]
+    fn test_compute_effective_auth_preserves_tokens_and_auto_generates() {
+        // 1. Yapılandırılmış token korunmalı
+        let mut cfg = ZMaxConfig::default();
+        cfg.listeners.api.token = "my-custom-api-token".to_string();
+        cfg.listeners.admin.token = "my-custom-admin-token".to_string();
+        let auth = compute_effective_auth(&cfg);
+        assert_eq!(auth.api_token, "my-custom-api-token");
+        assert_eq!(auth.admin_token, "my-custom-admin-token");
+        assert!(auth.api_require_token);
+        assert!(auth.admin_require_token);
+
+        // 2. Loopback dışı bağlandığında token boşsa otomatik güvenli token üretilmeli
+        let mut cfg_remote = ZMaxConfig::default();
+        cfg_remote.listeners.api.enabled = true;
+        cfg_remote.listeners.api.address = "0.0.0.0".to_string();
+        cfg_remote.listeners.api.token = "".to_string();
+        let auth_remote = compute_effective_auth(&cfg_remote);
+        assert!(!auth_remote.api_token.is_empty());
+        assert!(auth_remote.api_token.starts_with("zmax_"));
+        assert!(auth_remote.api_require_token);
+        assert!(!auth_remote.auto_generated_notices.is_empty());
+    }
+}
