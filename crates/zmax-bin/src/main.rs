@@ -11,13 +11,13 @@ pub mod security_pipeline;
 mod web_engine;
 
 use api::{
-    handle_api_route, normalize_panel_request_path, read_http_request_with_limits,
+    compute_effective_auth, handle_api_connection, handle_api_route, normalize_panel_request_path, read_http_request_with_limits,
     refresh_tls_certs, send_http_read_error, RuntimeState, ServerState, ServerStats,
 };
 #[cfg(not(target_env = "musl"))]
 use mimalloc::MiMalloc;
 use modules_runtime::{
-    append_error_log, build_redis_client, compile_policies, compute_effective_auth,
+    append_error_log, build_redis_client, compile_policies,
 };
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -922,69 +922,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     zmax_runtime::wait_for_shutdown_signal().await;
     println!("[Kapatiliyor] ZMax Server zarif sekilde sonlandirildi.");
-    Ok(())
-}
-
-/// Dahili Evrensel Kontrol API Yöneticisi (Varsayılan: 127.0.0.1:19486)
-async fn handle_api_connection<S>(
-    mut socket: S,
-    peer_addr: SocketAddr,
-    state: Arc<ServerState>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut leftover = Vec::with_capacity(4096);
-    let (max_body, trusted_proxies) = {
-        let rt = state.runtime.read().await;
-        (
-            rt.config.security.max_body_size_mb.clamp(1, 64) * 1024 * 1024,
-            rt.config.listeners.api.trusted_proxies.clone(),
-        )
-    };
-    let limits = HttpReadLimits {
-        max_header_bytes: 64 * 1024,
-        max_body_bytes: max_body,
-        header_timeout: Duration::from_secs(10),
-        body_timeout: Duration::from_secs(15),
-    };
-    let req = match read_http_request_with_limits(&mut socket, &mut leftover, limits).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return Ok(()),
-        Err(err) => {
-            send_http_read_error(&mut socket, &err).await;
-            return Ok(());
-        }
-    };
-    let real_ip = resolve_real_ip(
-        peer_addr.ip(),
-        &req.headers,
-        "x-forwarded-for",
-        &trusted_proxies,
-        true,
-    );
-    let is_local_control = peer_addr.ip().is_loopback() && real_ip.is_loopback();
-    if !is_local_control
-        && (state.ban_manager.is_banned(peer_addr.ip()) || state.ban_manager.is_banned(real_ip))
-    {
-        web_engine::write_http_response(
-            &mut socket,
-            403,
-            "Forbidden",
-            &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
-            b"403 Forbidden - IP Blocked",
-            None,
-            req.method.eq_ignore_ascii_case("HEAD"),
-            false,
-            false,
-            0,
-            None,
-            None,
-        )
-        .await?;
-        return Ok(());
-    }
-    let _ = handle_api_route(&mut socket, &req, &state, true).await?;
     Ok(())
 }
 
