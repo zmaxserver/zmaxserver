@@ -1,0 +1,133 @@
+openapi: 3.0.3
+info:
+  title: ZMax Management API Bridge
+  version: 1.0.0
+  description: ZMax Web Sunucusu ↔ ZPanel Go İstemci Köprü Arayüzü (B1-B5)
+paths:
+  /api/v1/version:
+    get:
+      summary: ZMax ve Köprü sürüm bilgisi
+      responses:
+        '200':
+          description: Başarılı sürüm yanıtı
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+  /api/v1/health:
+    get:
+      summary: Sunucu sağlık ve generation durumu
+      responses:
+        '200':
+          description: Başarılı sağlık durumu
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/config/validate:
+    post:
+      summary: TOML yapılandırmasını uygulamadan doğrula
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateRequest'
+      responses:
+        '200':
+          description: Doğrulama sonucu
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateResponse'
+  /api/v1/reload:
+    post:
+      summary: Yapılandırmayı yeniden yükle
+      responses:
+        '200':
+          description: Yeniden yükleme sonucu
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
+  /api/v1/cache/purge:
+    post:
+      summary: Önbellek temizleme
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PurgeRequest'
+      responses:
+        '200':
+          description: Önbellek temizlendi
+components:
+  schemas:
+    VersionResponse:
+      type: object
+      properties:
+        server_version:
+          type: string
+        contract_version:
+          type: string
+        supported_features:
+          type: array
+          items:
+            type: string
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        generation:
+          type: integer
+        contract_version:
+          type: string
+        uptime_sec:
+          type: integer
+    ValidateRequest:
+      type: object
+      required:
+        - toml_content
+      properties:
+        domain:
+          type: string
+        toml_content:
+          type: string
+    ValidateResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        error_line:
+          type: integer
+        error_field:
+          type: string
+        message:
+          type: string
+    ReloadResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        generation:
+          type: integer
+        vhosts_loaded:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+    PurgeRequest:
+      type: object
+      properties:
+        domain:
+          type: string
+        uri:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
