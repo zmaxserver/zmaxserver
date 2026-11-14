@@ -1,6 +1,8 @@
 //! # zmax-fastcgi
 //! PHP-FPM / LSPHP ikili FastCGI protokol istemcisi ve soket havuzu.
 
+pub mod lsapi;
+
 use bytes::{BufMut, BytesMut};
 use std::collections::HashMap;
 use std::fmt;

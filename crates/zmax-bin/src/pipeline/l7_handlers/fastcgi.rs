@@ -92,18 +92,30 @@ pub async fn execute_and_prepare_php(
         r
     };
 
-    let fcgi_client =
-        FastCgiClient::with_pool(&vhost_ctx.php_upstream, Arc::clone(&state.upstream_pool));
     // [kart-8] Sabit 5 sn yerine yapılandırmadan (vhost.php.dial_timeout_ms / mod_fastcgi) gelen bağlantı zaman aşımı
     let dial_timeout = Duration::from_millis(vhost_ctx.php_dial_timeout_ms.max(1));
-    let fcgi_resp = fcgi_client
-        .execute_php_pooled(
-            fcgi_req,
+    let fcgi_resp = if vhost_ctx.php_sapi.eq_ignore_ascii_case("lsapi") {
+        zmax_fastcgi::lsapi::execute_lsapi(
+            &vhost_ctx.php_upstream,
+            &fcgi_req,
             dial_timeout,
             Duration::from_secs(vhost_ctx.php_timeout),
         )
         .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        .map(|r| zmax_fastcgi::FastCgiResponseDetailed::from_raw(r.raw_stdout, r.stderr))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+    } else {
+        let fcgi_client =
+            FastCgiClient::with_pool(&vhost_ctx.php_upstream, Arc::clone(&state.upstream_pool));
+        fcgi_client
+            .execute_php_pooled(
+                fcgi_req,
+                dial_timeout,
+                Duration::from_secs(vhost_ctx.php_timeout),
+            )
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+    };
 
     if !fcgi_resp.stderr.trim().is_empty() {
         append_error_log_limit(

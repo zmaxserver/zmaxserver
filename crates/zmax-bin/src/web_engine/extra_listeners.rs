@@ -262,6 +262,7 @@ fn synthetic_ctx(
         php_enabled: false,
         php_upstream: String::new(),
         php_upstreams: Vec::new(),
+        php_sapi: "fastcgi".to_string(),
         php_lb_policy: "least_conn".to_string(),
         php_timeout: 5,
         cache_enabled: false,
