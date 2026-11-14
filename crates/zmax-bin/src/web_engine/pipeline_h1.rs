@@ -1,24 +1,21 @@
-use super::cache_policy::{request_has_bypass_cookie_or_auth, respect_request_cache_control};
-use super::cached_response::{write_cached_php_response, write_cached_static_response};
-use super::context::{resolve_php_dial_timeout_ms, ResolvedVHostContext};
+use crate::pipeline::l6_cache::{request_has_bypass_cookie_or_auth, respect_request_cache_control};
+use crate::pipeline::l6_cache::{write_cached_php_response, write_cached_static_response};
 use super::http_write::{
     default_status_reason, write_error_response, write_http_response, write_not_found,
 };
 use super::logging::record_and_log;
 use super::php::{fetch_and_cache_php, serve_php_request};
 use super::proxy_h1::serve_proxy_request;
-use super::purge::{process_cache_purge_request, PurgeRequestOutcome};
-use super::request_util::is_acme_challenge;
+use crate::pipeline::l6_cache::{process_cache_purge_request, purge_response_parts, PurgeRequestOutcome};
+use crate::pipeline::l5_router::{is_acme_challenge, proxy_route_matches, resolve_vhost_context, VhostProto};
 use super::static_files::{
     negotiable_image_cache_tag, resolve_predecoded_static_file, revalidate_static_cache,
     serve_static_file,
 };
-use super::DEFAULT_LOG_MAX_BYTES;
 use crate::api::{
     read_http_request_with_limits, send_http_read_error, ParsedHttpRequest, ServerState,
 };
 use crate::modules_runtime::append_error_log_limit;
-use crate::pipeline::l8_response::resolve_vhost_security_headers;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -26,11 +23,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use zmax_cache::{build_cache_key, CacheLookup, StampedeSlot};
 use zmax_compress::{negotiate_encoding, ContentEncoding};
-use zmax_config::match_vhost;
 use crate::pipeline::l3_realip::resolve_real_ip;
 use zmax_httpparser::{extract_header, HttpReadLimits};
 use zmax_rewrite::{HtAccessResolver, RewriteEngine, RouteOutcome, RouteRequest};
-use zmax_security::IpAccessList;
 use zmax_static::StaticFileHandler;
 use zmax_timeout::with_idle_timeout;
 
@@ -148,171 +143,8 @@ where
     let is_head = req.method.eq_ignore_ascii_case("HEAD");
     let keep_alive = req.keep_alive;
 
-    let (policies, redis_client, vhost_ctx, is_unknown_host) = {
-        let rt = state.runtime.read().await;
-        let policies = rt.policies.clone();
-        let redis_client = rt.redis_client.clone();
-        let vh_opt = match_vhost(&rt.vhosts, &req.host);
-        let is_unknown_host =
-            !rt.vhosts.is_empty() && !req.host.trim().is_empty() && vh_opt.is_none();
-        let global_acl = IpAccessList::new(
-            rt.config.security.allow_ips.clone(),
-            rt.config.security.deny_ips.clone(),
-        );
-        let max_log_size_bytes = rt
-            .config
-            .logging
-            .max_log_size_mb
-            .saturating_mul(1024 * 1024);
-        let max_log_size_bytes = if max_log_size_bytes == 0 {
-            DEFAULT_LOG_MAX_BYTES
-        } else {
-            max_log_size_bytes
-        };
-        let cache_stale_sec = rt.config.cache.stale_while_revalidate_sec;
-        let ctx = match vh_opt {
-            Some(vh) => {
-                let sec_headers = resolve_vhost_security_headers(
-                    policies.headers_enabled,
-                    &policies.security_headers,
-                    Some(&vh.entry),
-                );
-                ResolvedVHostContext {
-                    doc_root: vh.resolved_doc_root.clone(),
-                    index_files: vh.entry.index_files.clone(),
-                    php_enabled: vh.entry.php.enabled && policies.fastcgi.enabled,
-                    php_upstream: if vh.entry.php.upstream.trim().is_empty() {
-                        policies.fastcgi.default_upstream.clone()
-                    } else {
-                        vh.entry.php.upstream.clone()
-                    },
-                    php_timeout: vh
-                        .entry
-                        .php
-                        .timeout
-                        .max(policies.fastcgi.timeout_sec)
-                        .max(5),
-                    cache_enabled: vh.entry.cache.enabled && rt.config.cache.enabled,
-                    cache_expire: vh.entry.cache.expire.max(1),
-                    cache_stale_sec,
-                    vhost_name: vh.entry.name.clone(),
-                    vhost_aliases: vh.entry.aliases.clone(),
-                    force_https: vh.entry.security.force_https,
-                    hotlink_protection: vh.entry.effective_hotlink().enabled,
-                    hotlink_config: vh.entry.effective_hotlink(),
-                    global_acl: global_acl.clone(),
-                    vhost_acl: IpAccessList::new(
-                        vh.entry.security.allow_ips.clone(),
-                        vh.entry.security.deny_ips.clone(),
-                    ),
-                    // [v1-1b] [vhost.security] ve [vhost.acl] kurallari tutarli birlestirilir
-                    vhost_acl_engine: crate::security_pipeline::build_merged_vhost_acl(
-                        &vh.entry.security,
-                        &vh.entry.acl,
-                    ),
-                    rewrite_enabled: vh.entry.rewrite.enabled && policies.rewrite_enabled,
-                    rewrite_try_files: vh.entry.rewrite.try_files,
-                    rewrite_htaccess: vh.entry.rewrite.htaccess && policies.rewrite_htaccess,
-                    proxy_enabled: vh.entry.proxy.enabled && policies.proxy.enabled,
-                    proxy_upstream: vh.entry.proxy.upstream.clone(),
-                    proxy_path_prefix: if vh.entry.proxy.path_prefix.trim().is_empty() {
-                        "/".to_string()
-                    } else {
-                        vh.entry.proxy.path_prefix.clone()
-                    },
-                    proxy_preserve_host: vh.entry.proxy.preserve_host
-                        && policies.proxy.preserve_host,
-                    proxy_websocket: vh.entry.proxy.websocket && policies.proxy.websocket_upgrade,
-                    // [kart-10]
-                    proxy_ext: vh.entry.proxy_ext.clone(),
-                    auto_webp: policies.static_policy.auto_webp,
-                    auto_avif: policies.static_policy.auto_avif,
-                    etag_enabled: policies.static_policy.etag_enabled,
-                    last_modified_header: policies.static_policy.last_modified_header,
-                    max_log_size_bytes,
-                    headers_policy: sec_headers,
-                    php_upstreams: vh.entry.php.upstreams.clone(),
-                    php_lb_policy: vh.entry.php.lb_policy.clone(),
-                    rewrite_rules: vh.entry.rewrite.rules.clone(),
-                    waf_enabled: vh.entry.security.waf_enabled,
-                    waf_exclude_paths: vh.entry.security.waf_exclude_paths.clone(),
-                    error_docs: vh.entry.error_docs.clone(),
-                    logging: vh.entry.logging.clone(),
-                    tls_http2: vh.entry.tls.http2,
-                    acme_root: crate::config::acme::resolve_vhost_acme_root(
-                        Some(&vh.entry),
-                        &state.base_dir,
-                    ),
-                    auth: vh.entry.auth.clone(),
-                    php_dial_timeout_ms: resolve_php_dial_timeout_ms(
-                        vh.entry.php.dial_timeout_ms,
-                        policies.fastcgi.dial_timeout_ms,
-                    ),
-                    autoindex: vh.entry.static_files.autoindex,
-                    block_dangerous_files: vh.entry.security.block_dangerous_files,
-                }
-            }
-            None => ResolvedVHostContext {
-                doc_root: state.base_dir.join("www").join("html"),
-                index_files: vec![
-                    "index.html".to_string(),
-                    "index.htm".to_string(),
-                    "index.php".to_string(),
-                ],
-                php_enabled: false,
-                php_upstream: policies.fastcgi.default_upstream.clone(),
-                php_timeout: policies.fastcgi.timeout_sec.max(5),
-                cache_enabled: rt.config.cache.enabled,
-                cache_expire: rt.config.cache.default_ttl_seconds.max(1),
-                cache_stale_sec,
-                vhost_name: "default".to_string(),
-                vhost_aliases: Vec::new(),
-                force_https: false,
-                hotlink_protection: false,
-                hotlink_config: zmax_config::HotlinkConfig::default(),
-                global_acl,
-                vhost_acl: IpAccessList::default(),
-                vhost_acl_engine: zmax_security::VhostAcl::default(),
-                rewrite_enabled: policies.rewrite_enabled,
-                rewrite_try_files: true,
-                rewrite_htaccess: policies.rewrite_htaccess,
-                proxy_enabled: false,
-                proxy_upstream: String::new(),
-                proxy_path_prefix: "/".to_string(),
-                proxy_preserve_host: true,
-                proxy_websocket: true,
-                // [kart-10]
-                proxy_ext: zmax_config::ProxyExtConfig::default(),
-                auto_webp: policies.static_policy.auto_webp,
-                auto_avif: policies.static_policy.auto_avif,
-                etag_enabled: policies.static_policy.etag_enabled,
-                last_modified_header: policies.static_policy.last_modified_header,
-                max_log_size_bytes,
-                headers_policy: resolve_vhost_security_headers(
-                    policies.headers_enabled,
-                    &policies.security_headers,
-                    None,
-                ),
-                php_upstreams: Vec::new(),
-                php_lb_policy: "least_conn".to_string(),
-                rewrite_rules: Vec::new(),
-                waf_enabled: None,
-                waf_exclude_paths: Vec::new(),
-                error_docs: zmax_config::VHostErrorDocsSection::default(),
-                logging: zmax_config::VHostLoggingSection::default(),
-                tls_http2: true,
-                acme_root: None,
-                auth: zmax_config::VHostAuthSection::default(),
-                php_dial_timeout_ms: resolve_php_dial_timeout_ms(
-                    None,
-                    policies.fastcgi.dial_timeout_ms,
-                ),
-                autoindex: policies.static_policy.directory_browsing,
-                block_dangerous_files: false,
-            },
-        };
-        (policies, redis_client, ctx, is_unknown_host)
-    };
+    let (policies, redis_client, vhost_ctx, is_unknown_host) =
+        resolve_vhost_context(state, &req.host, VhostProto::Http1).await;
 
     let real_ip: IpAddr = resolve_real_ip(&policies.realip, peer_addr.ip(), &req.headers);
     let real_ip_str = real_ip.to_string();
@@ -624,10 +456,7 @@ where
     }
 
     // 5. Ters Proxy & WebSocket Yönlendirmesi (zmax-proxy + UpstreamSocketPool)
-    if vhost_ctx.proxy_enabled
-        && !vhost_ctx.proxy_upstream.trim().is_empty()
-        && req.path.starts_with(&vhost_ctx.proxy_path_prefix)
-    {
+    if proxy_route_matches(&vhost_ctx, &req.path) {
         let (status, still_alive, proxy_bytes) = serve_proxy_request(
             socket,
             state,
@@ -661,12 +490,8 @@ where
     match process_cache_purge_request(state, &vhost_ctx.vhost_name, &req, real_ip).await {
         PurgeRequestOutcome::NotPurge => {}
         outcome => {
-            let (status, reason, purge_body) = match outcome {
-                PurgeRequestOutcome::Done(n) => {
-                    (200, "OK", format!("Purged {n} entries\n").into_bytes())
-                }
-                _ => (403, "Forbidden", b"403 Forbidden\n".to_vec()),
-            };
+            let (status, reason, purge_body) = purge_response_parts(outcome);
+            let purge_body = purge_body.into_bytes();
             let resp_hdrs = vec![("Content-Type".into(), "text/plain; charset=utf-8".into())];
             write_http_response(
                 socket,
@@ -1096,7 +921,7 @@ where
             query: effective_query,
         } => {
             // [kart-5] hotlink kontrolü (vHost yapılandırmasından okunan listeler ve ortak boru hattı)
-            if crate::security_pipeline::is_request_hotlink_blocked(
+            if crate::pipeline::l5_router::is_request_hotlink_blocked(
                 &vhost_ctx,
                 extract_header(&req.headers, "referer"),
                 &req.host,

@@ -2,37 +2,9 @@
 //! HTTP/1.1 ve HTTP/2 istek boru hatları için birleştirilmiş ve ortak güvenlik denetimleri.
 //! Hotlink koruması, IP/CIDR ACL, vHost WAF, WordPress kaba kuvvet ve HTTPS zorlama kuralları.
 
-use crate::web_engine::ResolvedVHostContext;
-use zmax_security::is_hotlink_blocked;
-
 pub use crate::pipeline::l4_security::{
     build_merged_vhost_acl, evaluate_request_security, record_waf_block, SecurityVerdict,
 };
-
-/// Hem HTTP/1.1 hem HTTP/2 boru hattında statik dosya sunumundan önce çağrılan birleştirilmiş Hotlink koruma denetimi.
-pub fn is_request_hotlink_blocked(
-    vhost_ctx: &ResolvedVHostContext,
-    referer: Option<&str>,
-    request_host: &str,
-    request_path: &str,
-) -> bool {
-    let hl = &vhost_ctx.hotlink_config;
-    let is_enabled = hl.enabled || vhost_ctx.hotlink_protection;
-    if !is_enabled {
-        return false;
-    }
-
-    is_hotlink_blocked(
-        true,
-        &hl.allowed_referers,
-        &hl.extensions,
-        referer,
-        request_host,
-        &vhost_ctx.vhost_name,
-        &vhost_ctx.vhost_aliases,
-        request_path,
-    )
-}
 
 // [kart-9] Basic Authentication ortak asenkron denetim ve 401 yanit yardimcilari
 /// Hem HTTP/1.1 hem HTTP/2 boru hattında çalıştırılan ortak Basic Auth kapısı (ACME HTTP-01 muaftır).
