@@ -28,6 +28,7 @@ use crate::web_engine;
 pub struct CliOptions {
     pub show_version: bool,
     pub check_only: bool,
+    pub fix_tls_perms: bool,
     pub config_override: Option<PathBuf>,
 }
 
@@ -35,6 +36,7 @@ pub fn parse_cli_args() -> CliOptions {
     let mut opts = CliOptions {
         show_version: false,
         check_only: false,
+        fix_tls_perms: false,
         config_override: None,
     };
     let mut args = std::env::args().skip(1);
@@ -42,6 +44,7 @@ pub fn parse_cli_args() -> CliOptions {
         match arg.as_str() {
             "-v" | "--version" => opts.show_version = true,
             "-t" | "--check" | "--test" => opts.check_only = true,
+            "--fix-tls-perms" => opts.fix_tls_perms = true,
             "-c" | "--config" => {
                 if let Some(p) = args.next() {
                     opts.config_override = Some(PathBuf::from(p));
@@ -154,6 +157,78 @@ pub fn parse_bind_addr(ip: &str, port: u16) -> Result<SocketAddr, String> {
         .map_err(|e| format!("Gecersiz dinleme adresi ({}): {}", formatted, e))
 }
 
+fn collect_tls_key_paths(
+    base_dir: &Path,
+    config: &ZMaxConfig,
+    vhosts: &[zmax_config::LoadedVHost],
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for raw in [
+        &config.listeners.admin.tls_key,
+        &config.listeners.admin.tls_cert,
+        &config.listeners.api.tls_key,
+        &config.listeners.api.tls_cert,
+    ]
+    .into_iter()
+    .chain(
+        config
+            .listeners
+            .extra
+            .iter()
+            .filter_map(|e| e.ssl.as_ref())
+            .flat_map(|s| [&s.key, &s.cert]),
+    ) {
+        if !raw.trim().is_empty() {
+            paths.push(resolve_path(base_dir, raw));
+        }
+    }
+    for vh in vhosts {
+        for raw in [&vh.entry.ssl.key, &vh.entry.ssl.certificate] {
+            if !raw.trim().is_empty() {
+                paths.push(resolve_path(base_dir, raw));
+            }
+        }
+    }
+    paths
+}
+
+/// `zmax --fix-tls-perms`: certbot/panel yenilemesinden sonra (root olarak, ör. `--deploy-hook`)
+/// TLS anahtar/sertifika dosyalarını servis grubunun okuyabileceği hâle getirir (root:grup, grup okuma biti).
+/// Çalışan sunucu düşürme sonrası root olmadığından bu işi kendisi yapamaz.
+pub fn run_fix_tls_perms(
+    base_dir: &Path,
+    config: &ZMaxConfig,
+    vhosts: &[zmax_config::LoadedVHost],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let paths = collect_tls_key_paths(base_dir, config, vhosts);
+    if !zmax_core::is_running_as_root() {
+        println!(
+            "[Bilgi] --fix-tls-perms root gerektirir; root olmadığından {} TLS yolu için işlem yapılmadı.",
+            paths.len()
+        );
+        return Ok(());
+    }
+    if config.server.group.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "server.group boş: TLS anahtarlarının hangi gruba okutulacağı belirsiz",
+        )
+        .into());
+    }
+    match zmax_core::ensure_tls_keys_readable_by_group(&config.server.group, &paths) {
+        Ok(changed) => {
+            println!(
+                "[OK] TLS izinleri uygulandı: {} yoldan {} dosya değişti (grup='{}').",
+                paths.len(),
+                changed,
+                config.server.group
+            );
+            Ok(())
+        }
+        Err(err) => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, err).into()),
+    }
+}
+
 pub use crate::api::admin_static::handle_admin_connection;
 
 /// ZMax Server ana çalıştırma fonksiyonu
@@ -195,6 +270,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let validation_warnings = config
         .validate_workspace_layout(&base_dir, &vhosts, &modules)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    crate::acme_runtime::apply_global_acme_root(&config, &base_dir);
+
+    if cli.fix_tls_perms {
+        return run_fix_tls_perms(&base_dir, &config, &vhosts);
+    }
 
     if cli.check_only {
         for w in &validation_warnings {

@@ -33,7 +33,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 pub use api::handle_api_connection;
 pub use core::boot::{
-    create_reuse_listener, handle_admin_connection, parse_bind_addr, resolve_base_dir, CliOptions,
+    create_reuse_listener, handle_admin_connection, parse_bind_addr, resolve_base_dir,
+    run_fix_tls_perms, CliOptions,
 };
 
 #[tokio::main]
