@@ -4,12 +4,12 @@
 
 mod acme_runtime;
 mod api;
-mod h2_engine;
 mod logger;
 mod modules_runtime;
 pub mod security_pipeline;
 mod web_engine;
 
+use web_engine::pipeline::l2_protocol::h2 as h2_engine;
 use api::{
     handle_api_route, normalize_panel_request_path, read_http_request_with_limits,
     refresh_tls_certs, send_http_read_error, RuntimeState, ServerState, ServerStats,
@@ -456,23 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if http_enabled {
         let web_listener = create_reuse_listener(http_addr, http_backlog, http_reuse_port)?;
         println!("* Web Sunucusu  : http://{}", http_addr);
-        let state_web = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                if let Ok((socket, peer_addr)) = web_listener.accept().await {
-                    if http_nodelay {
-                        let _ = socket.set_nodelay(true);
-                    }
-                    let s = Arc::clone(&state_web);
-                    tokio::spawn(async move {
-                        let _ = web_engine::handle_web_connection(
-                            socket, peer_addr, s, false, http_port,
-                        )
-                        .await;
-                    });
-                }
-            }
-        });
+        web_engine::spawn_http_accept_loop(web_listener, Arc::clone(&state), http_nodelay, http_port);
     }
 
     if https_enabled {
@@ -491,37 +475,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "* HTTPS Sunucu  : https://{} (TLS 1.2/1.3, ALPN h2/http/1.1, {} sertifika)",
             https_addr, loaded
         );
-        let state_tls = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                if let Ok((socket, peer_addr)) = https_listener.accept().await {
-                    if http_nodelay {
-                        let _ = socket.set_nodelay(true);
-                    }
-                    let s = Arc::clone(&state_tls);
-                    let acc = acceptor.clone();
-                    tokio::spawn(async move {
-                        let hs =
-                            tokio::time::timeout(Duration::from_secs(10), acc.accept(socket)).await;
-                        if let Ok(Ok(tls_stream)) = hs {
-                            let alpn = zmax_tls::negotiated_alpn(&tls_stream);
-                            let sni = zmax_tls::client_sni(&tls_stream).map(|s| s.to_string());
-                            if alpn.as_deref() == Some(b"h2") {
-                                let _ = h2_engine::handle_h2_connection(
-                                    tls_stream, peer_addr, s, true, https_port, sni,
-                                )
-                                .await;
-                            } else {
-                                let _ = web_engine::handle_web_connection(
-                                    tls_stream, peer_addr, s, true, https_port,
-                                )
-                                .await;
-                            }
-                        }
-                    });
-                }
-            }
-        });
+        web_engine::spawn_https_accept_loop(
+            https_listener,
+            acceptor,
+            Arc::clone(&state),
+            http_nodelay,
+            https_port,
+        );
     }
 
     let (admin_tls_cfg, api_tls_cfg) = {
