@@ -664,63 +664,9 @@ pub fn select_negotiated_image_path(
     None
 }
 
-const DEFAULT_LOG_ROTATION_MAX_BYTES: u64 = 100 * 1024 * 1024;
-
-/// Belirtilen günlük dosyasına satır ekler; boyut `max_bytes` eşiğine ulaştığında `.1` yedeğine döndürür.
-pub async fn append_line_with_rotation(log_file: &Path, line: &str, max_bytes: u64) {
-    use tokio::io::AsyncWriteExt;
-
-    if let Some(parent) = log_file.parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-    }
-
-    if max_bytes > 0 {
-        if let Ok(meta) = tokio::fs::metadata(log_file).await {
-            if meta.is_file() && meta.len() >= max_bytes {
-                let mut backup_os = log_file.as_os_str().to_os_string();
-                backup_os.push(".1");
-                let backup_file = PathBuf::from(backup_os);
-                if tokio::fs::rename(log_file, &backup_file).await.is_err() {
-                    let _ = tokio::fs::remove_file(&backup_file).await;
-                    let _ = tokio::fs::rename(log_file, &backup_file).await;
-                }
-            }
-        }
-    }
-
-    if let Ok(mut f) = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .await
-    {
-        if line.ends_with('\n') {
-            let _ = f.write_all(line.as_bytes()).await;
-        } else {
-            let _ = f.write_all(format!("{line}\n").as_bytes()).await;
-        }
-        let _ = f.flush().await;
-    }
-}
-
-/// Hata/uyarı günlüklerini `logs/error.log` dosyasına boyut sınırı ile güvenli şekilde yazar.
-pub async fn append_error_log_limit(base_dir: &Path, line: &str, max_bytes: u64) {
-    let log_file = base_dir.join("logs").join("error.log");
-    append_line_with_rotation(&log_file, line, max_bytes).await;
-}
-
-/// Erişim günlüklerini `logs/access.log` dosyasına boyut sınırı ile güvenli şekilde yazar.
-pub async fn append_access_log_limit(base_dir: &Path, line: &str, max_bytes: u64) {
-    let log_file = base_dir.join("logs").join("access.log");
-    append_line_with_rotation(&log_file, line, max_bytes).await;
-}
-
-/// Hata/uyarı günlüklerini `logs/error.log` dosyasına güvenli şekilde yazar.
-pub async fn append_error_log(base_dir: &Path, line: &str) {
-    append_error_log_limit(base_dir, line, DEFAULT_LOG_ROTATION_MAX_BYTES).await;
-}
+pub use crate::logger::rotate::{
+    append_access_log_limit, append_error_log, append_error_log_limit,
+};
 
 const HOTLINK_PROTECTED_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "ico", "bmp", "mp4", "webm", "ogg", "mp3",
@@ -901,6 +847,7 @@ pub fn is_hotlink_blocked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logger::rotate::append_line_with_rotation;
 
     #[test]
     fn hotlink_protection_blocks_external_media_but_allows_direct_and_self() {

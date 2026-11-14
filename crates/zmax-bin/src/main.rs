@@ -4,6 +4,7 @@
 
 mod acme_runtime;
 mod api;
+mod core;
 mod h2_engine;
 mod logger;
 mod modules_runtime;
