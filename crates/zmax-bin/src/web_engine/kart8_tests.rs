@@ -89,7 +89,8 @@ async fn fastcgi_pooled_execution_and_httpoxy_prevention_pipeline() {
 
 fn build_kart8_test_state(tag: &str, mod_fastcgi_toml: Option<&str>) -> Arc<ServerState> {
     use crate::api::{RuntimeState, ServerStats};
-    use crate::modules_runtime::{compile_policies, compute_effective_auth};
+    use crate::api::compute_effective_auth;
+    use crate::modules_runtime::compile_policies;
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tokio::sync::RwLock;
