@@ -5,6 +5,7 @@
 mod extra_listeners;
 #[cfg(test)]
 mod kart8_tests;
+pub(crate) mod pipeline;
 mod pipeline_h1;
 mod pipeline_h2;
 
@@ -14,7 +15,8 @@ pub use extra_listeners::reconcile as reconcile_extra_listeners;
 use crate::pipeline::l7_handlers::{fastcgi as php, proxy::h1 as proxy_h1, proxy::h2 as proxy_h2, static_files, static_files::stream as static_stream};
 use crate::pipeline::l8_response::{http_write, logging};
 pub use http_write::write_http_response;
-pub use pipeline_h1::handle_web_connection;
+pub use pipeline::l1_connection::handle_web_connection;
+pub(crate) use pipeline::l1_connection::{spawn_http_accept_loop, spawn_https_accept_loop};
 pub use pipeline_h2::handle_h2_dispatched_request;
 pub use proxy_h2::H2BodyReceiver;
 
