@@ -225,6 +225,33 @@ where
 }
 
 /// Standart CORS ve Server başlıklarıyla JSON yanıtı gönderir.
+pub async fn send_json_response_retry<S>(
+    socket: &mut S,
+    status_code: u16,
+    status_text: &str,
+    cors_origin: &str,
+    json_body: &str,
+    retry_after: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let origin = if cors_origin.is_empty() { "*" } else { cors_origin };
+    let resp = format!(
+        "HTTP/1.1 {} {}
+Content-Type: application/json; charset=utf-8
+Access-Control-Allow-Origin: {}
+Retry-After: {}
+Content-Length: {}
+Connection: close
+
+{}",
+        status_code, status_text, origin, retry_after, json_body.len(), json_body
+    );
+    tokio::io::AsyncWriteExt::write_all(socket, resp.as_bytes()).await?;
+    Ok(())
+}
+
 pub async fn send_json_response<S>(
     socket: &mut S,
     status_code: u16,

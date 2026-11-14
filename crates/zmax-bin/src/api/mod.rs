@@ -112,9 +112,14 @@ where
     }
 
 
+    if guard::api_koruma_engelle(socket, state, &cors_origin).await? {
+        return Ok(true);
+    }
+
     // Token kontrolü (yapılandırılmışsa veya dinleyici loopback dışındaysa zorunlu)
     match authorize_role(req, &expected_token, &read_token, require_token, local) {
         None => {
+            guard::kaydet_basarisiz(state).await;
             let err = r#"{"ok":false,"error":"Yetkisiz erisim: Gecerli Bearer veya X-ZMax-Token gerekli."}"#;
             send_json_response(socket, 401, "Unauthorized", &cors_origin, err).await?;
             return Ok(true);
@@ -209,7 +214,8 @@ where
         .await?;
         return Ok(());
     }
-    let _ = handle_api_route(&mut socket, &req, &state, true, is_local_control).await?;
+    let real_ip = resolve_real_ip(peer_addr.ip(), &req.headers, "x-forwarded-for", &trusted_proxies, true);
+    let _ = guard::ISTEMCI_IP.scope(real_ip, handle_api_route(&mut socket, &req, &state, true, is_local_control)).await?;
     Ok(())
 }
 

@@ -363,7 +363,22 @@ pub struct SecurityConfig {
     pub deny_ips: Vec<String>,
     /// Basic Auth için eşzamanlı Argon2/apr1 doğrulama üst sınırı (semafor; yeniden başlatmada geçerli).
     pub auth_max_concurrent_hashes: usize,
+    /// API/admin ardışık 401 eşiği (aşılınca IP banlanır).
+    #[serde(default = "d_auth_fail_limit")]
+    pub auth_fail_limit: u32,
+    #[serde(default = "d_auth_fail_window")]
+    pub auth_fail_window_sec: u64,
+    #[serde(default = "d_auth_ban")]
+    pub auth_ban_sec: u64,
+    /// API/admin IP başına dakikadaki istek sınırı.
+    #[serde(default = "d_api_rate")]
+    pub api_rate_limit_per_minute: u32,
 }
+
+fn d_auth_fail_limit() -> u32 { 5 }
+fn d_auth_fail_window() -> u64 { 300 }
+fn d_auth_ban() -> u64 { 900 }
+fn d_api_rate() -> u32 { 120 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
@@ -379,6 +394,10 @@ impl Default for SecurityConfig {
             allow_ips: Vec::new(),
             deny_ips: Vec::new(),
             auth_max_concurrent_hashes: 4,
+            auth_fail_limit: 5,
+            auth_fail_window_sec: 300,
+            auth_ban_sec: 900,
+            api_rate_limit_per_minute: 120,
         }
     }
 }
