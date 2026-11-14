@@ -61,9 +61,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%95**. Gerçek sunucuda doğrulana
 
 ## Yönetim paneli
 
-ZMax, yerel (loopback) bir web yönetim arayüzüyle gelir. Aşağıda sanal konak (alan adı) listesi görülüyor.
-
-![ZMax WebAdmin: alan adları](screenshots/zmax-webadmin-alan-adlari.png)
+ZMax, yerel (loopback) bir web yönetim arayüzüyle gelir.
 
 ## Mimari
 

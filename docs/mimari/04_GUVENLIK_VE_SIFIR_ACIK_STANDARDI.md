@@ -1,72 +1,74 @@
-# ZMax Güvenlik ve Sıfır Açık (Zero-Trust) Standardı (v3.0)
+# ZMax Güvenlik ve Sıfır Açık (Zero-Trust) Standardı (v3.1, kodla doğrulanmış)
 
-> v2.0'daki katman adları (`l2_validator`, `l3_security`, `l6_handlers`…) v3.0 adlarıyla değiştirilmiştir. Her satırda **Durum** sütunu vardır: `Var` = kodda doğrulandı, `Kısmi`, `Yok` = yeni yazılacak, `Doğrulanmadı` = koddan teyit edilemedi.
+> Durum sütunu `main` = `birlesme2` = `dff16c6` kodunun okunmasıyla doldurulmuştur. **Var** = kodda ve çağrı yolunda görüldü; **Kısmi** = bir kısmı var; **Yok** = kodda bulunamadı (arama yapıldı); **Doğrulanmadı** = koddan teyit edilemedi. "Test geçti" iddiası değildir: bu belge testleri koşmadı (tam test `BIRLESME2.md`: 494 geçti). Kök: `agaclar/birlesme2/crates`.
 
 ## 1. Felsefe
-Gelen hiçbir istek (IP'si ne olursa olsun) doğrulanmadan güvenilir sayılmaz. Her yönetim işlemi API'den geçer; API'nin önünde tek kapı vardır.
+Gelen hiçbir istek doğrulanmadan güvenilir sayılmaz. Her yönetim işlemi API'den geçer; API'nin önünde tek kapı vardır (istisnalar §3'te).
 
 ## 2. Saldırı → Savunma Matrisi
 
-| Tehdit | Önleyen parça | Savunma | Durum |
+| Tehdit | Parça | Savunma (koddaki yer) | Durum |
 |---|---|---|---|
-| Kimlik atlama | A1 `auth.rs` | Tek kapı; rota kendi token kontrolü yazmaz | Kilitlendi (A1 tek giriş) |
-| Boş token ile açık API | A1 | `expected_token` boşsa dış ağ reddedilir, yalnız loopback izinli | Kilitlendi (Karar 2) |
-| Zamanlama saldırısı | A1 | `constant_time_eq` (`api.rs:339`, sabit zamanlı karşılaştırma) | Var |
-| Kaba kuvvet (token tahmini) | A2 `guard.rs` | 5 ardışık 401 sonrası IP 15 dk banlanır + API rate limit (429) | Kilitlendi (Zorunlu Kural) |
-| Yetki yükseltme | A1 | Rol: `okuma` ve `yönetim` olmak üzere iki rol | Kilitlendi (Karar 1) |
-| İzsiz değişiklik | A9 `audit.rs` | Her yazma işleminde `audit.log` kaydı (gizli alanlar hariç) | Kilitlendi (Zorunlu Kural) |
-| Bozuk yapılandırma ile çökme | K3 | Doğrula → geçiciye yaz → atomik yer değiştir → hata varsa geri al | Kilitlendi (B4 / K3) |
-| Path traversal (API) | A2 | `has_parent_dir_traversal` (`api.rs:923`) + null-byte kontrolü | Var |
-| Path traversal (web) | L4 + L7 | WAF + `canonicalize` + `starts_with(document_root)` zorunlu sınır denetimi | Kilitlendi (Standart) |
-| Webshell (uploads altında .php) | L4 | `/uploads/` ve `/wp-content/uploads/` altındaki `.php/.phtml/.phar` isteklerine 403 engeli | Kilitlendi (Standart) |
-| Slowloris / soket tüketimi | L1 | `header_timeout`, `body_timeout`, `idle` zaman aşımı | Var (`web_engine.rs:1105-1152`) |
-| HTTP flood | L4 | IP bazlı rate limit → 429 | Var |
-| Sahte gerçek IP başlığı | L3 | `trusted_proxies` dışından gelen başlık yok sayılır | Var (`RealIpPolicy`) |
-| Host/SNI sahteciliği | L2 | RFC 7230 Host + Strict SNI | Var (`1372`, `1391`) |
-| PHP-FPM boğma | L7 | 503 + `Retry-After`, `backend_semaphores` | Var |
-| Önbellek zehirleme | L6 | `build_cache_key` + vary; bypass çerezi/Authorization önbelleğe girmez | Var |
-| Clickjacking / MIME / HSTS | L8 | Güvenlik başlıkları (`resolve_vhost_security_headers`) | Var |
-| Çok sunuculu ban/purge senkronu | K7 | Yayın (`BanIp`, `UnbanIp`, `Purge*`, `ReloadConfig`) + K6 altında çalışan abone dinleyicisi | Kilitlendi (K7 Hedef) |
-| Redis erişilemezken istek yolu | K7 + L4 | `spawn` + zaman aşımı (200 ms); istek beklemez, Redis hatası akışı düşürmez | Var (`web_engine.rs:1574`) |
-| Redis şifresi/TLS sızması | K7 | Şifre log ve `Debug` çıktısından maskelenir (`#[debug(skip)]`), `use_tls` desteği | Kilitlendi (Standart) |
-| Redis'e yetkisiz yazma | K7 | Yalnız `zmax:` önekli anahtarlar ve `zmax:cache:purge` kanalı; Redis yalnız 127.0.0.1 | Kilitlendi (Standart) |
-| Token sızması (log/URL) | A2/K5 | Loga yazılmaz; WebAdmin `?token=` URL'den anında silinir | Kilitlendi |
+| Kimlik atlama | A1 | Tek giriş `authorize_role` `zmax-bin/src/api/auth.rs:27`, `api/mod.rs:121`; rotalar kendi kontrolünü yazmaz | **Var** (istisna: `health`, `GET /api/version` auth'tan önce, `api/mod.rs:111`) |
+| Boş token ile açık API | A1 | Token boşsa yalnız `local && !require_token` (`auth.rs:27-35`); `local` = eş ve gerçek IP loopback (`api/mod.rs:200`) | **Var** (M13) |
+| Zamanlama saldırısı | A1 | `constant_time_eq` `api/auth.rs:8`; ayrıca `zmax-security/src/basic_auth.rs:356` | **Var** (uzunluk farkında erken döner: doğrulanmadı) |
+| Kaba kuvvet (token tahmini) | A2 | 5 ardışık 401 → 900 sn ban (`api/guard.rs:55`, varsayılanlar `zmax-config/src/lib.rs:378-380`) + API rate limit 120/dk → 429 (`guard.rs:28`, `:381`) | **Var** (M17; loopback istemci muaf) |
+| Yetki yükseltme | A1 | `AuthRole::{Admin, Read}`, okuma rolü yazma ucunda 403 (`api/mod.rs:128`, `auth.rs:72`) | **Var** (M13) |
+| İzsiz değişiklik | A9 | `api/audit.rs:54` → `logs/audit.log`; vhost, modül, purge, reload, unban çağrılarında (`02` A9) | **Kısmi** (ban ekleme ucu yok; `rol` her kayıtta geçirilmiyor) |
+| Bozuk yapılandırma ile çökme | K3 | Reload doğrulamayı **uygulamadan önce** yapar (`config/reload.rs:86` `validate_workspace_layout?`, takas 148); vhost yazımında geri alma (`api/services/vhost_service.rs:7,83`) | **Var** |
+| Path traversal (API) | A2 | `has_parent_dir_traversal` `zmax-config/src/vhost_json.rs:152` yalnız vhost JSON alanlarında (74, 505); genel API yolunda yok | **Kısmi** (null-byte denetimi bulunamadı) |
+| Path traversal (web) | L4+L7 | L4 gizli yol/path denetimi (`pipeline/l4_security.rs` adım 0); statik `canonicalize` + kök sınırı (`pipeline/l7_handlers/static_files.rs:113,291-292`) | **Var** |
+| Webshell (uploads altında .php) | L4 | `/uploads/` altı `.php/.phtml/.phar` 403 kuralı `zmax-bin` ve `zmax-security` içinde **bulunamadı** | **Yok** |
+| Slowloris / soket tüketimi | L1 | `header_timeout`/`body_timeout`/idle (`pipeline/l1_connection.rs:87-135`) | **Var** |
+| HTTP flood | L4 | IP rate limit yalnız HTTP/1 (`web_engine/pipeline_h1.rs:132`) ve ek dinleyici (`extra_listeners.rs:487`); HTTP/2 yolunda **bulunamadı** | **Kısmi** |
+| Sahte gerçek IP başlığı | L3 | `RealIpPolicy` + `trusted_proxies` (`pipeline/l3_realip.rs:7`, `modules/policy.rs:8`) | **Var** |
+| Host/SNI sahteciliği | L2 | Çift/boş Host reddi `zmax-httpparser` (test `lib.rs:1651`); bilinmeyen Host 403 (`pipeline_h1.rs:68`); `strict_sni` yalnız yapılandırma alanı (`zmax-config/src/lib.rs:167`), uygulayan kod `zmax-bin`/`zmax-tls` içinde bulunamadı | **Kısmi** |
+| h2'ye kapalı vhost'a h2 isteği | L2a | 421 (`web_engine/pipeline_h2.rs:84-94`) | **Var** |
+| PHP-FPM boğma | L7 | `BackendSemaphores` tanımlı (`l7_handlers/upstream.rs:12`) ama kullanımı bulunamadı; ters vekil bağlantı sınırında 503 (`proxy.rs:195`); PHP için 503+`Retry-After` bulunamadı | **Kısmi** |
+| Önbellek zehirleme | L6 | bypass çerezi/Authorization önbelleğe girmez (`pipeline/l6_cache.rs:52,93`), `build_cache_key` (`pipeline_h1.rs:607`) | **Var** |
+| Clickjacking / MIME / HSTS | L8 | `resolve_vhost_security_headers` `pipeline/l8_response.rs:21` | **Var** |
+| Basic Auth kaba kuvveti (L4a) | L4a | başarısız denemeler IP bazında sayılır, eşikte ban; hash `spawn_blocking`+`Semaphore` (`security_pipeline.rs:15`, `zmax-security/src/basic_auth.rs`) | **Var** |
+| Ek dinleyici suistimali (L1a) | L1a | arka uç yalnız yapılandırmadan (Host'tan türetilmez), yasaklı IP + global ACL + hız sınırı (`web_engine/extra_listeners.rs:1-5,487`) | **Var** (vhost WAF yok: bilinçli) |
+| Çok sunuculu ban/purge senkronu | K7 | Yayın `redis/sync.rs` (`publish_ban/unban/reload/purge_*`) + abone `redis/events.rs:52` (boot'ta `core/boot.rs:440`); döngü önleme `is_own_event` `events.rs:9` | **Var** (M19) |
+| Redis erişilemezken istek yolu | K7 | `spawn_event` + zaman aşımı (`redis/sync.rs:29`); istek beklemez | **Var** |
+| Redis şifresi/TLS sızması | K7 | `RedisConfig` `#[derive(Debug…)]` (`zmax-redis/src/lib.rs:46`); parola alanı maskelenmiyor (`#[debug(skip)]` yok) | **Yok** (`use_tls` desteği: doğrulanmadı) |
+| Redis'e yetkisiz yazma | K7 | `zmax:` önek ve `zmax:cache:purge` kanalı (`mod_redis.toml` `pubsub_channel`); Redis erişim denetimi uygulama dışı | **Doğrulanmadı** |
+| Token sızması (log/URL) | A2/K5/U2 | audit'e token yazılmaz (`audit.rs:9`); `?token=` adres çubuğundan silinir (`admin/js/api_client.js:43`); **SSE `createLogsStream` token'ı URL sorgusuna koyar** (`api_client.js:225`) | **Kısmi** |
+| Kimliksiz uç nokta sızıntısı | A3 | `GET /api/v1/health` loopback dışından da kimliksiz (`api/routes/system.rs:14`, `api/mod.rs:111`); `GET /api/version` kimliksiz (`system.rs:37`) | **Yok** (Karar 9'a aykırı) |
+| Metrik sızıntısı | A3 | `/metrics` auth'tan sonra, `okuma` yeter (`system.rs:55`, `auth.rs:80`) | **Var** (Karar 9) |
 
-## 3. Erişim Kanalı Tablosu (A1+A2 uygular)
+## 3. Erişim kanalı tablosu (A1+A2 uygular)
 
-| Kanal | Kimlik şartı | Ağ şartı | Genel (kimliksiz) uç nokta |
+| Kanal | Kimlik şartı | Ağ şartı | Kimliksiz uç nokta (kodda) |
 |---|---|---|---|
-| Port 19486 (`api`) | `require_token` ve token (rol kontrollü) | Dış ağda token zorunlu; yalnız loopback izinli | `health` (yalnız loopback kimliksiz; dış ağ token şartı) (Karar 9) |
-| Port 19485 (`admin`) | `require_token` ve token | Dış ağda token zorunlu | A7 statik dosya (kimliksiz), API yolları token'lı |
-| Unix soketi | Dosya izni (0600) | Yalnız yerel | — |
+| Port 19486 (`api`) | `require_token` ve token; iki rol | Token boşsa yalnız loopback (Karar 2) | `GET /api/v1/health`, `GET /api/version` — **dış ağdan da** |
+| Port 19485 (`admin`) | aynı | aynı | A7 statik dosya; `health`/`version` aynı |
+| Unix soketi | dosya izni | yalnız yerel | — |
 
-**Kimliksiz Uç Noktalar Kuralı (Karar 9 ile kilitlendi):**
-- `GET /api/v1/health`: Yalnızca `127.0.0.1`, `::1` ve Unix soketi üzerinden token'sız erişilebilir. Dış ağdan gelen tüm isteklerde token zorunludur.
-- `GET /metrics` ve `GET /api/v1/metrics`: Kesinlikle `okuma` rolüne sahip geçerli bir token gerektirir; hariciye açık anonim metrik yasaktır.
+**Karar 9 uygulanma durumu:** `metrics` = uygulandı; `health` loopback kısıtı = **uygulanmadı** (kod bunu gerektiriyor: `health_version`'ı `local` bilgisiyle çağırmak veya auth sonrasına almak). Bu belge yalnız durumu yazar.
 
-## 4. A1/A2 Standartları (API sağlama alma)
-1. **Tek kapı:** hiçbir rota token kontrolü yazmaz; `A1 → A2 → rota` sırası bozulmaz.
-2. **Rol modeli (karar: `00` §7 madde 1):** `okuma` (status, metrics, logs, vhost listesi) ve `yönetim` (vhost yaz, purge, ban, reload, modül aç/kapa). zPanel ve WebAdmin ayrı token alır; biri sızarsa diğeri etkilenmez.
-3. **Boş token kapısı:** `expected_token` boş ise `require_token` değerinden bağımsız olarak dış ağdan gelen istek reddedilir; yalnız loopback izinlidir (karar: `00` §7 madde 2).
-4. **Hot-reload:** SIGHUP'ta mevcut tokenlar korunur (`compute_effective_auth`, test: `compute_effective_auth_preserves_tokens_on_hot_reload`).
-5. **Değişiklik güvenliği:** vhost/config yazımı = doğrula → geçici dosyaya yaz → atomik yer değiştir → reload → başarısızsa eski dosyaya dön.
-6. **Denetim:** A9, tüm yazma işlemlerini kaydeder; token ve gizli değer yazılmaz.
-7. **Girdi doğrulama:** `:domain` parametresi alan adı biçimine uymalı, `..`/null-byte reddedilir; JSON gövde boyut sınırı vardır.
-8. **Hata yanıtı:** hata mesajı iç yol, yığın izi veya yapılandırma içeriği sızdırmaz.
+## 4. A1/A2 standartları
+1. **Tek kapı:** `A2 → A1 → rota` (gerçek sıra: A2 önce, `api/mod.rs:116` ve `121`; planda A1→A2 yazılmıştı).
+2. **Rol modeli:** Var (`read_token` ayrı; yönetim token'ı yazma). zPanel ve WebAdmin ayrı token alabilir (`api_token`/`admin_token`, `api_read_token`/`admin_read_token`).
+3. **Boş token kapısı:** Var.
+4. **Hot-reload:** token korunur (`api/auth.rs:112`, test `test_compute_effective_auth_preserves_tokens_and_auto_generates`).
+5. **Değişiklik güvenliği:** vhost yazımı geri alınır (`vhost_service.rs`); **`.lock` yok** (Go tarafında var, `go/lifecycle/writer.go:20`).
+6. **Denetim:** A9 Var (Kısmi: ban ekleme ucu yok).
+7. **Girdi doğrulama:** `:domain` ve alan doğrulaması `zmax-config/src/vhost_json.rs`; JSON gövde boyutu `read_http_request_with_limits` (`api/http.rs:159`).
+8. **Hata yanıtı:** iç yol sızıntısı taranmadı (**Doğrulanmadı**); `reload` hatası `e` mesajını aynen döner (`config_service.rs:29-34`).
 
-## 5. Boru Hattı Standartları
-- **L1:** IP başına eşzamanlı bağlantı sınırı ve zaman aşımları; sınır aşılırsa soket sessizce kapatılır veya 429.
-- **L2:** `Host` yok/çift → 400; header/body sınırı → 413; Strict SNI uyuşmazlığı → 421.
-- **L3:** gerçek IP yalnız `trusted_proxies` kaynaklı başlıktan çözülür; çözüm tek fonksiyonda yapılır (şu an `web_engine.rs` 1245 ve 1347'de tekrar ediyor).
-- **L4:** loopback rate limit'ten muaf, WAF'tan muaf değil; `/xmlrpc.php` varsayılan kapalı.
-- **L5:** `force_https` ACME HTTP-01 yolunu bozmaz (muaf).
-- **L7:** `SCRIPT_FILENAME` yalnız doğrulanmış `document_root` içinden; statik dosya `canonicalize` sonrası kök dışına çıkamaz.
+## 5. Boru hattı standartları
+- **L1:** zaman aşımları Var; IP başına eşzamanlı bağlantı sınırı **Yok**.
+- **L2:** Host çift/yok → 400 Var (httpparser); `max_header_bytes`/`max_body_bytes` → 413 (testler `main.rs` `keepalive_pipelining_gzip_and_413_payload_limit` 314); Strict SNI uyuşmazlığı → 421 **bulunamadı**.
+- **L3:** gerçek IP tek fonksiyonda (`l3_realip.rs:7`); API ve ek dinleyici doğrudan `zmax_httpparser::resolve_real_ip` çağırır (`api/mod.rs:193,221`, `api/admin_static.rs:38`, `extra_listeners.rs:398`).
+- **L4:** loopback rate limit'ten muaf, WAF'tan muaf değil; `/xmlrpc.php` WP kalkanı kapsamında (`zmax-security/src/lib.rs:387`).
+- **L5:** `force_https` ACME'yi bozmaz (`is_acme_challenge` `l5_router.rs:86`).
+- **L7:** `canonicalize` kök sınırı Var; `SCRIPT_FILENAME` doğrulaması **Doğrulanmadı**.
 
-## 6. Bellek ve Kararlılık
-- Büyük nesneler `Arc<T>` ile paylaşılır, kopyalanmaz.
-- Sonsuz büyüyen koleksiyon yok; önbellek ve sayaçların TTL/LRU/üst sınırı vardır.
-- Çekirdek kodda `.unwrap()`/`.expect()` yoktur; hata `Result` ile taşınır. (Mevcut kodda kaç tane olduğu taşıma sırasında taranır.)
-- Her bekleme (ağ, havuz, kilit) zaman aşımına sahiptir.
+## 6. Bellek ve kararlılık
+- `Arc<T>` paylaşımı: Var (`ServerState` `core/state.rs:51`).
+- `.unwrap()`/`.expect()`: `zmax-bin/src` altında test dışı sayım yapılmadı (grep testleri ayıklamadı): **Doğrulanmadı**.
+- Her bekleme zaman aşımına sahip: **Doğrulanmadı** (tam tarama yapılmadı).
 
-## 7. Kabul Ölçütü (her parça için)
-Parça "bitti" sayılmadan önce: ilgili `cargo test -p zmax-bin <test>` çıktısı, bu belgedeki ilgili satırın **Durum** sütunu `Var`a çevrilmiş ve çıktı kayda geçmiş olmalı.
+## 7. Kabul ölçütü
+Parça "bitti" sayılmadan önce ilgili `cargo test -p zmax-bin <test>` çıktısı ve bu belgedeki satırın Durum'u `Var` olmalı. Bu sürümde `Yok`/`Kısmi` satırlar: webshell, HTTP/2 rate limit, Strict SNI uygulaması, PHP-FPM 503+Retry-After, Redis parola maskeleme, `health` loopback, SSE token, API `.lock`, IP başına bağlantı sınırı.

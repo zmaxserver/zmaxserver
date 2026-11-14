@@ -59,10 +59,10 @@
 <marker id="okd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1 L9 5 L0 9 z" fill="#b4531a"/></marker>
 </defs>
 <rect x="0" y="0" width="1700" height="2000" fill="#fafbfd"/>
-<text x="30" y="52" class="t-main">ZMax Server — 36 Parçalı Katmanlı Mimari Şeması (v3.0)</text>
+<text x="30" y="52" class="t-main">ZMax Server — 36 Parçalı Katmanlı Mimari Şeması (v3.1, kodla eşlenmiş)</text>
 <text x="30" y="78" class="t-sub">7 Çekirdek + 8 Web Trafik Katmanı + 9 Yönetim API Modülü + 7 WebAdmin Bileşeni + 5 Rust↔Go Köprü Parçası = 36</text>
 <text x="30" y="98" class="t-sub">Görsel sıra veri akışına göredir (üstten alta: arayüz → köprü → API → çekirdek → trafik hattı → altyapı); belge numaraları 00–07 sırasıyla farklıdır.</text>
-<rect x="1180" y="38" width="30" height="16" rx="4" fill="#fff" stroke="#555a66" stroke-dasharray="4 3"/><text x="1218" y="51" class="t-note">kesikli: yeni yazılacak / kısmen yeni</text>
+<rect x="1180" y="38" width="30" height="16" rx="4" fill="#fff" stroke="#555a66" stroke-dasharray="4 3"/><text x="1218" y="51" class="t-note">kesikli: kısmen yazılmış</text>
 <text x="1180" y="74" class="t-open">⚠ kırmızı-turuncu: açık sorun</text>
 <line x1="1180" y1="92" x2="1218" y2="92" stroke="#555a66" stroke-width="1.6" marker-end="url(#ok)"/><text x="1224" y="96" class="t-note">çağrı / veri akışı</text>
 <rect x="30" y="130" width="1640" height="194" rx="12" fill="#f3ecfb" stroke="#7d4fc4" stroke-width="1.5"/>
@@ -80,13 +80,13 @@
 <text x="289.42857142857144" y="250" text-anchor="middle" class="t-file">index.html</text>
 <text x="289.42857142857144" y="267" text-anchor="middle" class="t-desc">topbar · sidebar · #app</text>
 <text x="289.42857142857144" y="281" text-anchor="middle" class="t-desc">token modalı</text>
-<rect x="402.8571428571429" y="186" width="194.85714285714286" height="104" rx="8" fill="#ffffff" stroke="#7d4fc4" stroke-width="1.2"/>
+<rect x="402.8571428571429" y="186" width="194.85714285714286" height="104" rx="8" fill="#ffffff" stroke="#b4531a" stroke-width="1.8"/>
 <rect x="410.8571428571429" y="194" width="38" height="20" rx="5" fill="#7d4fc4"/>
 <text x="429.8571428571429" y="208" text-anchor="middle" class="t-id">U2</text>
 <text x="500.28571428571433" y="232" text-anchor="middle" class="t-title">API istemcisi</text>
 <text x="500.28571428571433" y="250" text-anchor="middle" class="t-file">api_client.js</text>
 <text x="500.28571428571433" y="267" text-anchor="middle" class="t-desc">token · 401 yakalama</text>
-<text x="500.28571428571433" y="281" text-anchor="middle" class="t-desc">REST + SSE bağlantısı</text>
+<text x="500.28571428571433" y="281" text-anchor="middle" class="t-warn">⚠ SSE token URL'de</text>
 <rect x="613.7142857142858" y="186" width="194.85714285714286" height="104" rx="8" fill="#ffffff" stroke="#7d4fc4" stroke-width="1.2"/>
 <rect x="621.7142857142858" y="194" width="38" height="20" rx="5" fill="#7d4fc4"/>
 <text x="640.7142857142858" y="208" text-anchor="middle" class="t-id">U3</text>
@@ -135,48 +135,46 @@
 <rect x="192" y="430" width="279.2" height="104" rx="8" fill="#ffffff" stroke="#d9822b" stroke-width="1.2" stroke-dasharray="6 4"/>
 <rect x="200" y="438" width="38" height="20" rx="5" fill="#d9822b"/>
 <text x="219" y="452" text-anchor="middle" class="t-id">B3</text>
-<rect x="425.59999999999997" y="438" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="444.4" y="451" text-anchor="middle" class="t-yeni">YENİ</text>
+<rect x="419.2" y="438" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
+<text x="441.2" y="451" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="331.6" y="476" text-anchor="middle" class="t-title">Go istemci paketi</text>
-<text x="331.6" y="494" text-anchor="middle" class="t-file">bridge/go/zmaxbridge/</text>
-<text x="331.6" y="511" text-anchor="middle" class="t-desc">Unix soket · zaman aşımı</text>
-<text x="331.6" y="525" text-anchor="middle" class="t-desc">devre kesici · tipli hata</text>
+<text x="331.6" y="494" text-anchor="middle" class="t-file">go/zmaxbridge/</text>
+<text x="331.6" y="511" text-anchor="middle" class="t-desc">Unix soket · zaman aşımı 5 sn</text>
+<text x="331.6" y="525" text-anchor="middle" class="t-desc">tipli hata (kesici/Events yok)</text>
 <rect x="487.2" y="430" width="279.2" height="104" rx="8" fill="#ffffff" stroke="#d9822b" stroke-width="1.2" stroke-dasharray="6 4"/>
 <rect x="495.2" y="438" width="38" height="20" rx="5" fill="#d9822b"/>
 <text x="514.2" y="452" text-anchor="middle" class="t-id">B1</text>
-<rect x="720.8" y="438" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="739.6" y="451" text-anchor="middle" class="t-yeni">YENİ</text>
+<rect x="714.4" y="438" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
+<text x="736.4" y="451" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="626.8" y="476" text-anchor="middle" class="t-title">Sözleşme</text>
-<text x="626.8" y="494" text-anchor="middle" class="t-file">bridge/contract/</text>
+<text x="626.8" y="494" text-anchor="middle" class="t-file">go/contract/</text>
 <text x="626.8" y="511" text-anchor="middle" class="t-desc">openapi.yaml · TOML şeması</text>
-<text x="626.8" y="525" text-anchor="middle" class="t-desc">golden · contract_version</text>
-<rect x="782.4" y="430" width="279.2" height="104" rx="8" fill="#ffffff" stroke="#d9822b" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text x="626.8" y="525" text-anchor="middle" class="t-desc">contract_version (golden yok)</text>
+<rect x="782.4" y="430" width="279.2" height="104" rx="8" fill="#ffffff" stroke="#d9822b" stroke-width="1.2"/>
 <rect x="790.4" y="438" width="38" height="20" rx="5" fill="#d9822b"/>
 <text x="809.4" y="452" text-anchor="middle" class="t-id">B2</text>
-<rect x="1015.9999999999999" y="438" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1034.8" y="451" text-anchor="middle" class="t-yeni">YENİ</text>
 <text x="922" y="476" text-anchor="middle" class="t-title">Rust uç noktaları</text>
 <text x="922" y="494" text-anchor="middle" class="t-file">api/bridge.rs</text>
 <text x="922" y="511" text-anchor="middle" class="t-desc">version · config/validate</text>
-<text x="922" y="525" text-anchor="middle" class="t-desc">reload sonucu · events SSE</text>
+<text x="922" y="525" text-anchor="middle" class="t-desc">reload generation · events SSE</text>
 <rect x="1077.6" y="430" width="279.2" height="104" rx="8" fill="#ffffff" stroke="#d9822b" stroke-width="1.2" stroke-dasharray="6 4"/>
 <rect x="1085.6" y="438" width="38" height="20" rx="5" fill="#d9822b"/>
 <text x="1104.6" y="452" text-anchor="middle" class="t-id">B4</text>
-<rect x="1311.2" y="438" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1330" y="451" text-anchor="middle" class="t-yeni">YENİ</text>
+<rect x="1304.8" y="438" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
+<text x="1326.8" y="451" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="1217.1999999999998" y="476" text-anchor="middle" class="t-title">Dosya sözleşmesi</text>
-<text x="1217.1999999999998" y="494" text-anchor="middle" class="t-file">tek yazar kuralı</text>
-<text x="1217.1999999999998" y="511" text-anchor="middle" class="t-desc">atomik yazma · .lock</text>
-<text x="1217.1999999999998" y="525" text-anchor="middle" class="t-desc">generation</text>
+<text x="1217.1999999999998" y="494" text-anchor="middle" class="t-file">go/lifecycle/writer.go</text>
+<text x="1217.1999999999998" y="511" text-anchor="middle" class="t-desc">atomik yazma · Go .lock</text>
+<text x="1217.1999999999998" y="525" text-anchor="middle" class="t-desc">Rust API .lock yok</text>
 <rect x="1372.8" y="430" width="279.2" height="104" rx="8" fill="#ffffff" stroke="#d9822b" stroke-width="1.2" stroke-dasharray="6 4"/>
 <rect x="1380.8" y="438" width="38" height="20" rx="5" fill="#d9822b"/>
 <text x="1399.8" y="452" text-anchor="middle" class="t-id">B5</text>
-<rect x="1606.4" y="438" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1625.2" y="451" text-anchor="middle" class="t-yeni">YENİ</text>
+<rect x="1600" y="438" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
+<text x="1622" y="451" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="1512.3999999999999" y="476" text-anchor="middle" class="t-title">Yaşam döngüsü</text>
-<text x="1512.3999999999999" y="494" text-anchor="middle" class="t-file">sağlık · geri alma</text>
+<text x="1512.3999999999999" y="494" text-anchor="middle" class="t-file">go/lifecycle/</text>
 <text x="1512.3999999999999" y="511" text-anchor="middle" class="t-desc">Validate → yaz → Reload</text>
-<text x="1512.3999999999999" y="525" text-anchor="middle" class="t-desc">OpenLiteSpeed'e dönüş</text>
+<text x="1512.3999999999999" y="525" text-anchor="middle" class="t-desc">geri alma · sürüm denetimi</text>
 <line x1="176" y1="482" x2="191" y2="482" stroke="#555a66" stroke-width="1.6" marker-end="url(#ok)"/>
 <line x1="487.2" y1="482" x2="472.2" y2="482" stroke="#b4531a" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#okd)"/>
 <line x1="766.4" y1="482" x2="781.4" y2="482" stroke="#b4531a" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#okd)"/>
@@ -192,29 +190,27 @@
 <text x="116" y="750" text-anchor="middle" class="t-title">zPanel / CLI</text>
 <text x="116" y="772" text-anchor="middle" class="t-file">Port 19486</text>
 <text x="116" y="790" text-anchor="middle" class="t-desc">Unix soket</text>
-<rect x="192" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#b4531a" stroke-width="1.8"/>
+<rect x="192" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="200" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="219" y="738" text-anchor="middle" class="t-id">A1</text>
 <text x="266" y="762" text-anchor="middle" class="t-title">Kimlik / yetki</text>
 <text x="266" y="780" text-anchor="middle" class="t-file">auth.rs</text>
 <text x="266" y="797" text-anchor="middle" class="t-desc">Bearer · X-ZMax-Token</text>
-<text x="266" y="811" text-anchor="middle" class="t-warn">⚠ boş token açığı</text>
-<rect x="356" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text x="266" y="811" text-anchor="middle" class="t-desc">iki rol · boş token kapalı</text>
+<rect x="356" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="364" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="383" y="738" text-anchor="middle" class="t-id">A2</text>
-<rect x="452" y="724" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="474" y="737" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="430" y="762" text-anchor="middle" class="t-title">Koruma</text>
 <text x="430" y="780" text-anchor="middle" class="t-file">guard.rs</text>
-<text x="430" y="797" text-anchor="middle" class="t-desc">boyut · girdi · CORS</text>
-<text x="430" y="811" text-anchor="middle" class="t-desc">ban/rate: doğrulanmadı</text>
-<rect x="520" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
+<text x="430" y="797" text-anchor="middle" class="t-desc">rate limit · 5×401 banı</text>
+<text x="430" y="811" text-anchor="middle" class="t-desc">girdi · CORS</text>
+<rect x="520" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#b4531a" stroke-width="1.8"/>
 <rect x="528" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="547" y="738" text-anchor="middle" class="t-id">A3</text>
 <text x="594" y="762" text-anchor="middle" class="t-title">Sistem</text>
 <text x="594" y="780" text-anchor="middle" class="t-file">routes/system.rs</text>
 <text x="594" y="797" text-anchor="middle" class="t-desc">status · metrics · reload</text>
-<text x="594" y="811" text-anchor="middle" class="t-desc">config · ports · modules</text>
+<text x="594" y="811" text-anchor="middle" class="t-warn">⚠ health kimliksiz</text>
 <rect x="684" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="692" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="711" y="738" text-anchor="middle" class="t-id">A4</text>
@@ -229,33 +225,27 @@
 <text x="922" y="780" text-anchor="middle" class="t-file">security_cache.rs</text>
 <text x="922" y="797" text-anchor="middle" class="t-desc">bans · unban</text>
 <text x="922" y="811" text-anchor="middle" class="t-desc">purge: domain · tag · tümü</text>
-<rect x="1012" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2" stroke-dasharray="6 4"/>
+<rect x="1012" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="1020" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="1039" y="738" text-anchor="middle" class="t-id">A6</text>
-<rect x="1108" y="724" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1130" y="737" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="1086" y="762" text-anchor="middle" class="t-title">Loglar</text>
 <text x="1086" y="780" text-anchor="middle" class="t-file">routes/logs.rs</text>
 <text x="1086" y="797" text-anchor="middle" class="t-desc">tail · logs/reopen</text>
-<text x="1086" y="811" text-anchor="middle" class="t-desc">canlı akış SSE (yeni)</text>
-<rect x="1176" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text x="1086" y="811" text-anchor="middle" class="t-desc">canlı akış SSE (logs/stream)</text>
+<rect x="1176" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="1184" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="1203" y="738" text-anchor="middle" class="t-id">A8</text>
-<rect x="1278.4" y="724" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1297.2" y="737" text-anchor="middle" class="t-yeni">YENİ</text>
 <text x="1250" y="762" text-anchor="middle" class="t-title">Servisler</text>
 <text x="1250" y="780" text-anchor="middle" class="t-file">services/</text>
 <text x="1250" y="797" text-anchor="middle" class="t-desc">vhost · cache · security</text>
 <text x="1250" y="811" text-anchor="middle" class="t-desc">config servisleri</text>
-<rect x="1340" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2" stroke-dasharray="6 4"/>
+<rect x="1340" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="1348" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="1367" y="738" text-anchor="middle" class="t-id">A9</text>
-<rect x="1442.4" y="724" width="37.6" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1461.2" y="737" text-anchor="middle" class="t-yeni">YENİ</text>
 <text x="1414" y="762" text-anchor="middle" class="t-title">Denetim</text>
 <text x="1414" y="780" text-anchor="middle" class="t-file">audit.rs</text>
 <text x="1414" y="797" text-anchor="middle" class="t-desc">yazma işlemi kaydı</text>
-<text x="1414" y="811" text-anchor="middle" class="t-desc">audit.log</text>
+<text x="1414" y="811" text-anchor="middle" class="t-desc">logs/audit.log</text>
 <rect x="1504" y="716" width="148" height="104" rx="8" fill="#ffffff" stroke="#2f9a58" stroke-width="1.2"/>
 <rect x="1512" y="724" width="38" height="20" rx="5" fill="#2f9a58"/>
 <text x="1531" y="738" text-anchor="middle" class="t-id">A7</text>
@@ -276,7 +266,7 @@
 <text x="152.85714285714286" y="1076" text-anchor="middle" class="t-title">Boot / sinyal</text>
 <text x="152.85714285714286" y="1094" text-anchor="middle" class="t-file">core/boot.rs · signals.rs</text>
 <text x="152.85714285714286" y="1111" text-anchor="middle" class="t-desc">CLI · dinleyici kurma</text>
-<text x="152.85714285714286" y="1125" text-anchor="middle" class="t-desc">SIGHUP reload · SIGUSR1</text>
+<text x="152.85714285714286" y="1125" text-anchor="middle" class="t-desc">SIGHUP · SIGUSR1 (kopya)</text>
 <rect x="289.7142857142857" y="1030" width="193.71428571428572" height="104" rx="8" fill="#ffffff" stroke="#4b5568" stroke-width="1.2"/>
 <rect x="297.7142857142857" y="1038" width="38" height="20" rx="5" fill="#4b5568"/>
 <text x="316.7142857142857" y="1052" text-anchor="middle" class="t-id">K2</text>
@@ -305,27 +295,24 @@
 <text x="1087.7142857142858" y="1094" text-anchor="middle" class="t-file">logger/</text>
 <text x="1087.7142857142858" y="1111" text-anchor="middle" class="t-desc">AsyncLogManager · rotasyon</text>
 <text x="1087.7142857142858" y="1125" text-anchor="middle" class="t-desc">NCSA · JSON · tail</text>
-<rect x="1224.5714285714287" y="1030" width="193.71428571428572" height="104" rx="8" fill="#ffffff" stroke="#4b5568" stroke-width="1.2"/>
+<rect x="1224.5714285714287" y="1030" width="193.71428571428572" height="104" rx="8" fill="#ffffff" stroke="#4b5568" stroke-width="1.2" stroke-dasharray="6 4"/>
 <rect x="1232.5714285714287" y="1038" width="38" height="20" rx="5" fill="#4b5568"/>
 <text x="1251.5714285714287" y="1052" text-anchor="middle" class="t-id">K6</text>
+<rect x="1366.2857142857144" y="1038" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
+<text x="1388.2857142857144" y="1051" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="1321.4285714285716" y="1076" text-anchor="middle" class="t-title">Arka plan görevleri</text>
 <text x="1321.4285714285716" y="1094" text-anchor="middle" class="t-file">core/tasks.rs</text>
-<text x="1321.4285714285716" y="1111" text-anchor="middle" class="t-desc">bellek/havuz bakımı</text>
-<text x="1321.4285714285716" y="1125" text-anchor="middle" class="t-desc">TLS sertifika yenileme</text>
-<rect x="1458.2857142857144" y="1030" width="193.71428571428572" height="104" rx="8" fill="#ffffff" stroke="#b4531a" stroke-width="1.8" stroke-dasharray="6 4"/>
+<text x="1321.4285714285716" y="1111" text-anchor="middle" class="t-desc">bakım döngüsü (çağrılmıyor)</text>
+<text x="1321.4285714285716" y="1125" text-anchor="middle" class="t-desc">TLS yenileme: boot + reload</text>
+<rect x="1458.2857142857144" y="1030" width="193.71428571428572" height="104" rx="8" fill="#ffffff" stroke="#4b5568" stroke-width="1.2"/>
 <rect x="1466.2857142857144" y="1038" width="38" height="20" rx="5" fill="#4b5568"/>
 <text x="1485.2857142857144" y="1052" text-anchor="middle" class="t-id">K7</text>
-<rect x="1600.0000000000002" y="1038" width="44" height="18" rx="4" fill="#fff4e8" stroke="#d9822b"/>
-<text x="1622.0000000000002" y="1051" text-anchor="middle" class="t-yeni">KISMİ</text>
 <text x="1555.1428571428573" y="1076" text-anchor="middle" class="t-title">Redis (opsiyonel)</text>
 <text x="1555.1428571428573" y="1094" text-anchor="middle" class="t-file">redis/</text>
-<text x="1555.1428571428573" y="1111" text-anchor="middle" class="t-desc">yayın var · abone YOK (yazılacak)</text>
-<text x="1555.1428571428573" y="1125" text-anchor="middle" class="t-warn">⚠ UnbanIp/ReloadConfig yayınlanmıyor</text>
+<text x="1555.1428571428573" y="1111" text-anchor="middle" class="t-desc">yayın + abone (events.rs)</text>
+<text x="1555.1428571428573" y="1125" text-anchor="middle" class="t-desc">UnbanIp · ReloadConfig yayında</text>
 <line x1="523.4285714285714" y1="1082" x2="484.42857142857144" y2="1082" stroke="#555a66" stroke-width="1.6" marker-end="url(#ok)"/>
 <line x1="717.1428571428571" y1="1082" x2="756.1428571428571" y2="1082" stroke="#555a66" stroke-width="1.6" marker-end="url(#ok)"/>
-<line x1="1458.2857142857144" y1="1082" x2="1419.2857142857144" y2="1082" stroke="#b4531a" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#okd)"/>
-<rect x="1420.7857142857144" y="1066" width="36" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
-<text x="1438.7857142857144" y="1076" text-anchor="middle" class="t-lbl">abone</text>
 <path d="M158.85714285714286 1134 V1146 H614.2857142857143 V1135" fill="none" stroke="#555a66" stroke-width="1.4" marker-end="url(#ok)"/>
 <path d="M848 1134 V1156 H392.57142857142856 V1135" fill="none" stroke="#555a66" stroke-width="1.4" marker-end="url(#ok)"/>
 <path d="M626.2857142857143 1134 V1166 H1549.1428571428573 V1135" fill="none" stroke="#555a66" stroke-width="1.4" marker-end="url(#ok)"/>
@@ -342,14 +329,14 @@
 <text x="285.25" y="1392" text-anchor="middle" class="t-title">Bağlantı</text>
 <text x="285.25" y="1410" text-anchor="middle" class="t-file">l1_connection.rs</text>
 <text x="285.25" y="1427" text-anchor="middle" class="t-desc">TCP kabul · SO_REUSEPORT</text>
-<text x="285.25" y="1441" text-anchor="middle" class="t-desc">idle/header/body timeout</text>
+<text x="285.25" y="1441" text-anchor="middle" class="t-desc">+L1a ek dinleyici/proxy</text>
 <rect x="394.5" y="1346" width="150.5" height="104" rx="8" fill="#ffffff" stroke="#3b6fd4" stroke-width="1.2"/>
 <rect x="402.5" y="1354" width="38" height="20" rx="5" fill="#3b6fd4"/>
 <text x="421.5" y="1368" text-anchor="middle" class="t-id">L2</text>
 <text x="469.75" y="1392" text-anchor="middle" class="t-title">Protokol / TLS</text>
 <text x="469.75" y="1410" text-anchor="middle" class="t-file">l2_protocol.rs · h2.rs</text>
-<text x="469.75" y="1427" text-anchor="middle" class="t-desc">TLS · ALPN · Strict SNI</text>
-<text x="469.75" y="1441" text-anchor="middle" class="t-desc">HTTP/1.1 · H2 · Host · 413</text>
+<text x="469.75" y="1427" text-anchor="middle" class="t-desc">TLS · ALPN · H2 · Host · 413</text>
+<text x="469.75" y="1441" text-anchor="middle" class="t-desc">+L2a h2-kapalı vhost 421</text>
 <rect x="579" y="1346" width="150.5" height="104" rx="8" fill="#ffffff" stroke="#3b6fd4" stroke-width="1.2"/>
 <rect x="587" y="1354" width="38" height="20" rx="5" fill="#3b6fd4"/>
 <text x="606" y="1368" text-anchor="middle" class="t-id">L3</text>
@@ -362,8 +349,8 @@
 <text x="790.5" y="1368" text-anchor="middle" class="t-id">L4</text>
 <text x="838.75" y="1392" text-anchor="middle" class="t-title">Güvenlik</text>
 <text x="838.75" y="1410" text-anchor="middle" class="t-file">l4_security.rs</text>
-<text x="838.75" y="1427" text-anchor="middle" class="t-desc">ban · CIDR ACL · rate limit</text>
-<text x="838.75" y="1441" text-anchor="middle" class="t-desc">WAF · WP brute-force</text>
+<text x="838.75" y="1427" text-anchor="middle" class="t-desc">ban · ACL · WAF · WP</text>
+<text x="838.75" y="1441" text-anchor="middle" class="t-desc">+L4a Basic Auth</text>
 <rect x="948" y="1346" width="150.5" height="104" rx="8" fill="#ffffff" stroke="#3b6fd4" stroke-width="1.2"/>
 <rect x="956" y="1354" width="38" height="20" rx="5" fill="#3b6fd4"/>
 <text x="975" y="1368" text-anchor="middle" class="t-id">L5</text>
@@ -441,8 +428,8 @@
 <rect x="164.8" y="568" width="30.4" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
 <text x="180" y="578" text-anchor="middle" class="t-lbl">REST</text>
 <path d="M500.28571428571433 290 V336 H14 V580 H266 V716" fill="none" stroke="#555a66" stroke-width="1.4" marker-end="url(#ok)"/>
-<rect x="1317.6" y="582" width="136.79999999999998" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
-<text x="1386" y="592" text-anchor="middle" class="t-lbl">logs/stream (SSE, yeni)</text>
+<rect x="1334.4" y="582" width="103.19999999999999" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
+<text x="1386" y="592" text-anchor="middle" class="t-lbl">logs/stream (SSE)</text>
 <path d="M500.28571428571433 290 V350 H1686 V594 H1086 V716" fill="none" stroke="#b4531a" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#okd)"/>
 <rect x="247.20000000000002" y="596" width="103.19999999999999" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
 <text x="298.8" y="606" text-anchor="middle" class="t-lbl">REST / Unix soket</text>
@@ -459,14 +446,14 @@
 <rect x="800.2857142857142" y="882" width="36" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
 <text x="818.2857142857142" y="892" text-anchor="middle" class="t-lbl">durum</text>
 <path d="M1250 820 V894 H386.57142857142856 V1030" fill="none" stroke="#555a66" stroke-width="1.4" marker-end="url(#ok)"/>
-<rect x="1202.057142857143" y="896" width="97.6" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
-<text x="1250.857142857143" y="906" text-anchor="middle" class="t-lbl">audit.log (yeni)</text>
+<rect x="1221.6571428571428" y="896" width="58.4" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
+<text x="1250.857142857143" y="906" text-anchor="middle" class="t-lbl">audit.log</text>
 <path d="M1414 820 V908 H1087.7142857142858 V1030" fill="none" stroke="#b4531a" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#okd)"/>
 <rect x="1060.4571428571428" y="910" width="52.8" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
 <text x="1086.857142857143" y="920" text-anchor="middle" class="t-lbl">log tail</text>
 <path d="M1086 820 V922 H1087.7142857142858 V1030" fill="none" stroke="#555a66" stroke-width="1.4" marker-end="url(#ok)"/>
-<rect x="929.7714285714287" y="924" width="125.6" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
-<text x="992.5714285714287" y="934" text-anchor="middle" class="t-lbl">API ban yayını (yeni)</text>
+<rect x="949.3714285714286" y="924" width="86.39999999999999" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
+<text x="992.5714285714287" y="934" text-anchor="middle" class="t-lbl">API ban yayını</text>
 <path d="M430 820 V936 H1555.1428571428573 V1030" fill="none" stroke="#b4531a" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#okd)"/>
 <rect x="1200.9714285714288" y="938" width="75.19999999999999" height="13" rx="3" fill="#fafbfd" opacity="0.95"/>
 <text x="1238.5714285714287" y="948" text-anchor="middle" class="t-lbl">purge yayını</text>
@@ -494,13 +481,13 @@
 <rect x="50" y="161" width="740.8" height="16" fill="#f3ecfb"/>
 <text x="54" y="172" class="t-bsub">Port 19485  ·  yalnız API'den veri alır, sunucu durumuna doğrudan erişmez  ·  i18n.js tek sözlük (varsayılan Türkçe)</text>
 <text x="1652" y="154" text-anchor="end" class="t-doc">03_WEBADMIN_UI_7_BILESEN.md</text>
-<rect x="50" y="298" width="859.4" height="20" fill="#f3ecfb"/>
-<text x="54" y="312" class="t-note">Tüm istekler U2 üzerinden API'ye (A1) gider.  İki ayrı SSE vardır: /api/v1/logs/stream (A6 → U7, yeni) ve /api/v1/events (B2 → Go, yeni).</text>
+<rect x="50" y="298" width="1219" height="20" fill="#f3ecfb"/>
+<text x="54" y="312" class="t-note">Tüm istekler U2 üzerinden API'ye (A1) gider.  İki ayrı SSE vardır: /api/v1/logs/stream (A6 → U7) ve /api/v1/events (B2 → Go).  SSE istemcisi token'ı ?token= ile yollar; sunucu yalnız başlık okur.</text>
 <rect x="50" y="382" width="304.9" height="22" fill="#fdf1e1"/>
 <text x="54" y="398" class="t-tag" fill="#d9822b">BÖLÜM 4</text>
 <text x="125.39999999999999" y="398" class="t-band">Rust ↔ Go Köprüsü (B1–B5)</text>
-<rect x="50" y="405" width="728.1999999999999" height="16" fill="#fdf1e1"/>
-<text x="54" y="416" class="t-bsub">ZPanel (Go) ile ZMax (Rust) arasındaki sözleşme, istemci ve yaşam döngüsü — bölümün tamamı kodda yok, yeni yazılır</text>
+<rect x="50" y="405" width="1005.4" height="16" fill="#fdf1e1"/>
+<text x="54" y="416" class="t-bsub">ZPanel (Go) ile ZMax (Rust) arasındaki sözleşme, istemci ve yaşam döngüsü — Rust tarafı (B2) kodda; Go paketi ve sözleşme katmanlizmax/go altında (izlenmiyor)</text>
 <text x="1652" y="398" text-anchor="end" class="t-doc">07_RUST_GO_KOPRUSU.md</text>
 <rect x="50" y="542" width="921.4" height="20" fill="#fdf1e1"/>
 <text x="54" y="556" class="t-note">B1 sözleşmesi Rust (B2) ve Go (B3) testlerini aynı dosyalardan besler.  Vhost TOML'unu yalnız Go yazar (B4); API vhost yazımı WebAdmin/CLI içindir.</text>
@@ -542,18 +529,18 @@
 <text x="48" y="1896" class="t-note">5. Altyapı crate'leri aşağı yönlüdür; ServerState zmax-bin dışına sızmaz.</text>
 <rect x="860" y="1756" width="810" height="220" rx="10" fill="#ffffff" stroke="#c9ced8"/>
 <text x="878" y="1782" class="t-band">Kararlar (00 §7, 2026-11-14)</text>
-<text x="878" y="1808" class="t-note">1  Rol: okuma + yönetim (iki rol)</text>
-<text x="878" y="1828" class="t-note">2  Boş token kapısı kapatılır (dış ağ reddedilir, yalnız loopback)</text>
-<text x="878" y="1848" class="t-note">3  Modül anahtarı ekranı: planlanmadı</text>
-<text x="878" y="1868" class="t-note">4  Yalnız /api/v1; eski yollar v1'e geçişten sonra kalkar</text>
-<text x="878" y="1888" class="t-note">5  Vhost TOML'unu yalnız Go yazar; API yazımı WebAdmin/CLI + .lock</text>
-<text x="878" y="1908" class="t-note">6  Go paketi ZMax deposunda: bridge/go/zmaxbridge</text>
-<text x="878" y="1928" class="t-note">7  Köprü için ayrı rol yok; zPanel "yönetim" rolüyle</text>
-<text x="878" y="1948" class="t-note">8  Redis: abone + banned_ip_sync yazılır; 3 ayar dosyadan çıkar</text>
-<text x="878" y="1968" class="t-note">9  Health: yalnız loopback kimliksiz; metrics: token zorunlu</text>
+<text x="878" y="1808" class="t-note">1  Rol: okuma + yönetim — UYGULANDI (M13)</text>
+<text x="878" y="1828" class="t-note">2  Boş token kapısı kapalı — UYGULANDI (M13)</text>
+<text x="878" y="1848" class="t-note">3  Modül anahtarı ekranı yok — UYGULANDI</text>
+<text x="878" y="1868" class="t-note">4  Yalnız /api/v1 — KISMİ (GET /api/version kaldı, M15)</text>
+<text x="878" y="1888" class="t-note">5  Vhost yazarı Go — KISMİ (Rust API .lock yok)</text>
+<text x="878" y="1908" class="t-note">6  Go paketi: katmanlizmax/go/zmaxbridge (yol farklı)</text>
+<text x="878" y="1928" class="t-note">7  Köprü rolü yok, yönetim rolü — UYGULANDI (M20)</text>
+<text x="878" y="1948" class="t-note">8  Redis abone + banned_ip_* — UYGULANDI (M19)</text>
+<text x="878" y="1968" class="t-open">9  KISMİ: metrics okuma-token; health loopback YOK</text>
 </svg>
 </main>
-<footer>ZMax Server · katmanlı mimari v3.0</footer>
+<footer>ZMax Server · katmanlı mimari v3.1 (birlesme2 / dff16c6)</footer>
 <script>
 (function () {
   var durum = document.getElementById('durum');
