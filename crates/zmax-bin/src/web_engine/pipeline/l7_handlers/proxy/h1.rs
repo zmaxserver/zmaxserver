@@ -1,5 +1,5 @@
-use super::context::ResolvedVHostContext;
-use super::http_write::write_http_response;
+use crate::web_engine::context::ResolvedVHostContext;
+use crate::web_engine::http_write::write_http_response;
 use crate::api::{ParsedHttpRequest, ServerState};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use zmax_httpparser::extract_header;
 use zmax_proxy::{ProxyError, ReverseProxy};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_proxy_request<S>(
+pub(crate) async fn serve_proxy_request<S>(
     socket: &mut S,
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,

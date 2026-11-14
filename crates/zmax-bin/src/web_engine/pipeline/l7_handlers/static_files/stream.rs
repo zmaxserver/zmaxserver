@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use zmax_static::is_sendfile_supported;
 
 #[cfg(target_os = "linux")]
-async fn try_stream_tcp_sendfile(
+pub(crate) async fn try_stream_tcp_sendfile(
     tcp_stream: &mut TcpStream,
     file: &tokio::fs::File,
     offset: &mut u64,
@@ -65,7 +65,7 @@ async fn try_stream_tcp_sendfile(
     Ok(true)
 }
 
-pub(super) async fn stream_file_range_pooled<S>(
+pub(crate) async fn stream_file_range_pooled<S>(
     socket: &mut S,
     state: &Arc<ServerState>,
     file: &mut tokio::fs::File,

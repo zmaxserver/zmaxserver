@@ -1,11 +1,11 @@
-use super::context::ResolvedVHostContext;
+use crate::web_engine::context::ResolvedVHostContext;
 use std::path::Path;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use zmax_header::SecurityHeadersPolicy;
 use zmax_static::StaticFileHandler;
 
 #[allow(clippy::too_many_arguments)]
-fn format_http_response_head(
+pub(crate) fn format_http_response_head(
     status: u16,
     reason: &str,
     headers: &[(String, String)],
@@ -59,7 +59,7 @@ fn format_http_response_head(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn write_http_head<S>(
+pub(crate) async fn write_http_head<S>(
     socket: &mut S,
     status: u16,
     reason: &str,
@@ -131,7 +131,7 @@ where
     Ok(())
 }
 
-pub(super) async fn write_not_found<S>(
+pub(crate) async fn write_not_found<S>(
     socket: &mut S,
     vhost_ctx: Option<&ResolvedVHostContext>,
     is_head: bool,
@@ -158,7 +158,7 @@ where
     .await
 }
 
-pub(super) fn default_status_reason(status: u16) -> &'static str {
+pub(crate) fn default_status_reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",

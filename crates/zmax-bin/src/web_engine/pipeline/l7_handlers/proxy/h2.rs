@@ -1,4 +1,4 @@
-use super::context::ResolvedVHostContext;
+use crate::web_engine::context::ResolvedVHostContext;
 use crate::api::{ParsedHttpRequest, ServerState};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -8,13 +8,13 @@ use zmax_proxy::{ProxyError, ReverseProxy};
 /// HTTP/2 yanıt gövdesi için üst sınır: arka uç okuyucu ile h2 yazıcı arasındaki kanal en çok bu kadar
 /// parça (her biri <= 8 KiB okuma) tutar; dolunca arka uçtan okuma durur (geri basınç). Yanıtın
 /// tamamı hiçbir koşulda bellekte toplanmaz.
-const H2_PROXY_STREAM_QUEUE_CHUNKS: usize = 8;
+pub(crate) const H2_PROXY_STREAM_QUEUE_CHUNKS: usize = 8;
 
 /// HTTP/2 vekil yanıtının çözülmüş gövde parçaları (hata = akış sıfırlanır).
 pub type H2BodyReceiver = tokio::sync::mpsc::Receiver<Result<bytes::Bytes, std::io::Error>>;
 
 /// Arka uç bağlantı yuvası (`max_conns` / `max_ws`); yanıt akışı görevine taşınabilsin diye sahiplidir.
-struct OwnedConnSlot {
+pub(crate) struct OwnedConnSlot {
     state: Arc<ServerState>,
     addr: String,
     active: bool,
@@ -28,7 +28,7 @@ impl Drop for OwnedConnSlot {
     }
 }
 
-fn h2_text_reply(
+pub(crate) fn h2_text_reply(
     status: u16,
     msg: &'static [u8],
 ) -> (
@@ -45,7 +45,7 @@ fn h2_text_reply(
     )
 }
 
-fn h2_proxy_error_reply(
+pub(crate) fn h2_proxy_error_reply(
     err: &ProxyError,
 ) -> (
     u16,
@@ -64,7 +64,7 @@ fn h2_proxy_error_reply(
 
 /// HTTP/2 üzerinden gelen vekil vhost isteklerini arka uç HTTP/1.1 sunucusuna iletir. Yanıt başı
 /// hemen döner; gövde (Content-Length / chunked çözülmüş) `H2BodyReceiver` ile artımlı akar.
-pub(super) async fn serve_h2_proxy_request(
+pub(crate) async fn serve_h2_proxy_request(
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
     real_ip: IpAddr,

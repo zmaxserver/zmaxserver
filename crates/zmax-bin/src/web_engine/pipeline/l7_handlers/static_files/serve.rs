@@ -1,10 +1,10 @@
-use super::cache_policy::append_domain_and_uri_cache_tags;
-use super::context::ResolvedVHostContext;
-use super::http_write::{write_http_head, write_http_response};
-use super::static_stream::stream_file_range_pooled;
-use super::{MAX_GZIP_IN_MEMORY_BYTES, MAX_STATIC_CACHE_BYTES};
+use crate::web_engine::cache_policy::append_domain_and_uri_cache_tags;
+use crate::web_engine::context::ResolvedVHostContext;
+use crate::web_engine::http_write::{write_http_head, write_http_response};
+use crate::web_engine::static_stream::stream_file_range_pooled;
+use crate::web_engine::{MAX_GZIP_IN_MEMORY_BYTES, MAX_STATIC_CACHE_BYTES};
 use crate::api::{ParsedHttpRequest, ServerState};
-use crate::modules_runtime::select_negotiated_image_path;
+use super::image_negotiation::select_negotiated_image_path;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
@@ -14,7 +14,7 @@ use zmax_httpparser::extract_header;
 use zmax_static::{check_if_none_match, parse_byte_range, ByteRangeResult, StaticFileHandler};
 
 /// Önceden `zmax-rewrite` tarafından decode/doğrulanmış yolu (ör. dosya adında literal `%` varsa) çözer.
-pub(super) fn resolve_predecoded_static_file(
+pub(crate) fn resolve_predecoded_static_file(
     doc_root: &Path,
     clean_path: &str,
 ) -> Option<zmax_static::StaticFileInfo> {
@@ -45,7 +45,7 @@ pub(super) fn resolve_predecoded_static_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_static_file<S>(
+pub(crate) async fn serve_static_file<S>(
     socket: &mut S,
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
@@ -419,7 +419,7 @@ where
     Ok((200, sent_len))
 }
 
-fn is_negotiable_image_path(path: &Path) -> bool {
+pub(crate) fn is_negotiable_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|ext| {
@@ -430,7 +430,7 @@ fn is_negotiable_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn negotiable_image_cache_tag(
+pub(crate) fn negotiable_image_cache_tag(
     static_path: &str,
     accept_header: Option<&str>,
     auto_avif: bool,
@@ -450,7 +450,7 @@ pub(super) fn negotiable_image_cache_tag(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn revalidate_static_cache(
+pub(crate) async fn revalidate_static_cache(
     state: &Arc<ServerState>,
     vhost_ctx: &ResolvedVHostContext,
     static_path: &str,

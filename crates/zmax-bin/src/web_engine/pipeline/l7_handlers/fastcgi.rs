@@ -1,7 +1,7 @@
-use super::cache_policy::{append_domain_and_uri_cache_tags, response_forbids_cache};
-use super::context::ResolvedVHostContext;
-use super::http_write::{write_http_response, write_not_found};
-use super::MAX_GZIP_IN_MEMORY_BYTES;
+use crate::web_engine::cache_policy::{append_domain_and_uri_cache_tags, response_forbids_cache};
+use crate::web_engine::context::ResolvedVHostContext;
+use crate::web_engine::http_write::{write_http_response, write_not_found};
+use crate::web_engine::MAX_GZIP_IN_MEMORY_BYTES;
 use crate::api::{ParsedHttpRequest, ServerState};
 use crate::modules_runtime::append_error_log_limit;
 use std::net::IpAddr;
@@ -12,19 +12,19 @@ use zmax_cache::{parse_lscache_headers, CachedResponse};
 use zmax_compress::{gzip_compress, is_compressible_mime};
 use zmax_fastcgi::{FastCgiClient, FastCgiRequest};
 
-pub(super) struct PreparedPhpResponse {
-    pub(super) status: u16,
-    pub(super) reason: String,
-    pub(super) content_type: String,
-    pub(super) headers: Vec<(String, String)>,
-    pub(super) body: Vec<u8>,
-    pub(super) applied_gzip: bool,
+pub(crate) struct PreparedPhpResponse {
+    pub(crate) status: u16,
+    pub(crate) reason: String,
+    pub(crate) content_type: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
+    pub(crate) applied_gzip: bool,
     /// Yanıt (Set-Cookie, Cache-Control, X-LiteSpeed-Cache-Control) önbelleğe alınmayı yasaklıyor.
-    pub(super) cache_forbidden: bool,
+    pub(crate) cache_forbidden: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_and_prepare_php(
+pub(crate) async fn execute_and_prepare_php(
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
     real_ip: IpAddr,
@@ -233,7 +233,7 @@ pub(super) async fn execute_and_prepare_php(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn fetch_and_cache_php(
+pub(crate) async fn fetch_and_cache_php(
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
     real_ip: IpAddr,
@@ -274,7 +274,7 @@ pub(super) async fn fetch_and_cache_php(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_php_request<S>(
+pub(crate) async fn serve_php_request<S>(
     socket: &mut S,
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,

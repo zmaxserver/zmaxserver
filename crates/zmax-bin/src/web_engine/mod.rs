@@ -6,23 +6,19 @@ mod cache_policy;
 mod cached_response;
 mod context;
 mod extra_listeners;
-mod http_write;
 #[cfg(test)]
 mod kart8_tests;
-mod logging;
-mod php;
+mod pipeline;
 mod pipeline_h1;
 mod pipeline_h2;
-mod proxy_h1;
-mod proxy_h2;
 mod purge;
 mod request_util;
-mod static_files;
-mod static_stream;
 
 pub use crate::api::ParsedHttpRequest;
 pub use context::ResolvedVHostContext;
 pub use extra_listeners::reconcile as reconcile_extra_listeners;
+use pipeline::l7_handlers::{fastcgi as php, proxy::h1 as proxy_h1, proxy::h2 as proxy_h2, static_files, static_files::stream as static_stream};
+use pipeline::l8_response::{http_write, logging};
 pub use http_write::write_http_response;
 pub use pipeline_h1::handle_web_connection;
 pub use pipeline_h2::handle_h2_dispatched_request;

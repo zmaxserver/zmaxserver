@@ -1,5 +1,5 @@
-use super::context::ResolvedVHostContext;
-use super::DEFAULT_LOG_MAX_BYTES;
+use crate::web_engine::context::ResolvedVHostContext;
+use crate::web_engine::DEFAULT_LOG_MAX_BYTES;
 use crate::api::ServerState;
 use crate::modules_runtime::append_access_log_limit;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn record_and_log(
+pub(crate) async fn record_and_log(
     state: &Arc<ServerState>,
     ip: &str,
     method: &str,
