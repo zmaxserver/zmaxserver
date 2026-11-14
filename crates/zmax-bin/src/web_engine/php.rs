@@ -1,5 +1,5 @@
-use super::cache_policy::{append_domain_and_uri_cache_tags, response_forbids_cache};
-use super::context::ResolvedVHostContext;
+use crate::pipeline::l6_cache::{append_domain_and_uri_cache_tags, response_forbids_cache};
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use super::http_write::{write_http_response, write_not_found};
 use super::MAX_GZIP_IN_MEMORY_BYTES;
 use crate::api::{ParsedHttpRequest, ServerState};

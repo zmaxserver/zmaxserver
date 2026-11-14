@@ -4,7 +4,7 @@
 //! ve hız sınırı çekirdek boru hattıyla aynı bileşenleri kullanır.
 //! SIGHUP / `POST /api/v1/reload` -> `reconcile`: ekler, çıkarır, ayarları ve sertifikayı canlı günceller.
 
-use super::context::ResolvedVHostContext;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use super::http_write::write_http_response;
 use super::logging::record_and_log;
 use super::proxy_h1::serve_proxy_request;

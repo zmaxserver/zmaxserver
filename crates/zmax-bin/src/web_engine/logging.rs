@@ -1,4 +1,4 @@
-use super::context::ResolvedVHostContext;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use super::DEFAULT_LOG_MAX_BYTES;
 use crate::api::ServerState;
 use crate::modules_runtime::append_access_log_limit;

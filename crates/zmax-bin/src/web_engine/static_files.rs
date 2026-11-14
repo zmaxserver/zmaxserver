@@ -1,5 +1,5 @@
-use super::cache_policy::append_domain_and_uri_cache_tags;
-use super::context::ResolvedVHostContext;
+use crate::pipeline::l6_cache::append_domain_and_uri_cache_tags;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use super::http_write::{write_http_head, write_http_response};
 use super::static_stream::stream_file_range_pooled;
 use super::{MAX_GZIP_IN_MEMORY_BYTES, MAX_STATIC_CACHE_BYTES};

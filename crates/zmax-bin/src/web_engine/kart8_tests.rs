@@ -1,4 +1,4 @@
-use super::context::resolve_php_dial_timeout_ms;
+use crate::pipeline::l5_router::resolve_php_dial_timeout_ms;
 use super::pipeline_h1::handle_web_connection;
 use super::MAX_STATIC_CACHE_BYTES;
 use crate::api::ServerState;

@@ -1,4 +1,4 @@
-use super::context::ResolvedVHostContext;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use super::http_write::write_http_response;
 use crate::api::{ParsedHttpRequest, ServerState};
 use std::net::{IpAddr, SocketAddr};

@@ -6,7 +6,7 @@ use crate::web_engine::{is_acme_challenge, ResolvedVHostContext};
 use std::net::IpAddr;
 use zmax_config::{VHostSecuritySection, VhostAclConfig};
 use zmax_security::{
-    is_hotlink_blocked, IpBanManager, VHostWafPolicy, VhostAcl, WafInspector, WafViolation,
+    IpBanManager, VHostWafPolicy, VhostAcl, WafInspector, WafViolation,
     WpBruteForceGuard,
 };
 
@@ -132,31 +132,6 @@ pub fn evaluate_request_security(
     }
 
     SecurityVerdict::Allowed
-}
-
-/// Hem HTTP/1.1 hem HTTP/2 boru hattında statik dosya sunumundan önce çağrılan birleştirilmiş Hotlink koruma denetimi.
-pub fn is_request_hotlink_blocked(
-    vhost_ctx: &ResolvedVHostContext,
-    referer: Option<&str>,
-    request_host: &str,
-    request_path: &str,
-) -> bool {
-    let hl = &vhost_ctx.hotlink_config;
-    let is_enabled = hl.enabled || vhost_ctx.hotlink_protection;
-    if !is_enabled {
-        return false;
-    }
-
-    is_hotlink_blocked(
-        true,
-        &hl.allowed_referers,
-        &hl.extensions,
-        referer,
-        request_host,
-        &vhost_ctx.vhost_name,
-        &vhost_ctx.vhost_aliases,
-        request_path,
-    )
 }
 
 // [kart-9] Basic Authentication ortak asenkron denetim ve 401 yanit yardimcilari

@@ -1,4 +1,4 @@
-use super::context::ResolvedVHostContext;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use std::path::Path;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use zmax_header::SecurityHeadersPolicy;
@@ -158,7 +158,7 @@ where
     .await
 }
 
-pub(super) fn default_status_reason(status: u16) -> &'static str {
+pub(crate) fn default_status_reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
