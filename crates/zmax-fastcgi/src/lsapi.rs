@@ -195,6 +195,8 @@ pub async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<FastC
                 }
                 body.extend_from_slice(&payload);
             }
+            // lsphp, istek başında " PID" + 4 bayt pid içeren bir bildirim gönderir; bu hata çıktısı değildir.
+            PKT_STDERR_STREAM if payload.len() == 8 && payload.starts_with(b" PID") => {}
             PKT_STDERR_STREAM => stderr.extend_from_slice(&payload),
             PKT_RESP_END | PKT_CONN_CLOSE => break,
             PKT_INTERNAL_ERROR => return Err(FastCgiError::Protocol("LSAPI dahili hata".into())),
@@ -308,5 +310,24 @@ mod tests {
         let r = read_response(&mut cur).await.unwrap();
         let s = String::from_utf8(r.raw_stdout).unwrap();
         assert_eq!(s, "Status: 201\r\nContent-Type: text/plain\r\n\r\nmerha");
+    }
+
+    #[tokio::test]
+    async fn pid_bildirimi_stderr_sayilmaz() {
+        let mut pkts: Vec<u8> = Vec::new();
+        pkts.extend_from_slice(&pkt_header(PKT_STDERR_STREAM, 8 + 8));
+        pkts.extend_from_slice(b" PID");
+        let hdr = b"Content-Type:text/plain ";
+        let mut p = Vec::new();
+        p.extend_from_slice(&1i32.to_le_bytes());
+        p.extend_from_slice(&200i32.to_le_bytes());
+        p.extend_from_slice(&(hdr.len() as i16).to_le_bytes());
+        p.extend_from_slice(hdr);
+        pkts.extend_from_slice(&pkt_header(PKT_RESP_HEADER, 8 + p.len()));
+        pkts.extend_from_slice(&p);
+        pkts.extend_from_slice(&pkt_header(PKT_RESP_END, 8));
+        let mut cur = std::io::Cursor::new(pkts);
+        let r = read_response(&mut cur).await.unwrap();
+        assert!(r.stderr.is_empty(), "PID bildirimi stderr'e sızdı");
     }
 }
