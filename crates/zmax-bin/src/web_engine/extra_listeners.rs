@@ -10,7 +10,7 @@ use super::logging::record_and_log;
 use super::proxy_h1::serve_proxy_request;
 use crate::api::{read_http_request_with_limits, send_http_read_error, ParsedHttpRequest, ServerState};
 use crate::modules_runtime::append_error_log;
-use super::pipeline::l8_response::headers::resolve_vhost_security_headers;
+use crate::pipeline::l8_response::resolve_vhost_security_headers;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
