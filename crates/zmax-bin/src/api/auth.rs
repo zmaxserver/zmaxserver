@@ -151,8 +151,8 @@ pub fn compute_effective_auth(config: &ZMaxConfig) -> EffectiveAuthTokens {
         if admin_token.is_empty() {
             admin_token = generate_secure_token();
             notices.push(format!(
-                "[GUVENLIK] WebAdmin dinleyicisi loopback disi ({}) acildigi icin otomatik Admin token uretildi: {}",
-                config.listeners.admin.address, admin_token
+                "[GUVENLIK] WebAdmin dinleyicisi loopback disi ({}) acildigi icin otomatik Admin token uretildi (degeri gunluge yazilmaz; kalici token icin zmax.toml [listeners.admin] token tanimlayin).",
+                config.listeners.admin.address
             ));
         } else {
             notices.push(format!(
