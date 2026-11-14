@@ -1,9 +1,12 @@
-use super::cache_policy::{append_domain_and_uri_cache_tags, response_forbids_cache};
-use super::context::ResolvedVHostContext;
-use super::http_write::{write_http_response, write_not_found};
-use super::MAX_GZIP_IN_MEMORY_BYTES;
+//! L7 — FastCGI / PHP İşleyicisi
+//! PHP-FPM / LSPHP arka uç bağlantısı, havuzlu yürütme, LSCache etiketleri ve yanıt hazırlama.
+
 use crate::api::{ParsedHttpRequest, ServerState};
 use crate::modules_runtime::append_error_log_limit;
+use crate::pipeline::l8_response::{write_http_response, write_not_found};
+use crate::web_engine::cache_policy::{append_domain_and_uri_cache_tags, response_forbids_cache};
+use crate::web_engine::context::ResolvedVHostContext;
+use crate::web_engine::MAX_GZIP_IN_MEMORY_BYTES;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,19 +15,21 @@ use zmax_cache::{parse_lscache_headers, CachedResponse};
 use zmax_compress::{gzip_compress, is_compressible_mime};
 use zmax_fastcgi::{FastCgiClient, FastCgiRequest};
 
-pub(super) struct PreparedPhpResponse {
-    pub(super) status: u16,
-    pub(super) reason: String,
-    pub(super) content_type: String,
-    pub(super) headers: Vec<(String, String)>,
-    pub(super) body: Vec<u8>,
-    pub(super) applied_gzip: bool,
+pub const FASTCGI_ALLOWED_METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"];
+
+pub struct PreparedPhpResponse {
+    pub status: u16,
+    pub reason: String,
+    pub content_type: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub applied_gzip: bool,
     /// Yanıt (Set-Cookie, Cache-Control, X-LiteSpeed-Cache-Control) önbelleğe alınmayı yasaklıyor.
-    pub(super) cache_forbidden: bool,
+    pub cache_forbidden: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_and_prepare_php(
+pub async fn execute_and_prepare_php(
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
     real_ip: IpAddr,
@@ -233,7 +238,7 @@ pub(super) async fn execute_and_prepare_php(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn fetch_and_cache_php(
+pub async fn fetch_and_cache_php(
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
     real_ip: IpAddr,
@@ -274,7 +279,7 @@ pub(super) async fn fetch_and_cache_php(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_php_request<S>(
+pub async fn serve_php_request<S>(
     socket: &mut S,
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
@@ -322,7 +327,7 @@ where
     {
         Ok(Some(prep)) => {
             let status = prep.status;
-            // [kart-2] FastCGI yanitinda HEAD, 204 veya 304 durumunda govde bayti 0 iletilir
+            // [kart-2] FastCGI yanıtında HEAD, 204 veya 304 durumunda gövde baytı 0 iletilir
             let body_len = if is_head || status == 204 || status == 304 {
                 0
             } else {

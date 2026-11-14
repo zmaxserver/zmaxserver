@@ -13,6 +13,7 @@ mod logger;
 mod modules;
 mod modules_runtime;
 pub mod security_pipeline;
+pub mod pipeline;
 mod web_engine;
 
 use api::{

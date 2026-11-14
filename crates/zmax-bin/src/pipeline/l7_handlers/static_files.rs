@@ -1,20 +1,277 @@
-use super::cache_policy::append_domain_and_uri_cache_tags;
-use super::context::ResolvedVHostContext;
-use super::http_write::{write_http_head, write_http_response};
-use super::static_stream::stream_file_range_pooled;
-use super::{MAX_GZIP_IN_MEMORY_BYTES, MAX_STATIC_CACHE_BYTES};
+//! L7 — Statik Dosya Sunumu ve Müzakere İşleyicisi
+//! `sendfile(2)` sıfır-kopya aktarımı, byte-range (206), ETag / 304, WebP/AVIF içerik müzakeresi.
+
 use crate::api::{ParsedHttpRequest, ServerState};
-use crate::modules_runtime::select_negotiated_image_path;
-use std::path::Path;
+use crate::pipeline::l8_response::{write_http_head, write_http_response};
+use crate::web_engine::cache_policy::append_domain_and_uri_cache_tags;
+use crate::web_engine::context::ResolvedVHostContext;
+use crate::web_engine::{MAX_GZIP_IN_MEMORY_BYTES, MAX_STATIC_CACHE_BYTES};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use zmax_cache::CachedResponse;
 use zmax_compress::{gzip_compress, is_compressible_mime};
 use zmax_httpparser::extract_header;
-use zmax_static::{check_if_none_match, parse_byte_range, ByteRangeResult, StaticFileHandler};
+use zmax_static::{check_if_none_match, is_sendfile_supported, parse_byte_range, ByteRangeResult, StaticFileHandler};
 
-/// Önceden `zmax-rewrite` tarafından decode/doğrulanmış yolu (ör. dosya adında literal `%` varsa) çözer.
-pub(super) fn resolve_predecoded_static_file(
+// =========================================================================
+// 1. WEBP / AVIF GÖRSEL İÇERİK MÜZAKERESİ (Image Negotiation)
+// =========================================================================
+
+pub fn accept_supports_media_type(accept_lower: &str, media_type: &str) -> bool {
+    accept_lower.split(',').any(|item| {
+        let mut parts = item.split(';');
+        let mime = parts.next().unwrap_or("").trim();
+        if mime != media_type {
+            return false;
+        }
+        for param in parts {
+            let Some((key, val)) = param.split_once('=') else {
+                continue;
+            };
+            if key.trim() != "q" {
+                continue;
+            }
+            if let Ok(q) = val.trim().parse::<f32>() {
+                if q.is_finite() && q <= 0.0 {
+                    return false;
+                }
+            }
+        }
+        true
+    })
+}
+
+pub fn find_safe_negotiated_variant(
+    orig_path: &Path,
+    orig_parent: &Path,
+    canon_parent: &Path,
+    target_ext: &str,
+) -> Option<PathBuf> {
+    let file_name = orig_path.file_name()?;
+    let stem = orig_path.file_stem()?;
+
+    let mut append_name = file_name.to_os_string();
+    append_name.push(".");
+    append_name.push(target_ext);
+
+    let mut replace_name = stem.to_os_string();
+    replace_name.push(".");
+    replace_name.push(target_ext);
+
+    let candidates = [
+        orig_parent.join(append_name),
+        orig_parent.join(replace_name),
+    ];
+
+    for cand in candidates {
+        let Ok(canon_cand) = std::fs::canonicalize(&cand) else {
+            continue;
+        };
+        let is_regular_file = std::fs::metadata(&canon_cand).is_ok_and(|m| m.is_file());
+        if is_regular_file && canon_cand.parent() == Some(canon_parent) {
+            return Some(canon_cand);
+        }
+    }
+    None
+}
+
+/// Tarayıcının `Accept` başlığına göre `.jpg`, `.jpeg` ve `.png` dosyaları için güvenli biçimde `.avif` veya `.webp` varyantını seçer.
+pub fn select_negotiated_image_path(
+    orig_path: &Path,
+    accept_header: Option<&str>,
+    allow_avif: bool,
+    allow_webp: bool,
+) -> Option<(PathBuf, &'static str)> {
+    if !allow_avif && !allow_webp {
+        return None;
+    }
+    let ext = orig_path.extension().and_then(|e| e.to_str())?;
+    if !(ext.eq_ignore_ascii_case("jpg")
+        || ext.eq_ignore_ascii_case("jpeg")
+        || ext.eq_ignore_ascii_case("png"))
+    {
+        return None;
+    }
+
+    let accept = accept_header?.trim();
+    if accept.is_empty() {
+        return None;
+    }
+    let accept_lower = accept.to_ascii_lowercase();
+
+    let orig_parent = orig_path.parent()?;
+    let parent_for_canon = if orig_parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        orig_parent
+    };
+    let canon_parent = std::fs::canonicalize(parent_for_canon).ok()?;
+
+    if allow_avif && accept_supports_media_type(&accept_lower, "image/avif") {
+        if let Some(canon_avif) =
+            find_safe_negotiated_variant(orig_path, orig_parent, &canon_parent, "avif")
+        {
+            return Some((canon_avif, "image/avif"));
+        }
+    }
+
+    if allow_webp && accept_supports_media_type(&accept_lower, "image/webp") {
+        if let Some(canon_webp) =
+            find_safe_negotiated_variant(orig_path, orig_parent, &canon_parent, "webp")
+        {
+            return Some((canon_webp, "image/webp"));
+        }
+    }
+
+    None
+}
+
+pub fn is_negotiable_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| {
+            ext.eq_ignore_ascii_case("jpg")
+                || ext.eq_ignore_ascii_case("jpeg")
+                || ext.eq_ignore_ascii_case("png")
+        })
+        .unwrap_or(false)
+}
+
+pub fn negotiable_image_cache_tag(
+    static_path: &str,
+    accept_header: Option<&str>,
+    auto_avif: bool,
+    auto_webp: bool,
+) -> &'static str {
+    if !is_negotiable_image_path(Path::new(static_path)) || (!auto_avif && !auto_webp) {
+        return "";
+    }
+    let lower = accept_header.unwrap_or("").to_ascii_lowercase();
+    if auto_avif && lower.contains("image/avif") {
+        return "+avif";
+    }
+    if auto_webp && lower.contains("image/webp") {
+        return "+webp";
+    }
+    ""
+}
+
+// =========================================================================
+// 2. SENDFILE VE TAMPONLU AKIŞ (Stream & Zero-Copy)
+// =========================================================================
+
+#[cfg(target_os = "linux")]
+pub async fn try_stream_tcp_sendfile(
+    tcp_stream: &mut TcpStream,
+    file: &tokio::fs::File,
+    offset: &mut u64,
+    remaining: &mut u64,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::unix::io::AsRawFd;
+
+    tcp_stream.flush().await?;
+    let out_fd = tcp_stream.as_raw_fd();
+    let in_fd = file.as_raw_fd();
+    let sendfile_write_timeout = Duration::from_secs(30);
+
+    while *remaining > 0 {
+        tokio::time::timeout(sendfile_write_timeout, tcp_stream.writable())
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "sendfile soket yazma zaman aşımı",
+                )
+            })??;
+        let chunk_cap = usize::try_from(*remaining)
+            .unwrap_or(usize::MAX)
+            .min(1024 * 1024);
+        match tcp_stream.try_io(tokio::io::Interest::WRITABLE, || {
+            zmax_static::try_sendfile_chunk(out_fd, in_fd, offset, chunk_cap)
+        }) {
+            Ok(0) => {
+                return Ok(false);
+            }
+            Ok(n) => {
+                let n_u64 = u64::try_from(n).unwrap_or(*remaining);
+                *remaining = remaining.saturating_sub(n_u64);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+                ) || matches!(
+                    err.raw_os_error(),
+                    Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSOCK | libc::EOPNOTSUPP)
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(err) => return Err(Box::new(err)),
+        }
+    }
+
+    Ok(true)
+}
+
+pub async fn stream_file_range_pooled<S>(
+    socket: &mut S,
+    state: &Arc<ServerState>,
+    file: &mut tokio::fs::File,
+    file_offset: u64,
+    mut remaining: u64,
+    is_https: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncWrite + Unpin + 'static,
+{
+    // [kart-8] Linux düz TCP (!is_https) statik aktarımında gerçek `sendfile(2)` sıfır-kopya yolu.
+    if !is_https && is_sendfile_supported() {
+        if let Some(_tcp_stream) = (socket as &mut dyn std::any::Any).downcast_mut::<TcpStream>() {
+            #[cfg(target_os = "linux")]
+            {
+                let mut cur_offset = file_offset;
+                if try_stream_tcp_sendfile(_tcp_stream, file, &mut cur_offset, &mut remaining)
+                    .await?
+                {
+                    return Ok(());
+                }
+                file.seek(std::io::SeekFrom::Start(cur_offset)).await?;
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = file_offset;
+
+    let mut buf = state.buffer_pool.acquire();
+    while remaining > 0 {
+        let chunk_cap = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(buf.capacity());
+        let read_n = file.read(&mut buf[..chunk_cap]).await?;
+        if read_n == 0 {
+            break;
+        }
+        socket.write_all(&buf[..read_n]).await?;
+        remaining = remaining.saturating_sub(read_n as u64);
+    }
+    Ok(())
+}
+
+// =========================================================================
+// 3. STATİK DOSYA SUNUMU (Serve Static File)
+// =========================================================================
+
+/// Önceden `zmax-rewrite` tarafından decode/doğrulanmış yolu çözer.
+pub fn resolve_predecoded_static_file(
     doc_root: &Path,
     clean_path: &str,
 ) -> Option<zmax_static::StaticFileInfo> {
@@ -45,7 +302,7 @@ pub(super) fn resolve_predecoded_static_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn serve_static_file<S>(
+pub async fn serve_static_file<S>(
     socket: &mut S,
     state: &Arc<ServerState>,
     req: &ParsedHttpRequest,
@@ -115,7 +372,7 @@ where
             &hdrs,
             b"",
             Some(0),
-            true, // 304 gövdesizdir
+            true,
             is_https,
             keep_alive,
             keep_alive_timeout_sec,
@@ -167,7 +424,6 @@ where
                         None,
                     )
                     .await?;
-                    // [kart-2] HEAD yanitlarinda govde gonderilmez; gercek bayt 0
                     return Ok((206, 0));
                 }
 
@@ -206,7 +462,6 @@ where
                         None,
                     )
                     .await?;
-                    // [kart-8] Büyük byte-range aktarımı: düz TCP üzerinde gerçek sendfile(2), TLS'te tamponlu yedek
                     stream_file_range_pooled(
                         socket,
                         state,
@@ -249,7 +504,7 @@ where
         }
     }
 
-    // 3. Tam dosya sunumu (HEAD isteğinde diskten gövdeyi okumaya gerek yok!)
+    // 3. Tam dosya sunumu (HEAD)
     if is_head {
         let mut hdrs = vec![
             ("Content-Type".into(), info.mime_type.to_string()),
@@ -279,7 +534,6 @@ where
             Some("MISS"),
         )
         .await?;
-        // [kart-2] HEAD yanitinda Content-Length gonderilir ancak gercek gonderilen govde bayti 0'dir
         return Ok((200, 0));
     }
 
@@ -288,7 +542,7 @@ where
         && (info.size as usize) <= MAX_GZIP_IN_MEMORY_BYTES
         && is_compressible_mime(info.mime_type, &gzip_policy.mime_types);
 
-    // Büyük ve sıkıştırılmayacak dosyaları RAM'e almadan 64 KiB havuzlu parçalarla akıt (OOM koruması).
+    // Büyük ve sıkıştırılmayacak dosyaları RAM'e almadan parçalarla akıt
     if (info.size as usize) > MAX_STATIC_CACHE_BYTES && !can_try_gzip {
         let mut hdrs = vec![
             ("Content-Type".into(), info.mime_type.to_string()),
@@ -320,7 +574,6 @@ where
         )
         .await?;
         let mut file = tokio::fs::File::open(&info.path).await?;
-        // [kart-8] Büyük tam dosya aktarımı: düz TCP üzerinde gerçek sendfile(2), TLS'te tamponlu yedek
         stream_file_range_pooled(socket, state, &mut file, 0, info.size, is_https).await?;
         let _ = socket.flush().await;
         if !keep_alive {
@@ -419,38 +672,8 @@ where
     Ok((200, sent_len))
 }
 
-fn is_negotiable_image_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| {
-            ext.eq_ignore_ascii_case("jpg")
-                || ext.eq_ignore_ascii_case("jpeg")
-                || ext.eq_ignore_ascii_case("png")
-        })
-        .unwrap_or(false)
-}
-
-pub(super) fn negotiable_image_cache_tag(
-    static_path: &str,
-    accept_header: Option<&str>,
-    auto_avif: bool,
-    auto_webp: bool,
-) -> &'static str {
-    if !is_negotiable_image_path(Path::new(static_path)) || (!auto_avif && !auto_webp) {
-        return "";
-    }
-    let lower = accept_header.unwrap_or("").to_ascii_lowercase();
-    if auto_avif && lower.contains("image/avif") {
-        return "+avif";
-    }
-    if auto_webp && lower.contains("image/webp") {
-        return "+webp";
-    }
-    ""
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn revalidate_static_cache(
+pub async fn revalidate_static_cache(
     state: &Arc<ServerState>,
     vhost_ctx: &ResolvedVHostContext,
     static_path: &str,
@@ -550,4 +773,27 @@ pub(super) async fn revalidate_static_cache(
             vhost_ctx.cache_stale_sec,
         )
         .await;
+}
+
+// =========================================================================
+// 4. GERİYE DÖNÜK UYUMLULUK ALT MODÜLLERİ
+// =========================================================================
+
+pub mod serve {
+    pub use super::{
+        is_negotiable_image_path, negotiable_image_cache_tag, resolve_predecoded_static_file,
+        revalidate_static_cache, serve_static_file,
+    };
+}
+
+pub mod stream {
+    pub use super::stream_file_range_pooled;
+    #[cfg(target_os = "linux")]
+    pub use super::try_stream_tcp_sendfile;
+}
+
+pub mod image_negotiation {
+    pub use super::{
+        accept_supports_media_type, find_safe_negotiated_variant, select_negotiated_image_path,
+    };
 }
