@@ -8,7 +8,9 @@ Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hos
 
 ## İlerleme
 
-**Son güncelleme: 2026-11-13 (VM canlı test oturumu) · sürüm 1.0.07**
+**Son güncelleme: 2026-11-14 · sürüm 1.0.08**
+
+**Katmanlı mimari (v3.0):** sunucu tek sorumluluklu katmanlara ayrıldı: çekirdek, 8 katmanlı trafik hattı, yönetim API'si, WebAdmin arayüzü ve Rust↔Go köprüsü. Şema ve belgeler: [`docs/mimari/`](docs/mimari/) — görsel şema: [`zmax_mimari_semasi.html`](docs/mimari/zmax_mimari_semasi.html).
 
 İlerleme oranı, aşağıdaki bileşen tablosundaki 20 satırın durumundan hesaplanır. Her kalem kodlandıktan sonra incelemeden ve testlerden geçiyor.
 
