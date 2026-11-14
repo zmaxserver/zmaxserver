@@ -7,6 +7,7 @@ mod api;
 mod h2_engine;
 mod logger;
 mod modules_runtime;
+mod pipeline;
 pub mod security_pipeline;
 mod web_engine;
 
