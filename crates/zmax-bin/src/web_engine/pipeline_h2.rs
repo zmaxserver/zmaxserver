@@ -188,6 +188,12 @@ pub async fn handle_h2_dispatched_request(
         (policies, ctx, is_unknown_host)
     };
 
+    let real_ip: IpAddr = crate::pipeline::l3_realip::resolve_real_ip(
+        &policies.realip,
+        real_ip,
+        &req.headers,
+    );
+
     let log_meta = LogMeta {
         domain: Some(vhost_ctx.vhost_name.clone()),
         custom_log_path: if vhost_ctx.logging.enabled

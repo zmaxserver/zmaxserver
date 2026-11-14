@@ -27,7 +27,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use zmax_cache::{build_cache_key, CacheLookup, StampedeSlot};
 use zmax_compress::{negotiate_encoding, ContentEncoding};
 use zmax_config::match_vhost;
-use zmax_httpparser::{extract_header, resolve_real_ip, HttpReadLimits};
+use crate::pipeline::l3_realip::resolve_real_ip;
+use zmax_httpparser::{extract_header, HttpReadLimits};
 use zmax_rewrite::{HtAccessResolver, RewriteEngine, RouteOutcome, RouteRequest};
 use zmax_security::IpAccessList;
 use zmax_static::StaticFileHandler;
@@ -313,17 +314,7 @@ where
         (policies, redis_client, ctx, is_unknown_host)
     };
 
-    let real_ip: IpAddr = if policies.realip.enabled {
-        resolve_real_ip(
-            peer_addr.ip(),
-            &req.headers,
-            &policies.realip.header_name,
-            &policies.realip.trusted_proxies,
-            policies.realip.recursive,
-        )
-    } else {
-        peer_addr.ip()
-    };
+    let real_ip: IpAddr = resolve_real_ip(&policies.realip, peer_addr.ip(), &req.headers);
     let real_ip_str = real_ip.to_string();
     let https_port = {
         let rt = state.runtime.read().await;

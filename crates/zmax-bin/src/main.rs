@@ -12,6 +12,7 @@ mod h2_engine;
 mod logger;
 mod modules;
 mod modules_runtime;
+mod pipeline;
 pub mod security_pipeline;
 pub mod pipeline;
 mod web_engine;
