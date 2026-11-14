@@ -2,11 +2,13 @@
 //! Evrensel panel uyumlu (zPanel, cPanel, Plesk, DirectAdmin, CyberPanel, Hestia vb.),
 //! çakışmasız port mimarili, bellek güvenli yüksek hızlı Rust HTTP motoru ve WebAdmin konsolu.
 
+mod config;
 mod acme_runtime;
 mod api;
 mod core;
 mod h2_engine;
 mod logger;
+mod modules;
 mod modules_runtime;
 pub mod security_pipeline;
 mod web_engine;
@@ -281,7 +283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .validate_workspace_layout(&base_dir, &vhosts, &modules)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    acme_runtime::apply_global_acme_root(&config, &base_dir);
+    config::acme::apply_global_acme_root(&config, &base_dir);
 
     if cli.fix_tls_perms {
         return run_fix_tls_perms(&base_dir, &config, &vhosts);
