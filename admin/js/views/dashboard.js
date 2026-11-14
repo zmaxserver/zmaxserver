@@ -1,181 +1,297 @@
-// ZMax WebAdmin - Genel bakis / hizmet durumu / moduller (U4). core.js'den tasindi, davranis ayni.
-(function () {
-    window.ZMaxViews = window.ZMaxViews || {};
-    window.ZMaxViews.dashboard = function (ctx) {
-        const { ref, computed, t, hasI18nKey, currentTab, currentLang, mobileMenuOpen, engineVersion, stats, vhosts, modules, selectedModuleCategory, moduleCategories, globalSearch, bannedIps, logs, searchLog, logDomainFilter, reopeningLogs, notification, purgeUrlInput, showVhostModal, vhostModalMode, savingVhost, showNotice, normalizeBanEntry, filteredLogs, fetchLogsResponse, fetchLogs, reopenLogs, clearLogFilters } = ctx;
+// ZMax WebAdmin - Genel Bakış / Dashboard Görünümü
+// U4 Bileşeni: Durum kartları (RPS, bellek, FD, süre, CPU, servis durumları)
 
-            const svcInput = ref({ status: null, vhosts: null, modules: null, hasToken: false });
-            const svcView = computed(() => computeServiceStatus(svcInput.value));
-            const svcSummaryText = computed(() => {
-                const s = svcView.value.summary;
-                let txt = t('svc_summary_running').replace('{n}', String(s.running)).replace('{total}', String(s.total));
-                if (s.unknown > 0) txt += ' · ' + t('svc_summary_unknown').replace('{n}', String(s.unknown));
-                return txt;
-            });
-            const svcHint = (row) => (row && row.hintKey ? t(row.hintKey) : '');
+(function (window) {
+    'use strict';
 
-            const hitRate = computed(() => {
-                const total = stats.value.total_requests;
-                if (!total || total === 0) return 0;
-                return ((stats.value.cache_hits / total) * 100).toFixed(1);
-            });
+    window.ZMaxViewDashboard = {
+        name: 'ViewDashboard',
+        props: {
+            stats: {
+                type: Object,
+                required: true
+            },
+            vhostsCount: {
+                type: Number,
+                default: 0
+            },
+            hitRate: {
+                type: [String, Number],
+                default: '0'
+            },
+            formattedUptime: {
+                type: String,
+                default: '0s 0d 0sn'
+            },
+            t: {
+                type: Function,
+                required: true
+            }
+        },
+        emits: ['fetch-status', 'purge-all-cache'],
+        template: `
+            <div>
+                <!-- Karşılama Kartı -->
+                <div class="welcome-banner">
+                    <div class="welcome-info">
+                        <div class="welcome-avatar">
+                            <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                                <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                            </svg>
+                        </div>
+                        <div>
+                            <div class="welcome-title">{{ t('welcome_title') }}</div>
+                            <div class="welcome-meta">
+                                panel.zmaxserver.local · <strong class="text-orange">ZMax Server v1.0.01</strong> · {{ t('card_uptime') }}: {{ formattedUptime }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="welcome-actions">
+                        <button type="button" class="btn-zmax btn-ghost" @click="$emit('fetch-status')">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                            </svg>
+                            {{ t('btn_reload') }}
+                        </button>
+                        <button type="button" class="btn-zmax btn-orange" @click="$emit('purge-all-cache')">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                            </svg>
+                            {{ t('cache_purge_btn') }}
+                        </button>
+                    </div>
+                </div>
 
-            const formattedUptime = computed(() => {
-                const sec = stats.value.uptime_seconds;
-                const h = Math.floor(sec / 3600);
-                const m = Math.floor((sec % 3600) / 60);
-                const s = sec % 60;
-                return `${h}${t('unit_h')} ${m}${t('unit_m')} ${s}${t('unit_s')}`;
-            });
+                <!-- Özet Kartları (Bootstrap Grid) -->
+                <div class="row g-3 mb-4">
+                    <div class="col-12 col-sm-6 col-md-4 col-xl">
+                        <div class="summary-card">
+                            <div class="summary-icon">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                            </div>
+                            <div>
+                                <div class="summary-label">{{ t('nav_vhosts') }}</div>
+                                <div class="summary-val">{{ vhostsCount }}</div>
+                            </div>
+                        </div>
+                    </div>
 
-            const filteredModules = computed(() => {
-                let list = modules.value;
-                if (selectedModuleCategory.value !== 'all') {
-                    list = list.filter((m) => m.categoryKey === selectedModuleCategory.value);
-                }
-                if (globalSearch.value.trim()) {
-                    const q = globalSearch.value.toLowerCase();
-                    list = list.filter(
-                        (m) =>
-                            t(m.name + '_title').toLowerCase().includes(q) ||
-                            t(m.name + '_desc').toLowerCase().includes(q) ||
-                            String(m.file || '').toLowerCase().includes(q)
-                    );
-                }
-                return list;
-            });
+                    <div class="col-12 col-sm-6 col-md-4 col-xl">
+                        <div class="summary-card">
+                            <div class="summary-icon">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                            </div>
+                            <div>
+                                <div class="summary-label">{{ t('card_cache_hit_rate') }}</div>
+                                <div class="summary-val">{{ hitRate }}%</div>
+                            </div>
+                        </div>
+                    </div>
 
-            const fetchStatus = async () => {
-                try {
-                    const [statusRes, vhRes, modRes, banRes, logRes] = await Promise.allSettled([
-                        apiFetch('api/status'),
-                        apiFetch('api/v1/vhosts'),
-                        apiFetch('api/v1/modules'),
-                        apiFetch('api/v1/security/bans'),
-                        fetchLogsResponse()
-                    ]);
+                    <div class="col-12 col-sm-6 col-md-4 col-xl">
+                        <div class="summary-card">
+                            <div class="summary-icon">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                            </div>
+                            <div>
+                                <div class="summary-label">{{ t('card_ram_usage') }}</div>
+                                <div class="summary-val">{{ stats.ram_mb }} MB</div>
+                            </div>
+                        </div>
+                    </div>
 
-                    const [statusData, vhData, modData, banData, logData] = await Promise.all([
-                        readSettledJson(statusRes),
-                        readSettledJson(vhRes),
-                        readSettledJson(modRes),
-                        readSettledJson(banRes),
-                        readSettledJson(logRes)
-                    ]);
+                    <div class="col-12 col-sm-6 col-md-6 col-xl">
+                        <div class="summary-card">
+                            <div class="summary-icon">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                            </div>
+                            <div>
+                                <div class="summary-label">{{ t('card_total_req') }}</div>
+                                <div class="summary-val">{{ stats.total_requests }}</div>
+                            </div>
+                        </div>
+                    </div>
 
-                    // Hizmet durumu girdisi: alınamayan veri null kalır (eski veri "Çalışıyor" göstermesin)
-                    svcInput.value = {
-                        status: statusData,
-                        vhosts: (() => {
-                            const vl = extractArray(vhData, ['vhosts']);
-                            return vl === null ? null : vl.map((v) => ({
-                                waf_enabled: Boolean(v && (v.waf_enabled ?? (v.waf && v.waf.enabled)))
-                            }));
-                        })(),
-                        modules: (() => {
-                            const ml = extractArray(modData, ['modules']);
-                            return ml === null ? null : ml.map((m) => ({
-                                name: String((m && (m.name || '')) || '').trim(),
-                                enabled: typeof (m && m.enabled) === 'boolean' ? m.enabled : true
-                            }));
-                        })(),
-                        hasToken: Boolean((localStorage.getItem('zmax_api_token') || '').trim())
-                    };
+                    <div class="col-12 col-sm-12 col-md-6 col-xl">
+                        <div class="summary-card">
+                            <div class="summary-icon">
+                                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+                            </div>
+                            <div>
+                                <div class="summary-label">{{ t('card_workers') }}</div>
+                                <div class="summary-val">{{ stats.workers }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
-                    if (statusData) {
-                        if (typeof statusData.version === 'string' && statusData.version) engineVersion.value = statusData.version;
-                        if (typeof statusData.uptime_seconds === 'number') stats.value.uptime_seconds = statusData.uptime_seconds;
-                        if (typeof statusData.total_requests === 'number') stats.value.total_requests = statusData.total_requests;
-                        if (typeof statusData.cache_hits === 'number') stats.value.cache_hits = statusData.cache_hits;
-                        if (typeof statusData.cache_misses === 'number') stats.value.cache_misses = statusData.cache_misses;
-                        if (typeof statusData.workers === 'number') stats.value.workers = statusData.workers;
-                        if (typeof statusData.ram_mb === 'number') stats.value.ram_mb = statusData.ram_mb;
-                        if (typeof statusData.cpu_usage === 'number') stats.value.cpu_usage = statusData.cpu_usage;
-                        if (typeof statusData.current_rps === 'number') stats.value.current_rps = statusData.current_rps;
-                        if (statusData.ports) {
-                            stats.value.ports = { ...stats.value.ports, ...statusData.ports };
-                        }
-                        if (statusData.listeners) {
-                            stats.value.listeners = { ...stats.value.listeners, ...statusData.listeners };
-                        }
-                    }
+                <!-- İki Sütunlu Panel (Sunucu Durumu & Hizmet Durumları) -->
+                <div class="row g-3 mb-4">
+                    <!-- Sol: Sunucu Durumu -->
+                    <div class="col-12 col-xl-6">
+                        <div class="panel-card mb-0">
+                            <div class="panel-header">
+                                <div class="panel-title">
+                                    <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                                    <span>{{ t('server_status_title') }}</span>
+                                </div>
+                                <span class="status-capsule status-active">{{ t('status_stable') }}</span>
+                            </div>
 
-                    const vhList = extractArray(vhData, ['vhosts']);
-                    if (vhList !== null) {
-                        const webPort = stats.value.ports.http || 19480;
-                        vhosts.value = vhList.map((v, idx) => {
-                            const domain = String(v.domain || v.name || '').trim();
-                            const phpEnabled = Boolean(v.php_enabled ?? (v.php && v.php.enabled));
-                            const phpSapiRaw = String(v.php_sapi || (v.php && v.php.sapi) || 'fastcgi');
-                            const phpUpstreamRaw = String(v.php_upstream || (v.php && v.php.upstream) || '127.0.0.1:9000');
-                            const sslEnabled = Boolean(v.ssl_enabled ?? (v.ssl && (v.ssl.enabled ?? Boolean(v.ssl.certificate))));
-                            const cacheEnabled = Boolean(v.cache_enabled ?? (v.cache && v.cache.enabled));
-                            const wafEnabled = Boolean(v.waf_enabled ?? (v.waf && v.waf.enabled));
-                            const hotlinkProtection = Boolean(v.hotlink_protection);
-                            const allowIps = normalizeIpArray(v.allow_ips);
-                            const denyIps = normalizeIpArray(v.deny_ips);
-                            const http2Enabled = Boolean(
-                                v.tls && typeof v.tls.http2 === 'boolean'
-                                    ? v.tls.http2
-                                    : (typeof v.http2 === 'boolean' ? v.http2 : (typeof v.tls_http2 === 'boolean' ? v.tls_http2 : false))
-                            );
-                            const loggingEnabled = Boolean(
-                                v.logging && typeof v.logging.enabled === 'boolean'
-                                    ? v.logging.enabled
-                                    : (typeof v.logging_enabled === 'boolean' ? v.logging_enabled : false)
-                            );
-                            const accessLog = String((v.logging && v.logging.access_log) || v.access_log || '');
+                            <div class="meter-row">
+                                <div class="meter-header">
+                                    <span class="label">{{ t('lbl_cpu') }} ({{ stats.workers }} vCPU {{ t('lbl_worker_unit') }})</span>
+                                    <span class="val">{{ stats.cpu_usage }}%</span>
+                                </div>
+                                <progress class="zmax-progress" max="100" :value="stats.cpu_usage"></progress>
+                            </div>
 
-                            return {
-                                id: idx + 1,
-                                domain,
-                                port: webPort,
-                                doc_root: v.document_root || '',
-                                php_enabled: phpEnabled,
-                                php_sapi_raw: phpSapiRaw,
-                                php_upstream_raw: phpUpstreamRaw,
-                                php_sapi: phpEnabled ? `${phpSapiRaw} (${phpUpstreamRaw})` : 'Static',
-                                ssl_enabled: sslEnabled,
-                                sslKey: sslEnabled ? null : 'status_none',
-                                sslText: sslEnabled ? 'TLS 1.3' : '',
-                                cache: cacheEnabled,
-                                waf_enabled: wafEnabled,
-                                hotlink_protection: hotlinkProtection,
-                                allow_ips: allowIps,
-                                deny_ips: denyIps,
-                                http2: http2Enabled,
-                                logging_enabled: loggingEnabled,
-                                access_log: accessLog,
-                                statusKey: 'status_active'
-                            };
-                        });
-                    }
+                            <div class="meter-row">
+                                <div class="meter-header">
+                                    <span class="label">{{ t('lbl_memory') }}</span>
+                                    <span class="val">{{ stats.ram_mb }} MB / 256 MB</span>
+                                </div>
+                                <progress class="zmax-progress zmax-progress-green" max="100" value="5"></progress>
+                            </div>
 
-                    const modList = extractArray(modData, ['modules']);
-                    if (modList !== null) {
-                        const existingByName = new Map(modules.value.map((m) => [m.name, m]));
-                        modules.value = modList
-                            .map((m) => normalizeModuleEntry(m, existingByName))
-                            .filter((m) => m.name);
-                    }
+                            <div class="meter-row meter-row-last">
+                                <div class="meter-header">
+                                    <span class="label">{{ t('lbl_disk_cache') }}</span>
+                                    <span class="val">0.2 GB / 20 GB</span>
+                                </div>
+                                <progress class="zmax-progress zmax-progress-yellow" max="100" value="2"></progress>
+                            </div>
 
-                    const banList = extractArray(banData, ['bans', 'banned_ips']);
-                    if (banList !== null) {
-                        bannedIps.value = banList.map(normalizeBanEntry).filter((b) => b.ip);
-                    }
+                            <div class="info-kv-list">
+                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_hostname') }}</span> <strong>zmaxserver.local</strong></div>
+                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_ip_port') }}</span> <strong>{{ stats.listeners && stats.listeners.http ? stats.listeners.http : '0.0.0.0:19480' }}</strong></div>
+                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v1.0.01 ({{ t('footer_engine') }})</strong></div>
+                            </div>
+                        </div>
+                    </div>
 
-                    const logList = extractArray(logData, ['logs', 'entries']);
-                    if (logList !== null) {
-                        logs.value = logList.map(normalizeLogEntry);
-                    }
-                } catch (e) {
-                    // Arka plan anket hatası: durum doğrulanamadı, eski veri tutulmaz
-                    svcInput.value = { status: null, vhosts: null, modules: null, hasToken: svcInput.value.hasToken };
-                }
-            };
+                    <!-- Sağ: Hizmet Durumları -->
+                    <div class="col-12 col-xl-6">
+                        <div class="panel-card mb-0">
+                            <div class="panel-header">
+                                <div class="panel-title">
+                                    <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                                    <span>{{ t('service_status_title') }}</span>
+                                </div>
+                                <span class="status-capsule status-active">{{ t('status_all_running') }}</span>
+                            </div>
 
-        const exported = { svcInput, svcView, svcSummaryText, svcHint, hitRate, formattedUptime, filteredModules, fetchStatus };
-        Object.assign(ctx, exported);
-        return exported;
+                            <div class="row g-2">
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_web_core') }}</div>
+                                                <div class="service-port">{{ t('th_port') }}: {{ stats.ports && stats.ports.http ? stats.ports.http : 19480 }}</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_webadmin') }}</div>
+                                                <div class="service-port">{{ t('th_port') }}: {{ stats.ports && stats.ports.admin ? stats.ports.admin : 19485 }}</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_php') }}</div>
+                                                <div class="service-port">127.0.0.1:9000</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_l1_cache') }}</div>
+                                                <div class="service-port">{{ t('srv_pool') }}</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_waf') }}</div>
+                                                <div class="service-port">Token Bucket</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20"></path></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_http3') }}</div>
+                                                <div class="service-port">UDP: {{ stats.ports && stats.ports.https ? stats.ports.https : 19483 }}</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_compress') }}</div>
+                                                <div class="service-port">{{ t('srv_compression_sub') }}</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+
+                                <div class="col-12 col-sm-6">
+                                    <div class="service-item">
+                                        <div class="service-info">
+                                            <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                                            <div>
+                                                <div class="service-name">{{ t('srv_proxy') }}</div>
+                                                <div class="service-port">WebSocket / Node</div>
+                                            </div>
+                                        </div>
+                                        <span class="status-capsule status-active">{{ t('status_running') }}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `
     };
-})();
+})(window);

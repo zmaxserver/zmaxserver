@@ -1,167 +1,263 @@
-// ZMax WebAdmin - API istemcisi ve saf yardimcilar (U2). core.js'den tasindi, davranis ayni.
+// ZMax WebAdmin - API İstemcisi (api_client.js)
+// U2 Bileşeni: Token yönetimi, 401 yakalama, SSE akışı ve tüm API çağrıları
 
-const MODULE_CATEGORY_MAP = {
-    mod_cache: 'perf',
-    mod_security: 'sec',
-    mod_fastcgi: 'proto',
-    mod_rewrite: 'route',
-    mod_brotli: 'perf',
-    mod_gzip: 'perf',
-    mod_ssl: 'sec',
-    mod_quic: 'proto',
-    mod_proxy: 'net',
-    mod_static: 'core',
-    mod_headers: 'sec',
-    mod_realip: 'net',
-    mod_pagespeed: 'perf',
-    mod_geoip: 'sec',
-    mod_redis: 'perf',
-    mod_coreruleset: 'sec',
-    mod_autoindex: 'core',
-    mod_acme: 'sec'
-};
+(function (window) {
+    'use strict';
 
-const VALID_MODULE_CATEGORIES = new Set(['core', 'perf', 'sec', 'proto', 'net', 'route']);
+    class ZMaxApiClient {
+        constructor() {
+            this.baseUrl = '';
+            this.tokenStorageKey = 'zmax_api_token';
+            this.activeToken = localStorage.getItem(this.tokenStorageKey) || '';
+            this.onUnauthorizedCallback = null;
+            this.checkUrlToken();
+        }
 
-// <svc-status>
-// Hizmet Durumları / Sunucu Durumu rozetlerini MEVCUT API verisinden hesaplayan saf fonksiyon.
-// Kural: veri yoksa (token yok/401/hata) durum 'unknown' olur, ASLA 'running' sayılmaz.
-// Durumlar: running | off (yapılandırmada kapalı) | warning | unknown | unsupported.
-function computeServiceStatus(input) {
-    const src = input || {};
-    const st = src.status && typeof src.status === 'object' ? src.status : null;
-    const vh = Array.isArray(src.vhosts) ? src.vhosts : null;
-    const mods = Array.isArray(src.modules) ? src.modules : null;
-    const noDataHint = src.hasToken ? 'svc_hint_api_error' : 'svc_hint_need_key';
-    const LABEL = {
-        running: 'status_running',
-        off: 'status_off',
-        warning: 'status_warning',
-        unknown: 'status_unknown',
-        unsupported: 'status_unsupported'
-    };
-    const CLS = {
-        running: 'status-active',
-        off: 'status-orange',
-        warning: 'status-danger',
-        unknown: 'status-unknown',
-        unsupported: 'status-unknown'
-    };
-    const make = (state, hintKey) => ({ state, labelKey: LABEL[state], cls: CLS[state], hintKey: hintKey || '' });
-    const noData = () => make('unknown', noDataHint);
-    const modEnabled = (name) => {
-        const m = mods.find((x) => x && x.name === name);
-        return Boolean(m && m.enabled === true);
-    };
+        // URL'den token okuma ve adres çubuğunu temizleme
+        checkUrlToken() {
+            try {
+                if (typeof window === 'undefined' || !window.location) return;
+                const urlParams = new URLSearchParams(window.location.search);
+                let queryToken = urlParams.get('token');
+                let foundInHash = false;
 
-    const rows = {};
-    // Web Core: api/status "running"
-    rows.web_core = !st ? noData()
-        : (st.running === true ? make('running') : (st.running === false ? make('warning') : noData()));
-    // WebAdmin: sayfa yüklendi (bu kod çalışıyor) + api/status erişilebilir
-    rows.webadmin = st ? make('running') : noData();
-    // PHP-FPM: canlı sağlık denetimi yok; hiçbir zaman "Çalışıyor" denmez
-    rows.php = st ? make('unknown', 'svc_hint_no_probe') : noData();
-    // L1 RAM önbellek: api/status cache.enabled
-    rows.l1_cache = st && st.cache && typeof st.cache.enabled === 'boolean'
-        ? make(st.cache.enabled ? 'running' : 'off') : noData();
-    // WAF & DoS: security.rate_limit_enabled veya herhangi bir vHost waf_enabled
-    const rate = st && st.security && typeof st.security.rate_limit_enabled === 'boolean'
-        ? st.security.rate_limit_enabled : null;
-    const vhWaf = vh ? vh.some((v) => v && v.waf_enabled === true) : null;
-    rows.waf = (rate === true || vhWaf === true) ? make('running')
-        : (rate === false && vhWaf === false ? make('off') : noData());
-    // HTTP/3 & QUIC: ZMax'te yok
-    rows.http3 = make('unsupported');
-    // Brotli / Gzip: mod_brotli veya mod_gzip etkin
-    rows.compress = !mods ? noData()
-        : (modEnabled('mod_brotli') || modEnabled('mod_gzip') ? make('running') : make('off'));
-    // Ters Proxy: mod_proxy etkin
-    rows.proxy = !mods ? noData() : (modEnabled('mod_proxy') ? make('running') : make('off'));
+                if (!queryToken && window.location.hash) {
+                    const hashMatch = window.location.hash.match(/token=([a-zA-Z0-9_\-]+)/);
+                    if (hashMatch && hashMatch[1]) {
+                        queryToken = hashMatch[1];
+                        foundInHash = true;
+                    }
+                }
 
-    const counted = Object.keys(rows).filter((k) => rows[k].state !== 'unsupported');
-    const total = counted.length;
-    const count = (s) => counted.filter((k) => rows[k].state === s).length;
-    const running = count('running');
-    const unknown = count('unknown');
-    const warning = count('warning');
-    let summaryCls = 'status-orange';
-    if (warning > 0) summaryCls = 'status-danger';
-    else if (total > 0 && running === total) summaryCls = 'status-active';
-    else if (running === 0) summaryCls = 'status-unknown';
+                if (queryToken && queryToken.trim()) {
+                    const cleanToken = queryToken.trim();
+                    this.setToken(cleanToken);
+                    urlParams.delete('token');
+                    const newSearch = urlParams.toString();
+                    let newHash = window.location.hash;
+                    if (foundInHash) {
+                        newHash = newHash.replace(/[#&]?token=[a-zA-Z0-9_\-]+/, '');
+                        if (newHash === '#') newHash = '';
+                    }
+                    const newUrl = window.location.pathname + (newSearch ? '?' + newSearch : '') + newHash;
+                    window.history.replaceState({}, document.title, newUrl);
+                }
+            } catch (_) {}
+        }
 
-    let overallState = 'unknown';
-    if (st && (st.running === false || warning > 0)) overallState = 'warning';
-    else if (st && st.running === true) overallState = 'stable';
-    const overall = {
-        state: overallState,
-        labelKey: { stable: 'status_stable', warning: 'status_warning_caps', unknown: 'status_unknown_caps' }[overallState],
-        cls: { stable: 'status-active', warning: 'status-danger', unknown: 'status-unknown' }[overallState]
-    };
-    return { rows, summary: { running, total, unknown, warning, cls: summaryCls }, overall };
-}
-// </svc-status>
+        getToken() {
+            return (localStorage.getItem(this.tokenStorageKey) || this.activeToken || '').trim();
+        }
 
-const apiFetch = (url, options = {}) => {
-    const token = (localStorage.getItem('zmax_api_token') || '').trim();
-    if (!token) {
-        return fetch(url, options);
+        setToken(token) {
+            const clean = (token || '').trim();
+            this.activeToken = clean;
+            if (clean) {
+                localStorage.setItem(this.tokenStorageKey, clean);
+            } else {
+                localStorage.removeItem(this.tokenStorageKey);
+            }
+        }
+
+        clearToken() {
+            this.setToken('');
+        }
+
+        hasToken() {
+            return Boolean(this.getToken());
+        }
+
+        setUnauthorizedHandler(callback) {
+            this.onUnauthorizedCallback = callback;
+        }
+
+        // Temel fetch çağrısı: Bearer + X-ZMax-Token ekler, 401 yakalar
+        async fetch(url, options = {}) {
+            const token = this.getToken();
+            const headers = new Headers(options.headers || {});
+
+            if (token) {
+                headers.set('X-ZMax-Token', token);
+                headers.set('Authorization', `Bearer ${token}`);
+            }
+
+            const cleanUrl = url.startsWith('/') ? url.slice(1) : url;
+
+            try {
+                const res = await window.fetch(cleanUrl, { ...options, headers });
+                if (res.status === 401) {
+                    if (typeof this.onUnauthorizedCallback === 'function') {
+                        this.onUnauthorizedCallback({ url: cleanUrl, options });
+                    }
+                }
+                return res;
+            } catch (err) {
+                throw err;
+            }
+        }
+
+        async fetchJson(url, options = {}) {
+            const res = await this.fetch(url, options);
+            if (!res.ok) {
+                return null;
+            }
+            try {
+                return await res.json();
+            } catch (_) {
+                return null;
+            }
+        }
+
+        // Oturum doğrulama
+        async validateToken(customToken) {
+            const tokenToTest = (customToken || this.getToken()).trim();
+            if (!tokenToTest) return false;
+
+            const headers = new Headers();
+            headers.set('X-ZMax-Token', tokenToTest);
+            headers.set('Authorization', `Bearer ${tokenToTest}`);
+
+            try {
+                const res = await window.fetch('api/v1/health', { headers });
+                return res.ok;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        // /api/v1/... Rotaları
+        async getHealth() {
+            return this.fetchJson('api/v1/health');
+        }
+
+        async getStatus() {
+            let data = await this.fetchJson('api/v1/status');
+            if (!data) {
+                data = await this.fetchJson('api/status');
+            }
+            return data;
+        }
+
+        async getVhosts() {
+            return this.fetchJson('api/v1/vhosts');
+        }
+
+        async saveVhost(domain, payload, isEdit = false) {
+            const cleanDomain = encodeURIComponent(domain.trim().toLowerCase());
+            const primaryUrl = `api/v1/vhosts/${cleanDomain}`;
+            const reqOpts = {
+                method: isEdit ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            };
+
+            let res = await this.fetch(primaryUrl, reqOpts);
+            if (!res.ok && (res.status === 404 || res.status === 405) && !isEdit) {
+                res = await this.fetch('api/v1/vhosts', reqOpts);
+            } else if (!res.ok && res.status === 405 && isEdit) {
+                res = await this.fetch(primaryUrl, { ...reqOpts, method: 'POST' });
+            }
+            return res;
+        }
+
+        async deleteVhost(domain) {
+            const cleanDomain = encodeURIComponent(domain.trim().toLowerCase());
+            return this.fetch(`api/v1/vhosts/${cleanDomain}`, { method: 'DELETE' });
+        }
+
+        async getModules() {
+            return this.fetchJson('api/v1/modules');
+        }
+
+        async getBans() {
+            return this.fetchJson('api/v1/security/bans');
+        }
+
+        async unbanIp(ip) {
+            return this.fetch('api/v1/security/unban', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip })
+            });
+        }
+
+        async purgeAll() {
+            let res = await this.fetch('api/v1/cache/purge', { method: 'POST' });
+            if (!res.ok && (res.status === 404 || res.status === 405)) {
+                res = await this.fetch('api/purge', { method: 'POST' });
+            }
+            return res;
+        }
+
+        async purgeSpecific(payload) {
+            const body = typeof payload === 'string' ? { uri: payload } : payload;
+            let res = await this.fetch('api/v1/cache/purge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!res.ok && (res.status === 404 || res.status === 405)) {
+                res = await this.fetch('api/purge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+            }
+            return res;
+        }
+
+        async getLogs(domain = '') {
+            const query = domain ? `?domain=${encodeURIComponent(domain)}` : '';
+            let data = await this.fetchJson(`api/v1/logs${query}`);
+            if (!data) {
+                data = await this.fetchJson(`api/logs${query}`);
+            }
+            return data;
+        }
+
+        async reopenLogs() {
+            return this.fetch('api/v1/logs/reopen', { method: 'POST' });
+        }
+
+        // SSE Canlı Günlük Akışı Altyapısı (/api/v1/logs/stream)
+        createLogsStream(onMessage, onError) {
+            const token = this.getToken();
+            const url = `api/v1/logs/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+            let eventSource = null;
+
+            try {
+                eventSource = new EventSource(url);
+                eventSource.onmessage = (event) => {
+                    if (typeof onMessage === 'function') {
+                        try {
+                            const parsed = JSON.parse(event.data);
+                            onMessage(parsed);
+                        } catch (_) {
+                            onMessage(event.data);
+                        }
+                    }
+                };
+                eventSource.onerror = (err) => {
+                    if (typeof onError === 'function') {
+                        onError(err);
+                    }
+                };
+            } catch (err) {
+                if (typeof onError === 'function') {
+                    onError(err);
+                }
+            }
+
+            return {
+                close: () => {
+                    if (eventSource) {
+                        eventSource.close();
+                        eventSource = null;
+                    }
+                }
+            };
+        }
     }
-    const headers = new Headers(options.headers || {});
-    headers.set('X-ZMax-Token', token);
-    return fetch(url, { ...options, headers });
-};
 
-const normalizeIpArray = (val) => {
-    if (Array.isArray(val)) return val.map((x) => String(x).trim()).filter(Boolean);
-    if (typeof val === 'string') return val.split(',').map((x) => x.trim()).filter(Boolean);
-    return [];
-};
-
-const readSettledJson = async (settled) => {
-    if (settled.status !== 'fulfilled' || !settled.value.ok) return null;
-    try {
-        return await settled.value.json();
-    } catch (_) {
-        return null;
-    }
-};
-
-const normalizeModuleEntry = (m, existingByName) => {
-    const rawName = String((m && m.name) || '').trim();
-    const rawFile = String((m && (m.file || m.path)) || '').trim();
-    const name = rawName || rawFile.replace(/^.*[\\/]/, '').replace(/\.toml$/i, '');
-    const prev = existingByName.get(name);
-    const rawCat = String((m && (m.categoryKey || m.category_key || m.category)) || '').trim();
-    const categoryKey = VALID_MODULE_CATEGORIES.has(rawCat)
-        ? rawCat
-        : (MODULE_CATEGORY_MAP[name] || (prev && prev.categoryKey) || 'core');
-    const file = rawFile || (prev && prev.file) || (name ? `modules/${name}.toml` : '');
-    const enabled = typeof (m && m.enabled) === 'boolean' ? m.enabled : true;
-    return { name, categoryKey, file, enabled };
-};
-
-const normalizeLogEntry = (l) => {
-    const latency =
-        l && l.latency !== undefined && l.latency !== null
-            ? String(l.latency)
-            : (l && typeof l.latency_ms === 'number' ? `${l.latency_ms.toFixed(2)}ms` : '');
-    return {
-        time: String((l && (l.time || l.timestamp)) || ''),
-        ip: String((l && (l.ip || l.client_ip)) || ''),
-        domain: String((l && (l.domain || l.host)) || ''),
-        method: String((l && l.method) || 'GET'),
-        path: String((l && (l.path || l.uri)) || '/'),
-        status: l && l.status !== undefined && l.status !== null ? l.status : 200,
-        latency
-    };
-};
-
-const extractArray = (payload, keys) => {
-    if (Array.isArray(payload)) return payload;
-    if (!payload || typeof payload !== 'object') return null;
-    for (const key of keys) {
-        if (Array.isArray(payload[key])) return payload[key];
-    }
-    return null;
-};
+    window.ZMaxApiClient = new ZMaxApiClient();
+})(window);
