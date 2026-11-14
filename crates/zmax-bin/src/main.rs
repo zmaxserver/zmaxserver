@@ -8,6 +8,7 @@ mod h2_engine;
 mod logger;
 mod modules_runtime;
 pub mod security_pipeline;
+pub mod pipeline;
 mod web_engine;
 
 use api::{
