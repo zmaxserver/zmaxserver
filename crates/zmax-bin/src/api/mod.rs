@@ -924,7 +924,7 @@ token = "api-secret-token"
             };
             let st = Arc::clone(state);
             let task = tokio::spawn(async move {
-                let handled = handle_api_route(&mut server, &req, &st)
+                let handled = handle_api_route(&mut server, &req, &st, true)
                     .await
                     .unwrap();
                 let _ = server.shutdown().await;
