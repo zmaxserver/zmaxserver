@@ -378,7 +378,8 @@ pub struct SecurityConfig {
 fn d_auth_fail_limit() -> u32 { 5 }
 fn d_auth_fail_window() -> u64 { 300 }
 fn d_auth_ban() -> u64 { 900 }
-fn d_api_rate() -> u32 { 120 }
+/// WebAdmin tek sayfa 5 uç noktayı yoklar; birden çok sekme/panel için 120/dk yetersizdi (429).
+fn d_api_rate() -> u32 { 600 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
@@ -397,7 +398,7 @@ impl Default for SecurityConfig {
             auth_fail_limit: 5,
             auth_fail_window_sec: 300,
             auth_ban_sec: 900,
-            api_rate_limit_per_minute: 120,
+            api_rate_limit_per_minute: 600,
         }
     }
 }

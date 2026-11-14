@@ -334,6 +334,23 @@
                 } catch (_) {}
             };
 
+            // Yenile düğmesi: durumu çeker ve görünür geri bildirim verir.
+            const refreshNow = async () => {
+                await fetchStatus();
+                showNotice(t('notice_refreshed'));
+            };
+
+            // Tümünü boşalt: gerçekten /api/v1/cache/purge çağrılır, sonra durum yenilenir.
+            const purgeAllCache = async () => {
+                try {
+                    const res = await window.ZMaxApiClient.purgeAll();
+                    showNotice(res && res.ok ? t('notice_purged_all') : t('notice_purge_error'));
+                } catch (e) {
+                    showNotice(t('notice_purge_error'));
+                }
+                await fetchStatus();
+            };
+
             const fetchStatus = async () => {
                 try {
                     const [statusData, vhData, modData, banData, logData] = await Promise.all([
@@ -446,7 +463,7 @@
                 syncDocumentTitleAndLang(currentLang.value);
                 document.documentElement.setAttribute('data-theme', theme.value);
                 fetchStatus();
-                pollTimer = setInterval(fetchStatus, 2000);
+                pollTimer = setInterval(fetchStatus, 5000);
             });
 
             onUnmounted(() => {
@@ -492,6 +509,8 @@
                 loginWithToken,
                 logoutToken,
                 fetchStatus,
+                purgeAllCache,
+                refreshNow,
                 fetchLogs,
                 onVhostDeleted,
                 onUnbanIp

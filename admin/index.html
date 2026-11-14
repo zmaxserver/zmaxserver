@@ -159,12 +159,6 @@
                         <span class="status-dot" :class="hasActiveToken ? 'status-dot-active' : 'status-dot-warning'"></span>
                     </button>
 
-                    <div class="user-pill d-none d-sm-flex" role="button" @click="openAuthModal" style="cursor: pointer;" :title="t('auth_modal_title')">
-                        <svg class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle>
-                        </svg>
-                        <span>{{ t('admin_user') }}</span>
-                    </div>
                 </div>
             </header>
 
@@ -184,8 +178,8 @@
                         :hit-rate="hitRate"
                         :formatted-uptime="formattedUptime"
                         :t="t"
-                        @fetch-status="fetchStatus"
-                        @purge-all-cache="fetchStatus"
+                        @fetch-status="refreshNow"
+                        @purge-all-cache="purgeAllCache"
                     ></view-dashboard>
 
                     <!-- U5: SANAL KONAKLAR (VHOSTS) -->
