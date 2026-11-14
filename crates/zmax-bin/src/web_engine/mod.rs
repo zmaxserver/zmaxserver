@@ -8,7 +8,7 @@ mod context;
 mod extra_listeners;
 #[cfg(test)]
 mod kart8_tests;
-mod pipeline;
+pub(crate) mod pipeline;
 mod pipeline_h1;
 mod pipeline_h2;
 mod purge;
