@@ -158,6 +158,12 @@ pub async fn reload_runtime_state_with_alpn(
     // [ek-dinleyici] ek dinleyicileri yeni yapılandırmayla uzlaştır (hata reload'u bozmaz; günlüğe yazılır)
     let _ = crate::web_engine::reconcile_extra_listeners(state).await;
 
+    let generation = crate::core::state::CONFIG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    crate::api::bridge::emit(
+        "vhost_applied",
+        &format!(r#"{{"generation":{},"vhosts_loaded":{}}}"#, generation, vhost_count),
+    );
+
     Ok((vhost_count, alpn_protocols))
 }
 

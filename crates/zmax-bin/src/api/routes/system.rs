@@ -18,12 +18,15 @@ where
             (rt.vhosts.len(), rt.modules.len())
         };
         let json = format!(
-            r#"{{"ok":true,"status":"ok","engine":"zmax","version":"{}","pid":{},"uptime_seconds":{},"vhosts":{},"modules":{}}}"#,
+            r#"{{"ok":true,"status":"ok","engine":"zmax","version":"{}","pid":{},"uptime_seconds":{},"vhosts":{},"modules":{},"uptime_sec":{},"contract_version":"{}","generation":{}}}"#,
             env!("ZMAX_VERSION"),
             std::process::id(),
             uptime_secs,
             vhosts_len,
-            mods_len
+            mods_len,
+            uptime_secs,
+            crate::api::bridge::CONTRACT_VERSION,
+            crate::core::state::CONFIG_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
         );
         send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
         return Ok(true);

@@ -18,14 +18,21 @@ where
                 let redis_opt = state.runtime.read().await.redis_client.clone();
                 crate::redis::publish_reload(redis_opt.as_ref());
                 let json = format!(
-                    r#"{{"ok":true,"status":"reloaded","vhosts_loaded":{},"message":"Yapilandirma, moduller ve vHost tablosu sifir kesintiyle yenilendi."}}"#,
+                    r#"{{"ok":true,"status":"reloaded","generation":{},"vhosts_loaded":{},"errors":[],"message":"Yapilandirma, moduller ve vHost tablosu sifir kesintiyle yenilendi."}}"#,
+                    crate::core::state::CONFIG_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
                     vhosts_count
                 );
                 send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
             }
             Err(e) => {
                 super::super::audit::kayit(state, "api", "reload", "tum-yapilandirma", false).await;
-                let json = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&e));
+                crate::api::bridge::emit("config_rejected", &format!(r#"{{"error":"{}"}}"#, json_escape(&e)));
+                let json = format!(
+                    r#"{{"ok":false,"error":"{}","generation":{},"vhosts_loaded":0,"errors":["{}"]}}"#,
+                    json_escape(&e),
+                    crate::core::state::CONFIG_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
+                    json_escape(&e)
+                );
                 send_json_response(socket, 500, "Internal Server Error", &cors_origin, &json)
                     .await?;
             }

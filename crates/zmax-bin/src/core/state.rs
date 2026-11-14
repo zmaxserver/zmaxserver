@@ -45,6 +45,9 @@ pub struct RuntimeState {
     pub modules_dir: PathBuf,
 }
 
+/// Her başarılı yapılandırma uygulamasında artan nesil sayacı (köprü: reload/health `generation`).
+pub static CONFIG_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 pub struct ServerState {
     pub base_dir: PathBuf,
     pub cache: zmax_cache::ZMaxCache,

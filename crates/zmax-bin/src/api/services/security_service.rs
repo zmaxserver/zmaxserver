@@ -87,6 +87,9 @@ where
                 crate::redis::publish_unban(rt.redis_client.as_ref(), &ip.to_string());
             }
         }
+        if existed {
+            crate::api::bridge::emit("ban_removed", &format!(r#"{{"ip":"{}"}}"#, ip));
+        }
         let json = format!(
             r#"{{"ok":true,"ip":"{}","unbanned":{}}}"#,
             json_escape(&ip.to_string()),

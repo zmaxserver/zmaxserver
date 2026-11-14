@@ -27,6 +27,7 @@ pub use crate::core::state::{
 use crate::core::state::MAX_IN_MEMORY_LOGS;
 pub mod admin_static;
 pub mod audit;
+pub mod bridge;
 pub mod routes;
 pub mod services;
 use services::vhost_service::{format_vhost_json, merge_vhost_json_patch, write_vhost_atomic_with_rollback};
@@ -132,6 +133,9 @@ where
         Some(_) => {}
     }
 
+    if bridge::handle(socket, req, state, &req_path, &cors_origin).await? {
+        return Ok(true);
+    }
     if routes::system::handle(socket, req, state, &req_path, &cors_origin).await? {
         return Ok(true);
     }
