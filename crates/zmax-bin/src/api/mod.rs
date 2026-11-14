@@ -210,7 +210,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Instant;
     use tokio::sync::RwLock;
-    use crate::modules_runtime::compute_effective_auth;
 
     #[test]
     fn test_json_extractors() {

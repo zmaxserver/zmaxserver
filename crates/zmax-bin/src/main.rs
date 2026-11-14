@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::api::reload_runtime_state;
+    use crate::core::boot::collect_tls_key_paths;
     use crate::web_engine::{https_redirect_location, is_acme_challenge};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

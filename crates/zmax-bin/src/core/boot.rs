@@ -158,7 +158,7 @@ pub fn parse_bind_addr(ip: &str, port: u16) -> Result<SocketAddr, String> {
         .map_err(|e| format!("Gecersiz dinleme adresi ({}): {}", formatted, e))
 }
 
-fn collect_tls_key_paths(
+pub(crate) fn collect_tls_key_paths(
     base_dir: &Path,
     config: &ZMaxConfig,
     vhosts: &[zmax_config::LoadedVHost],

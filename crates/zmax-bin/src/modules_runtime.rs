@@ -14,6 +14,7 @@ pub use crate::redis::build_redis_client;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::l7_handlers::static_files::select_negotiated_image_path;
     use crate::logger::rotate::append_line_with_rotation;
     use crate::pipeline::l5_router::{
         extract_referer_host, is_hotlink_blocked, is_hotlink_protected_extension,
