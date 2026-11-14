@@ -237,7 +237,7 @@ where
                     error_docs: vh.entry.error_docs.clone(),
                     logging: vh.entry.logging.clone(),
                     tls_http2: vh.entry.tls.http2,
-                    acme_root: crate::acme_runtime::resolve_vhost_acme_root(
+                    acme_root: crate::config::acme::resolve_vhost_acme_root(
                         Some(&vh.entry),
                         &state.base_dir,
                     ),
