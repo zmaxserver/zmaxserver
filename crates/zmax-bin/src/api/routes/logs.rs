@@ -1,4 +1,112 @@
 use super::super::*;
+use std::sync::atomic::AtomicUsize;
+use tokio::sync::broadcast::error::RecvError;
+
+/// Aynı anda izin verilen en fazla SSE log akışı.
+const MAX_LOG_STREAMS: usize = 20;
+const KEEPALIVE_SECS: u64 = 15;
+static ACTIVE_LOG_STREAMS: AtomicUsize = AtomicUsize::new(0);
+
+struct StreamSlot;
+impl StreamSlot {
+    fn acquire() -> Option<Self> {
+        let prev = ACTIVE_LOG_STREAMS.fetch_add(1, Ordering::AcqRel);
+        if prev >= MAX_LOG_STREAMS {
+            ACTIVE_LOG_STREAMS.fetch_sub(1, Ordering::AcqRel);
+            None
+        } else {
+            Some(StreamSlot)
+        }
+    }
+}
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        ACTIVE_LOG_STREAMS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// `GET /api/v1/logs/stream`: canlı günlük satırlarını Server-Sent Events olarak akıtır.
+pub(super) async fn logs_stream<S>(
+    socket: &mut S,
+    req: &ParsedHttpRequest,
+    state: &Arc<ServerState>,
+    req_path: &str,
+    cors_origin: &String,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    if req_path != "/api/v1/logs/stream" || req.method != "GET" {
+        return Ok(false);
+    }
+    let domain_q = parse_query_param(&req.query, "domain")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let type_q = parse_query_param(&req.query, "type")
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    if let Some(t) = type_q.as_deref() {
+        if t != "access" && t != "error" {
+            let err = r#"{"ok":false,"error":"Gecersiz type parametresi (access veya error olmali)"}"#;
+            send_json_response(socket, 400, "Bad Request", cors_origin, err).await?;
+            return Ok(true);
+        }
+    }
+    let Some(_slot) = StreamSlot::acquire() else {
+        let err = r#"{"ok":false,"error":"Cok fazla eszamanli log akisi (en fazla 20)"}"#;
+        send_json_response(socket, 503, "Service Unavailable", cors_origin, err).await?;
+        return Ok(true);
+    };
+
+    let origin = if cors_origin.is_empty() { "*" } else { cors_origin.as_str() };
+    let head = format!(
+        "HTTP/1.1 200 OK
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+Connection: close
+X-Accel-Buffering: no
+Access-Control-Allow-Origin: {}
+
+: connected
+
+",
+        origin
+    );
+    socket.write_all(head.as_bytes()).await?;
+    socket.flush().await?;
+
+    let mut rx = state.log_manager.subscribe_live();
+    let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await;
+
+    loop {
+        tokio::select! {
+            msg = rx.recv() => match msg {
+                Ok(item) => {
+                    if let Some(t) = type_q.as_deref() {
+                        if item.kind != t { continue; }
+                    }
+                    if let Some(d) = domain_q.as_deref() {
+                        if !item.domain.eq_ignore_ascii_case(d) { continue; }
+                    }
+                    let frame = format!("data: {}\n\n", item.line.replace(['\r', '\n'], " "));
+                    if socket.write_all(frame.as_bytes()).await.is_err() || socket.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(n)) => state.log_manager.add_live_dropped(n),
+                Err(RecvError::Closed) => break,
+            },
+            _ = keepalive.tick() => {
+                if socket.write_all(b": keepalive\n\n").await.is_err() || socket.flush().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(true)
+}
 
 pub(super) async fn logs_get<S>(
     socket: &mut S,
@@ -202,6 +310,9 @@ pub(crate) async fn handle<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
+    if logs_stream(socket, req, state, req_path, cors_origin).await? {
+        return Ok(true);
+    }
     if logs_get(socket, req, state, req_path, cors_origin).await? {
         return Ok(true);
     }

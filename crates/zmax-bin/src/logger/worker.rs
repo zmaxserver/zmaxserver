@@ -40,9 +40,21 @@ pub(super) struct LogWorkerState {
     pub(super) total_pending_bytes: usize,
     pub(super) batch_threshold_bytes: usize,
     pub(super) writer_capacity: usize,
+    pub(super) live_tx: tokio::sync::broadcast::Sender<LiveLogLine>,
+    pub(super) live_dropped: Arc<AtomicU64>,
 }
 
 impl LogWorkerState {
+    /// Canlı akış abonelerine satır yayınlar; asla bloklamaz (abone yoksa satır düşer, sayaç artar).
+    fn publish_live(&self, kind: &'static str, domain: String, line: &str) {
+        if self.live_tx.receiver_count() == 0 {
+            self.live_dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let text = line.trim_end_matches(['\r', '\n']).to_string();
+        let _ = self.live_tx.send(LiveLogLine { kind, domain, line: text });
+    }
+
     pub(super) fn resolve(&self, path: &Path) -> PathBuf {
         resolve_log_path(&self.base_dir, path)
     }
@@ -171,6 +183,7 @@ impl LogWorkerState {
                 } else {
                     format_combined_line(&entry)
                 };
+                self.publish_live("access", entry.domain.clone(), &line);
                 let max_bytes = entry.max_size_bytes;
                 let custom = entry
                     .target_path

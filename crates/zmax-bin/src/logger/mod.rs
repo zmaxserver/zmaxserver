@@ -11,11 +11,21 @@ use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::sync::{mpsc, oneshot};
 
+const LIVE_CHANNEL_CAPACITY: usize = 1024;
 const LOG_CHANNEL_CAPACITY: usize = 16_384;
 const MIN_FLUSH_MS: u64 = 50;
 const TAIL_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_TAIL_SCAN_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_WAF_EVENTS_LOG: &str = "logs/waf_events.log";
+
+/// Canlı akış (SSE) için yayınlanan tek günlük satırı.
+#[derive(Debug, Clone)]
+pub struct LiveLogLine {
+    /// "access" veya "error"
+    pub kind: &'static str,
+    pub domain: String,
+    pub line: String,
+}
 
 /// Tek bir HTTP/HTTPS isteği için erişim günlüğü kaydı.
 #[derive(Debug, Clone)]
@@ -79,6 +89,8 @@ pub struct AsyncLogManager {
     tx: mpsc::Sender<LogCommand>,
     dropped: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
+    live_tx: tokio::sync::broadcast::Sender<LiveLogLine>,
+    live_dropped: Arc<AtomicU64>,
 }
 
 impl AsyncLogManager {
@@ -93,6 +105,8 @@ impl AsyncLogManager {
         let (tx, rx) = mpsc::channel(LOG_CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let dropped_events = Arc::new(AtomicU64::new(0));
+        let (live_tx, _) = tokio::sync::broadcast::channel(LIVE_CHANNEL_CAPACITY);
+        let live_dropped = Arc::new(AtomicU64::new(0));
 
         let resolved_access = resolve_log_path(&base_dir, &global_access_log);
         let resolved_error = resolve_log_path(&base_dir, &global_error_log);
@@ -109,6 +123,8 @@ impl AsyncLogManager {
             total_pending_bytes: 0,
             batch_threshold_bytes,
             writer_capacity,
+            live_tx: live_tx.clone(),
+            live_dropped: live_dropped.clone(),
         };
         let flush_ms = batch_flush_ms.max(MIN_FLUSH_MS);
 
@@ -132,7 +148,24 @@ impl AsyncLogManager {
             tx,
             dropped,
             dropped_events,
+            live_tx,
+            live_dropped,
         }
+    }
+
+    /// Canlı log akışına abone olur (sınırlı kanal; yavaş abone satır kaçırır, yazımı bloklamaz).
+    pub fn subscribe_live(&self) -> tokio::sync::broadcast::Receiver<LiveLogLine> {
+        self.live_tx.subscribe()
+    }
+
+    /// Canlı akışta düşen satır sayısı (abone yok veya abone geride kaldı).
+    pub fn live_dropped_count(&self) -> u64 {
+        self.live_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Yavaş abonenin kaçırdığı satırları `dropped` sayacına ekler.
+    pub fn add_live_dropped(&self, n: u64) {
+        self.live_dropped.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Erişim günlüğü kaydını beklemesiz (`try_send`) olarak kuyruğa ekler; kanal doluysa sayacı artırır.
