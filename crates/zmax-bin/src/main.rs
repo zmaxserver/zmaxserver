@@ -368,7 +368,7 @@ mod tests {
         let peer: SocketAddr = "192.168.1.50:40000".parse().unwrap();
         let t = tokio::spawn(async move { handle_admin_connection(server, peer, st, false).await });
         client
-            .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .await
             .unwrap();
         client.shutdown().await.unwrap();

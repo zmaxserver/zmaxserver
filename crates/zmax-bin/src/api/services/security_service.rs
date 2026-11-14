@@ -23,7 +23,7 @@ pub(crate) async fn bans<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/v1/security/bans" || req_path == "/api/security/bans")
+    if req_path == "/api/v1/security/bans"
         && req.method == "GET"
     {
         let now_hms = current_hms_utc();
@@ -68,7 +68,7 @@ pub(crate) async fn unban<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/v1/security/unban" || req_path == "/api/security/unban")
+    if req_path == "/api/v1/security/unban"
         && req.method == "POST"
     {
         let body_str = String::from_utf8_lossy(&req.body);

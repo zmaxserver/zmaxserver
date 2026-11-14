@@ -10,7 +10,7 @@ pub(super) async fn logs_get<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/v1/logs" || req_path == "/api/logs") && req.method == "GET" {
+    if req_path == "/api/v1/logs" && req.method == "GET" {
         let domain_q = parse_query_param(&req.query, "domain")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
@@ -175,7 +175,7 @@ pub(super) async fn logs_reopen<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/v1/logs/reopen" || req_path == "/api/logs/reopen") && req.method == "POST"
+    if req_path == "/api/v1/logs/reopen" && req.method == "POST"
     {
         state.log_manager.reopen_all().await;
         let dropped = state.log_manager.dropped_count();

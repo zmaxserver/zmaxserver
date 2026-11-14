@@ -10,7 +10,7 @@ pub(crate) async fn purge<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/purge" || req_path == "/api/v1/cache/purge") && req.method == "POST" {
+    if req_path == "/api/v1/cache/purge" && req.method == "POST" {
         let payload: serde_json::Value = if req.body.iter().all(|b| b.is_ascii_whitespace()) {
             serde_json::json!({})
         } else {
