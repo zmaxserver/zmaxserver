@@ -39,6 +39,8 @@
             const notification = ref('');
             let noticeTimer = null;
             let pollTimer = null;
+            // 401 alınınca yoklama durur: geçersiz token ile her turda 5 istek ZMax'in ardışık-401 sayacını doldurup kullanıcının IP'sini banlıyordu.
+            let authBlocked = false;
 
             // --- i18n & Dil ---
             const availableLanguages = window.ZMaxI18n
@@ -139,6 +141,7 @@
                     if (valid) {
                         window.ZMaxApiClient.setToken(tokenToUse);
                         activeToken.value = tokenToUse;
+                        authBlocked = false;
                         isAuthModalOpen.value = false;
                         authError.value = '';
                         showNotice(t('notice_auth_success'));
@@ -164,6 +167,7 @@
 
             // 401 Unauthorized dinleyicisi
             window.ZMaxApiClient.setUnauthorizedHandler(() => {
+                authBlocked = true;
                 isAuthModalOpen.value = true;
                 authError.value = t('auth_unauthorized');
             });
@@ -352,9 +356,12 @@
             };
 
             const fetchStatus = async () => {
+                if (authBlocked) return;
                 try {
-                    const [statusData, vhData, modData, banData, logData] = await Promise.all([
-                        window.ZMaxApiClient.getStatus(),
+                    // Önce yalnız durum: 401 ise diğer 4 istek hiç gönderilmez.
+                    const statusData = await window.ZMaxApiClient.getStatus();
+                    if (authBlocked) return;
+                    const [vhData, modData, banData, logData] = await Promise.all([
                         window.ZMaxApiClient.getVhosts(),
                         window.ZMaxApiClient.getModules(),
                         window.ZMaxApiClient.getBans(),
