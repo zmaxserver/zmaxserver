@@ -80,6 +80,9 @@ where
         };
         let existed = state.ban_manager.unban(ip);
         state.wp_guard.reset(ip);
+        if existed {
+            crate::api::bridge::emit("ban_removed", &format!(r#"{{"ip":"{}"}}"#, ip));
+        }
         let json = format!(
             r#"{{"ok":true,"ip":"{}","unbanned":{}}}"#,
             json_escape(&ip.to_string()),
