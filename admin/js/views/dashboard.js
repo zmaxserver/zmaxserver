@@ -43,7 +43,7 @@
                         <div>
                             <div class="welcome-title">{{ t('welcome_title') }}</div>
                             <div class="welcome-meta">
-                                panel.zmaxserver.local · <strong class="text-orange">ZMax Server v1.0.01</strong> · {{ t('card_uptime') }}: {{ formattedUptime }}
+                                panel.zmaxserver.local · {{ t('card_uptime') }}: {{ formattedUptime }}
                             </div>
                         </div>
                     </div>
@@ -167,7 +167,7 @@
                             <div class="info-kv-list">
                                 <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_hostname') }}</span> <strong>zmaxserver.local</strong></div>
                                 <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_ip_port') }}</span> <strong>{{ stats.listeners && stats.listeners.http ? stats.listeners.http : '0.0.0.0:19480' }}</strong></div>
-                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v1.0.01 ({{ t('footer_engine') }})</strong></div>
+                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v{{ stats.version || '…' }} ({{ t('footer_engine') }})</strong></div>
                             </div>
                         </div>
                     </div>

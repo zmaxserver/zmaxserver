@@ -39,6 +39,8 @@
             const notification = ref('');
             let noticeTimer = null;
             let pollTimer = null;
+            // 401 alınınca yoklama durur: geçersiz token ile her turda 5 istek ZMax'in ardışık-401 sayacını doldurup kullanıcının IP'sini banlıyordu.
+            let authBlocked = false;
 
             // --- i18n & Dil ---
             const availableLanguages = window.ZMaxI18n
@@ -139,6 +141,7 @@
                     if (valid) {
                         window.ZMaxApiClient.setToken(tokenToUse);
                         activeToken.value = tokenToUse;
+                        authBlocked = false;
                         isAuthModalOpen.value = false;
                         authError.value = '';
                         showNotice(t('notice_auth_success'));
@@ -164,6 +167,7 @@
 
             // 401 Unauthorized dinleyicisi
             window.ZMaxApiClient.setUnauthorizedHandler(() => {
+                authBlocked = true;
                 isAuthModalOpen.value = true;
                 authError.value = t('auth_unauthorized');
             });
@@ -176,6 +180,7 @@
                 cache_misses: 0,
                 workers: 0,
                 ram_mb: 0,
+                version: '',
                 cpu_usage: 0,
                 current_rps: 0,
                 ports: {
@@ -333,10 +338,30 @@
                 } catch (_) {}
             };
 
-            const fetchStatus = async () => {
+            // Yenile düğmesi: durumu çeker ve görünür geri bildirim verir.
+            const refreshNow = async () => {
+                await fetchStatus();
+                showNotice(t('notice_refreshed'));
+            };
+
+            // Tümünü boşalt: gerçekten /api/v1/cache/purge çağrılır, sonra durum yenilenir.
+            const purgeAllCache = async () => {
                 try {
-                    const [statusData, vhData, modData, banData, logData] = await Promise.all([
-                        window.ZMaxApiClient.getStatus(),
+                    const res = await window.ZMaxApiClient.purgeAll();
+                    showNotice(res && res.ok ? t('notice_purged_all') : t('notice_purge_error'));
+                } catch (e) {
+                    showNotice(t('notice_purge_error'));
+                }
+                await fetchStatus();
+            };
+
+            const fetchStatus = async () => {
+                if (authBlocked) return;
+                try {
+                    // Önce yalnız durum: 401 ise diğer 4 istek hiç gönderilmez.
+                    const statusData = await window.ZMaxApiClient.getStatus();
+                    if (authBlocked) return;
+                    const [vhData, modData, banData, logData] = await Promise.all([
                         window.ZMaxApiClient.getVhosts(),
                         window.ZMaxApiClient.getModules(),
                         window.ZMaxApiClient.getBans(),
@@ -350,6 +375,7 @@
                         if (typeof statusData.cache_misses === 'number') stats.value.cache_misses = statusData.cache_misses;
                         if (typeof statusData.workers === 'number') stats.value.workers = statusData.workers;
                         if (typeof statusData.ram_mb === 'number') stats.value.ram_mb = statusData.ram_mb;
+                        if (typeof statusData.version === 'string' && statusData.version) stats.value.version = statusData.version;
                         if (typeof statusData.cpu_usage === 'number') stats.value.cpu_usage = statusData.cpu_usage;
                         if (typeof statusData.current_rps === 'number') stats.value.current_rps = statusData.current_rps;
                         if (statusData.ports) {
@@ -444,7 +470,7 @@
                 syncDocumentTitleAndLang(currentLang.value);
                 document.documentElement.setAttribute('data-theme', theme.value);
                 fetchStatus();
-                pollTimer = setInterval(fetchStatus, 2000);
+                pollTimer = setInterval(fetchStatus, 5000);
             });
 
             onUnmounted(() => {
@@ -490,6 +516,8 @@
                 loginWithToken,
                 logoutToken,
                 fetchStatus,
+                purgeAllCache,
+                refreshNow,
                 fetchLogs,
                 onVhostDeleted,
                 onUnbanIp

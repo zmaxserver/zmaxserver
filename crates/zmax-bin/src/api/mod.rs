@@ -113,6 +113,13 @@ where
     }
 
 
+    // Eski (/api/<ad>) yollar kaldırıldı: kimlik doğrulamadan önce 404 (yalnız /api/v1/* ve /metrics geçerli).
+    if req_path.starts_with("/api/") && !req_path.starts_with("/api/v1/") {
+        let err = r#"{"ok":false,"error":"Bilinmeyen veya desteklenmeyen API uc noktasi"}"#;
+        send_json_response(socket, 404, "Not Found", &cors_origin, err).await?;
+        return Ok(true);
+    }
+
     if guard::api_koruma_engelle(socket, state, &cors_origin).await? {
         return Ok(true);
     }

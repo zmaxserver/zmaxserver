@@ -393,7 +393,8 @@ mod tests {
                 assert!(r.starts_with("HTTP/1.1 403 Forbidden"), "{r}");
             }
         }
-        assert!(!state.ban_manager.list_banned().is_empty());
+        // İstemci loopback olduğundan otomatik ban uygulanmaz (loopback ban'dan her zaman muaf); 403 yanıtı yukarıda doğrulandı.
+        assert!(state.ban_manager.list_banned().is_empty());
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
 
@@ -1196,7 +1197,7 @@ mod tests {
         let state = test_state_with("ban_ctrl", false, "");
         state
             .ban_manager
-            .ban("127.0.0.1".parse().unwrap(), "wp-login test", 300);
+            .ban_forced("127.0.0.1".parse().unwrap(), "wp-login test", 300);
         state
             .ban_manager
             .ban("198.51.100.77".parse().unwrap(), "wp-login remote", 300);

@@ -71,6 +71,7 @@ pub async fn kaydet_basarisiz(state: &Arc<crate::core::state::ServerState>) {
         basarisiz_sayac().remove(&ip);
         state.ban_manager.ban(ip, "API ardisik hatali kimlik dogrulama", ban_sec);
         crate::redis::publish_ban(redis.as_ref(), &ip.to_string(), ban_sec);
+        super::audit::kayit(state, "api", "ban", &ip.to_string(), true).await;
     }
 }
 

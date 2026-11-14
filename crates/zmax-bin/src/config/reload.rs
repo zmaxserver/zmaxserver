@@ -112,6 +112,7 @@ pub async fn reload_runtime_state_with_alpn(
         let mut limiter = state.limiter.write().await;
         *limiter = zmax_security::RateLimiter::new(policies.effective_rate_limit);
     }
+    state.ban_manager.set_exempt(new_cfg.security.ban_exempt_ips.clone());
     {
         let mut admin_handler = state.admin_static_handler.write().await;
         *admin_handler = zmax_static::StaticFileHandler::new(new_admin_dir);

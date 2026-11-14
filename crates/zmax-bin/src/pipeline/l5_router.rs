@@ -28,6 +28,8 @@ pub struct ResolvedVHostContext {
     pub php_enabled: bool,
     pub php_upstream: String,
     pub php_upstreams: Vec<String>,
+    /// `vhost.php.sapi`: `fastcgi` (varsayilan) veya `lsapi` (lsphp -b).
+    pub php_sapi: String,
     pub php_lb_policy: String,
     pub php_timeout: u64,
     pub cache_enabled: bool,
@@ -429,6 +431,7 @@ pub(crate) async fn resolve_vhost_context(
                 max_log_size_bytes,
                 headers_policy: sec_headers,
                 php_upstreams: vh.entry.php.upstreams.clone(),
+                php_sapi: vh.entry.php.sapi.clone(),
                 php_lb_policy: vh.entry.php.lb_policy.clone(),
                 rewrite_rules: vh.entry.rewrite.rules.clone(),
                 waf_enabled: vh.entry.security.waf_enabled,
@@ -499,6 +502,7 @@ pub(crate) async fn resolve_vhost_context(
                 )
             },
             php_upstreams: Vec::new(),
+            php_sapi: "fastcgi".to_string(),
             php_lb_policy: "least_conn".to_string(),
             rewrite_rules: Vec::new(),
             waf_enabled: None,
