@@ -745,6 +745,16 @@ code {
     background: currentColor;
 }
 
+.status-dot-active {
+    background: var(--green) !important;
+    box-shadow: 0 0 6px var(--green);
+}
+
+.status-dot-warning {
+    background: var(--yellow) !important;
+    box-shadow: 0 0 6px var(--yellow);
+}
+
 /* Butonlar (Bootstrap uyumlu kurumsal stiller) */
 .btn-zmax {
     padding: 8px 16px;
@@ -1109,11 +1119,4 @@ code {
         padding: 4px 10px;
         font-size: 12px;
     }
-}
-
-/* Nötr gri: durum bilinmiyor / desteklenmiyor */
-.status-unknown {
-    background: var(--bg-inner);
-    color: var(--text-muted);
-    border: 1px solid var(--border-color);
 }

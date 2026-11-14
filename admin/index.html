@@ -123,6 +123,20 @@
                 </div>
 
                 <div class="topbar-right">
+                    <!-- Tema Geçiş Düğmesi (Aydınlık / Karanlık) -->
+                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="toggleTheme" :title="theme === 'light' ? 'Karanlık Mod' : 'Aydınlık Mod'" :aria-label="theme === 'light' ? 'Karanlık Mod' : 'Aydınlık Mod'">
+                        <svg v-if="theme === 'light'" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                        </svg>
+                        <svg v-else class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <circle cx="12" cy="12" r="5"></circle>
+                            <line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                            <line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                        </svg>
+                    </button>
+
                     <!-- Çoklu Dil Seçici (i18n) -->
                     <select class="lang-select" v-model="currentLang" @change="setLang(currentLang)" aria-label="Language">
                         <option v-for="l in availableLanguages" :key="l.code" :value="l.code">
@@ -135,7 +149,17 @@
                         {{ t('system_load') }}: 0.00 · 0.00 · 0.00
                     </div>
 
-                    <div class="user-pill d-none d-sm-flex">
+                    <!-- API Token / Oturum Butonu -->
+                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact d-flex align-items-center gap-2" @click="openAuthModal" :title="t('auth_modal_title')">
+                        <svg class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                        <span class="d-none d-md-inline">{{ hasActiveToken ? t('auth_status_logged_in') : t('auth_btn_login') }}</span>
+                        <span class="status-dot" :class="hasActiveToken ? 'status-dot-active' : 'status-dot-warning'"></span>
+                    </button>
+
+                    <div class="user-pill d-none d-sm-flex" role="button" @click="openAuthModal" style="cursor: pointer;" :title="t('auth_modal_title')">
                         <svg class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle>
                         </svg>
@@ -152,617 +176,176 @@
             <!-- Kaydırılabilir Bootstrap 5 İçerik Alanı -->
             <main class="content-area">
                 <div class="container-fluid px-0">
-                    <!-- 1. GENEL BAKIŞ (OVERVIEW) -->
-                    <div v-if="currentTab === 'overview'">
-                        <!-- Karşılama Kartı -->
-                        <div class="welcome-banner">
-                            <div class="welcome-info">
-                                <div class="welcome-avatar">
-                                    <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline>
-                                    </svg>
-                                </div>
-                                <div>
-                                    <div class="welcome-title">{{ t('welcome_title') }}</div>
-                                    <div class="welcome-meta">
-                                        panel.zmaxserver.local · <strong class="text-orange">ZMax Server v{{ engineVersion }}</strong> · {{ t('card_uptime') }}: {{ formattedUptime }}
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="welcome-actions">
-                                <button type="button" class="btn-zmax btn-ghost" @click="fetchStatus">
-                                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                                        <polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-                                    </svg>
-                                    {{ t('btn_reload') }}
-                                </button>
-                                <button type="button" class="btn-zmax btn-orange" @click="purgeAllCache">
-                                    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-                                    </svg>
-                                    {{ t('cache_purge_btn') }}
-                                </button>
-                            </div>
-                        </div>
+                    <!-- U4: GENEL BAKIŞ (OVERVIEW / DASHBOARD) -->
+                    <view-dashboard
+                        v-if="currentTab === 'overview'"
+                        :stats="stats"
+                        :vhosts-count="vhosts.length"
+                        :hit-rate="hitRate"
+                        :formatted-uptime="formattedUptime"
+                        :t="t"
+                        @fetch-status="fetchStatus"
+                        @purge-all-cache="fetchStatus"
+                    ></view-dashboard>
 
-                        <!-- Özet Kartları (Bootstrap Grid) -->
-                        <div class="row g-3 mb-4">
-                            <div class="col-12 col-sm-6 col-md-4 col-xl">
-                                <div class="summary-card">
-                                    <div class="summary-icon">
-                                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-                                    </div>
-                                    <div>
-                                        <div class="summary-label">{{ t('nav_vhosts') }}</div>
-                                        <div class="summary-val">{{ vhosts.length }}</div>
-                                    </div>
-                                </div>
-                            </div>
+                    <!-- U5: SANAL KONAKLAR (VHOSTS) -->
+                    <view-vhosts
+                        v-if="currentTab === 'vhosts'"
+                        :vhosts="vhosts"
+                        :filtered-vhosts="filteredVhosts"
+                        :t="t"
+                        @vhost-saved="fetchStatus"
+                        @vhost-deleted="onVhostDeleted"
+                        @show-notice="showNotice"
+                    ></view-vhosts>
 
-                            <div class="col-12 col-sm-6 col-md-4 col-xl">
-                                <div class="summary-card">
-                                    <div class="summary-icon">
-                                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                                    </div>
-                                    <div>
-                                        <div class="summary-label">{{ t('card_cache_hit_rate') }}</div>
-                                        <div class="summary-val">{{ hitRate }}%</div>
-                                    </div>
-                                </div>
-                            </div>
+                    <!-- U6: ÖNBELLEK YÖNETİCİSİ (CACHE) -->
+                    <view-cache-waf
+                        v-if="currentTab === 'cache'"
+                        mode="cache"
+                        :banned-ips="bannedIps"
+                        :t="t"
+                        @purge-all="fetchStatus"
+                        @unban-ip="onUnbanIp"
+                        @show-notice="showNotice"
+                    ></view-cache-waf>
 
-                            <div class="col-12 col-sm-6 col-md-4 col-xl">
-                                <div class="summary-card">
-                                    <div class="summary-icon">
-                                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
-                                    </div>
-                                    <div>
-                                        <div class="summary-label">{{ t('card_ram_usage') }}</div>
-                                        <div class="summary-val">{{ stats.ram_mb }} MB</div>
-                                    </div>
-                                </div>
-                            </div>
+                    <!-- U6: GÜVENLİK / WAF (SECURITY) -->
+                    <view-cache-waf
+                        v-if="currentTab === 'security'"
+                        mode="security"
+                        :banned-ips="bannedIps"
+                        :t="t"
+                        @unban-ip="onUnbanIp"
+                        @show-notice="showNotice"
+                    ></view-cache-waf>
 
-                            <div class="col-12 col-sm-6 col-md-6 col-xl">
-                                <div class="summary-card">
-                                    <div class="summary-icon">
-                                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-                                    </div>
-                                    <div>
-                                        <div class="summary-label">{{ t('card_total_req') }}</div>
-                                        <div class="summary-val">{{ stats.total_requests }}</div>
-                                    </div>
-                                </div>
-                            </div>
+                    <!-- SUNUCU MODÜLLERİ (MODULES) -->
+                    <view-modules
+                        v-if="currentTab === 'modules'"
+                        :modules="modules"
+                        :filtered-modules="filteredModules"
+                        v-model:selected-module-category="selectedModuleCategory"
+                        :module-categories="moduleCategories"
+                        :t="t"
+                    ></view-modules>
 
-                            <div class="col-12 col-sm-12 col-md-6 col-xl">
-                                <div class="summary-card">
-                                    <div class="summary-icon">
-                                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
-                                    </div>
-                                    <div>
-                                        <div class="summary-label">{{ t('card_workers') }}</div>
-                                        <div class="summary-val">{{ stats.workers }}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+                    <!-- U7: CANLI LOGLAR (LOGS) -->
+                    <view-logs
+                        v-if="currentTab === 'logs'"
+                        :logs="logs"
+                        :vhosts="vhosts"
+                        :t="t"
+                        @refresh-logs="fetchLogs"
+                        @show-notice="showNotice"
+                    ></view-logs>
 
-                        <!-- İki Sütunlu Panel (Sunucu Durumu & Hizmet Durumları) -->
-                        <div class="row g-3 mb-4">
-                            <!-- Sol: Sunucu Durumu -->
-                            <div class="col-12 col-xl-6">
-                                <div class="panel-card mb-0">
-                                    <div class="panel-header">
-                                        <div class="panel-title">
-                                            <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-                                            <span>{{ t('server_status_title') }}</span>
-                                        </div>
-                                        <span class="status-capsule" :class="svcView.overall.cls">{{ t(svcView.overall.labelKey) }}</span>
-                                    </div>
-
-                                    <div class="meter-row">
-                                        <div class="meter-header">
-                                            <span class="label">{{ t('lbl_cpu') }} ({{ stats.workers }} vCPU {{ t('lbl_worker_unit') }})</span>
-                                            <span class="val">{{ stats.cpu_usage }}%</span>
-                                        </div>
-                                        <progress class="zmax-progress" max="100" :value="stats.cpu_usage"></progress>
-                                    </div>
-
-                                    <div class="meter-row">
-                                        <div class="meter-header">
-                                            <span class="label">{{ t('lbl_memory') }}</span>
-                                            <span class="val">{{ stats.ram_mb }} MB / 256 MB</span>
-                                        </div>
-                                        <progress class="zmax-progress zmax-progress-green" max="100" value="5"></progress>
-                                    </div>
-
-                                    <div class="meter-row meter-row-last">
-                                        <div class="meter-header">
-                                            <span class="label">{{ t('lbl_disk_cache') }}</span>
-                                            <span class="val">0.2 GB / 20 GB</span>
-                                        </div>
-                                        <progress class="zmax-progress zmax-progress-yellow" max="100" value="2"></progress>
-                                    </div>
-
-                                    <div class="info-kv-list">
-                                        <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_hostname') }}</span> <strong>zmaxserver.local</strong></div>
-                                        <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_ip_port') }}</span> <strong>{{ stats.listeners.http }}</strong></div>
-                                        <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v{{ engineVersion }} ({{ t('footer_engine') }})</strong></div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Sağ: Hizmet Durumları -->
-                            <div class="col-12 col-xl-6">
-                                <div class="panel-card mb-0">
-                                    <div class="panel-header">
-                                        <div class="panel-title">
-                                            <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                                            <span>{{ t('service_status_title') }}</span>
-                                        </div>
-                                        <span class="status-capsule" :class="svcView.summary.cls">{{ svcSummaryText }}</span>
-                                    </div>
-
-                                    <div class="row g-2">
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_web_core') }}</div>
-                                                        <div class="service-port">{{ t('th_port') }}: {{ stats.ports.http }}</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.web_core.cls" :title="svcHint(svcView.rows.web_core)">{{ t(svcView.rows.web_core.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_webadmin') }}</div>
-                                                        <div class="service-port">{{ t('th_port') }}: {{ stats.ports.admin }}</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.webadmin.cls" :title="svcHint(svcView.rows.webadmin)">{{ t(svcView.rows.webadmin.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_php') }}</div>
-                                                        <div class="service-port">127.0.0.1:9000</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.php.cls" :title="svcHint(svcView.rows.php)">{{ t(svcView.rows.php.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_l1_cache') }}</div>
-                                                        <div class="service-port">{{ t('srv_pool') }}</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.l1_cache.cls" :title="svcHint(svcView.rows.l1_cache)">{{ t(svcView.rows.l1_cache.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_waf') }}</div>
-                                                        <div class="service-port">Token Bucket</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.waf.cls" :title="svcHint(svcView.rows.waf)">{{ t(svcView.rows.waf.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20"></path></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_http3') }}</div>
-                                                        <div class="service-port">{{ t('srv_http3_sub') }}</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.http3.cls" :title="svcHint(svcView.rows.http3)">{{ t(svcView.rows.http3.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_compress') }}</div>
-                                                        <div class="service-port">{{ t('srv_compression_sub') }}</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.compress.cls" :title="svcHint(svcView.rows.compress)">{{ t(svcView.rows.compress.labelKey) }}</span>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-sm-6">
-                                            <div class="service-item">
-                                                <div class="service-info">
-                                                    <svg class="icon service-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-                                                    <div>
-                                                        <div class="service-name">{{ t('srv_proxy') }}</div>
-                                                        <div class="service-port">WebSocket / Node</div>
-                                                    </div>
-                                                </div>
-                                                <span class="status-capsule" :class="svcView.rows.proxy.cls" :title="svcHint(svcView.rows.proxy)">{{ t(svcView.rows.proxy.labelKey) }}</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 2. SANAL KONAKLAR (VHOSTS) -->
-                    <div v-if="currentTab === 'vhosts'">
-                        <div class="panel-card">
-                            <div class="panel-header">
-                                <div>
-                                    <h3 class="panel-title">
-                                        <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20"></path></svg>
-                                        <span>{{ t('vhosts_title') }}</span>
-                                    </h3>
-                                    <p class="panel-subtitle">{{ t('vhosts_desc') }}</p>
-                                </div>
-                                <div class="d-flex flex-wrap align-items-center gap-2">
-                                    <span class="status-capsule status-active">
-                                        <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                                        {{ t('vhosts_sync') }}
-                                    </span>
-                                    <button type="button" class="btn-zmax btn-orange btn-sm-compact" @click="openCreateVhostModal">
-                                        + {{ t('btn_add_vhost') }}
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="table-responsive">
-                                <table class="zmax-table">
-                                    <thead>
-                                        <tr>
-                                            <th>{{ t('th_domain') }}</th>
-                                            <th>{{ t('th_port') }}</th>
-                                            <th>{{ t('th_docroot') }}</th>
-                                            <th>{{ t('th_php') }}</th>
-                                            <th>{{ t('th_ssl') }}</th>
-                                            <th>{{ t('th_cache') }}</th>
-                                            <th>{{ t('th_security_logs') }}</th>
-                                            <th>{{ t('th_status') }}</th>
-                                            <th>{{ t('th_action') }}</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <tr v-for="vh in filteredVhosts" :key="vh.id">
-                                            <td><strong>{{ vh.domain }}</strong></td>
-                                            <td>{{ vh.port }}</td>
-                                            <td><code>{{ vh.doc_root }}</code></td>
-                                            <td><span class="status-capsule status-orange">{{ vh.php_sapi }}</span></td>
-                                            <td>
-                                                <div class="d-flex flex-wrap gap-1">
-                                                    <span class="status-capsule status-active">{{ vh.sslKey ? t(vh.sslKey) : vh.sslText }}</span>
-                                                    <span class="status-capsule" :class="vh.http2 ? 'status-active' : 'status-orange'">HTTP/2: {{ vh.http2 ? t('status_on') : t('status_off') }}</span>
-                                                </div>
-                                            </td>
-                                            <td><span class="status-capsule status-active">{{ vh.cache ? t('status_enabled') : t('status_none') }}</span></td>
-                                            <td>
-                                                <div class="d-flex flex-wrap gap-1">
-                                                    <span class="status-capsule" :class="vh.waf_enabled ? 'status-active' : 'status-orange'">WAF: {{ vh.waf_enabled ? t('status_on') : t('status_off') }}</span>
-                                                    <span class="status-capsule" :class="vh.logging_enabled ? 'status-active' : 'status-orange'">Log: {{ vh.logging_enabled ? t('status_on') : t('status_off') }}</span>
-                                                </div>
-                                            </td>
-                                            <td><span class="status-capsule status-active">{{ t(vh.statusKey || 'status_active') }}</span></td>
-                                            <td>
-                                                <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="openEditVhostModal(vh)">{{ t('btn_edit') }}</button>
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <!-- vHost Ekleme / Düzenleme Modalı -->
-                        <div v-if="showVhostModal" class="d-flex align-items-center justify-content-center p-3" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65); z-index: 1050; overflow-y: auto;" @click.self="closeVhostModal">
-                            <div class="panel-card w-100 mb-0" style="max-width: 720px; max-height: 92vh; overflow-y: auto;">
-                                <div class="panel-header">
-                                    <h3 class="panel-title">
-                                        <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20"></path></svg>
-                                        <span>{{ vhostModalMode === 'edit' ? t('vhost_modal_edit_title') : t('vhost_modal_add_title') }}</span>
-                                    </h3>
-                                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="closeVhostModal">{{ t('close_menu') }}</button>
-                                </div>
-
-                                <form @submit.prevent="saveVhost">
-                                    <div class="row g-3">
-                                        <div class="col-12 col-md-6">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_domain') }}</label>
-                                            <input type="text" v-model="vhostForm.domain" :readonly="vhostModalMode === 'edit'" required placeholder="example.com" class="zmax-input w-100">
-                                        </div>
-                                        <div class="col-12 col-md-6">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_docroot') }}</label>
-                                            <input type="text" v-model="vhostForm.document_root" placeholder="www/example.com" class="zmax-input w-100">
-                                        </div>
-
-                                        <div class="col-12 col-md-4 d-flex align-items-center">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhPhpEnabled" v-model="vhostForm.php_enabled">
-                                                <label class="form-check-label small" for="vhPhpEnabled">{{ t('lbl_vhost_php_enabled') }}</label>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_php_sapi') }}</label>
-                                            <input type="text" v-model="vhostForm.php_sapi" :disabled="!vhostForm.php_enabled" placeholder="fastcgi" class="zmax-input w-100">
-                                        </div>
-                                        <div class="col-12 col-md-4">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_php_upstream') }}</label>
-                                            <input type="text" v-model="vhostForm.php_upstream" :disabled="!vhostForm.php_enabled" placeholder="127.0.0.1:9000" class="zmax-input w-100">
-                                        </div>
-
-                                        <div class="col-6 col-md-4">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhCacheEnabled" v-model="vhostForm.cache_enabled">
-                                                <label class="form-check-label small" for="vhCacheEnabled">{{ t('lbl_vhost_cache') }}</label>
-                                            </div>
-                                        </div>
-                                        <div class="col-6 col-md-4">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhSslEnabled" v-model="vhostForm.ssl_enabled">
-                                                <label class="form-check-label small" for="vhSslEnabled">{{ t('lbl_vhost_ssl') }}</label>
-                                            </div>
-                                        </div>
-                                        <div class="col-6 col-md-4">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhHttp2" v-model="vhostForm.tls_http2">
-                                                <label class="form-check-label small" for="vhHttp2">{{ t('lbl_vhost_http2') }}</label>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-6 col-md-6">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhWafEnabled" v-model="vhostForm.waf_enabled">
-                                                <label class="form-check-label small" for="vhWafEnabled">{{ t('lbl_vhost_waf') }}</label>
-                                            </div>
-                                        </div>
-                                        <div class="col-6 col-md-6">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhHotlink" v-model="vhostForm.hotlink_protection">
-                                                <label class="form-check-label small" for="vhHotlink">{{ t('lbl_vhost_hotlink') }}</label>
-                                            </div>
-                                        </div>
-
-                                        <div class="col-12 col-md-6">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_allow_ips') }}</label>
-                                            <input type="text" v-model="vhostForm.allow_ips" :placeholder="t('ph_ip_list')" class="zmax-input w-100">
-                                        </div>
-                                        <div class="col-12 col-md-6">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_deny_ips') }}</label>
-                                            <input type="text" v-model="vhostForm.deny_ips" :placeholder="t('ph_ip_list')" class="zmax-input w-100">
-                                        </div>
-
-                                        <div class="col-12 col-md-4 d-flex align-items-center">
-                                            <div class="form-check form-switch">
-                                                <input class="form-check-input" type="checkbox" id="vhLogEnabled" v-model="vhostForm.logging_enabled">
-                                                <label class="form-check-label small" for="vhLogEnabled">{{ t('lbl_vhost_logging_enabled') }}</label>
-                                            </div>
-                                        </div>
-                                        <div class="col-12 col-md-8">
-                                            <label class="form-label text-muted-custom small mb-1">{{ t('lbl_vhost_access_log') }}</label>
-                                            <input type="text" v-model="vhostForm.logging_access_log" placeholder="logs/example.com.access.log" class="zmax-input w-100">
-                                        </div>
-                                    </div>
-
-                                    <div class="d-flex justify-content-end gap-2 mt-4">
-                                        <button type="button" class="btn-zmax btn-ghost" @click="closeVhostModal">{{ t('btn_cancel') }}</button>
-                                        <button type="submit" class="btn-zmax btn-orange" :disabled="savingVhost">{{ t('btn_save') }}</button>
-                                    </div>
-                                </form>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 3. ÖNBELLEK YÖNETİCİSİ (CACHE) -->
-                    <div v-if="currentTab === 'cache'">
-                        <div class="panel-card">
-                            <div class="panel-header">
-                                <div>
-                                    <h3 class="panel-title">
-                                        <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-                                        <span>{{ t('cache_title') }}</span>
-                                    </h3>
-                                    <p class="panel-subtitle">{{ t('cache_desc') }}</p>
-                                </div>
-                                <button type="button" class="btn-zmax btn-danger-zmax" @click="purgeAllCache">{{ t('cache_purge_btn') }}</button>
-                            </div>
-
-                            <div class="purge-box">
-                                <h4 class="purge-box-title">{{ t('cache_purge_title') }}</h4>
-                                <div class="d-flex flex-column flex-sm-row gap-2">
-                                    <input type="text" v-model="purgeUrlInput" :placeholder="t('cache_purge_placeholder')" class="zmax-input flex-grow-1">
-                                    <button type="button" class="btn-zmax btn-orange" @click="purgeSpecificUrl">{{ t('cache_purge_one') }}</button>
-                                </div>
-                            </div>
-
-                            <div class="row g-3">
-                                <div class="col-12 col-md-6">
-                                    <div class="cache-tier-card">
-                                        <strong class="text-white-custom">{{ t('cache_l1_title') }}</strong>
-                                        <div class="cache-tier-desc">{{ t('cache_l1_desc') }}</div>
-                                        <span class="status-capsule status-active">{{ t('status_active') }}</span>
-                                    </div>
-                                </div>
-                                <div class="col-12 col-md-6">
-                                    <div class="cache-tier-card">
-                                        <strong class="text-white-custom">{{ t('cache_l2_title') }}</strong>
-                                        <div class="cache-tier-desc"><code>cachedata/</code> — {{ t('cache_l2_desc') }}</div>
-                                        <span class="status-capsule status-active">{{ t('status_ready') }}</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 4. GÜVENLİK (SECURITY) -->
-                    <div v-if="currentTab === 'security'">
-                        <div class="panel-card">
-                            <div class="panel-header">
-                                <div>
-                                    <h3 class="panel-title">
-                                        <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                                        <span>{{ t('waf_title') }}</span>
-                                    </h3>
-                                    <p class="panel-subtitle">{{ t('waf_desc') }}</p>
-                                </div>
-                                <span class="status-capsule status-active">{{ t('waf_shield_active') }}</span>
-                            </div>
-
-                            <div>
-                                <h4 class="waf-section-title">{{ t('waf_banned_ips') }}</h4>
-                                <div class="table-responsive">
-                                    <table class="zmax-table">
-                                        <thead>
-                                            <tr>
-                                                <th>{{ t('th_ip') }}</th>
-                                                <th>{{ t('th_reason') }}</th>
-                                                <th>{{ t('th_date') }}</th>
-                                                <th>{{ t('th_action') }}</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            <tr v-for="b in bannedIps" :key="b.ip">
-                                                <td><strong>{{ b.ip }}</strong></td>
-                                                <td><span class="status-capsule status-danger">{{ t(b.reasonKey) }}</span></td>
-                                                <td>{{ t('today_label') }} {{ b.time }}</td>
-                                                <td>
-                                                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="unbanIp(b.ip)">{{ t('btn_unban') }}</button>
-                                                </td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 5. SUNUCU MODÜLLERİ (18 MODÜLÜN TAMAMI) -->
-                    <div v-if="currentTab === 'modules'">
-                        <div class="panel-card">
-                            <div class="panel-header">
-                                <div>
-                                    <h3 class="panel-title">
-                                        <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
-                                        <span>{{ t('modules_title') }} ({{ modules.length }} {{ t('modules_active_suffix') }})</span>
-                                    </h3>
-                                    <p class="panel-subtitle">{{ t('modules_desc') }}</p>
-                                </div>
-                                <div class="d-flex flex-wrap gap-2">
-                                    <button type="button" v-for="cat in moduleCategories" :key="cat.key" class="filter-btn" :class="{ active: selectedModuleCategory === cat.key }" @click="selectedModuleCategory = cat.key">
-                                        {{ t(cat.labelKey) }}
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div class="row g-3">
-                                <div class="col-12 col-md-6 col-xl-4" v-for="m in filteredModules" :key="m.name">
-                                    <div class="module-card">
-                                        <div>
-                                            <div class="module-card-top">
-                                                <div class="module-card-title">
-                                                    <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
-                                                    <span>{{ t(m.name + '_title') }}</span>
-                                                </div>
-                                                <span class="status-capsule status-active">{{ t('status_active') }}</span>
-                                            </div>
-                                            <p class="module-card-desc">{{ t(m.name + '_desc') }}</p>
-                                        </div>
-                                        <div class="module-card-footer">
-                                            <span class="status-capsule status-orange">{{ t('cat_' + m.categoryKey) }}</span>
-                                            <code class="module-file-path">{{ m.file }}</code>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 6. CANLI LOGLAR (LOGS) -->
-                    <div v-if="currentTab === 'logs'">
-                        <div class="panel-card">
-                            <div class="panel-header">
-                                <div>
-                                    <h3 class="panel-title">
-                                        <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
-                                        <span>{{ t('logs_title') }}</span>
-                                    </h3>
-                                    <p class="panel-subtitle">{{ t('logs_desc') }}</p>
-                                </div>
-                                <div class="d-flex flex-wrap align-items-center gap-2">
-                                    <input type="text" list="zmax-log-domains" v-model="logDomainFilter" @change="fetchLogs" @keyup.enter="fetchLogs" :placeholder="t('logs_domain_placeholder')" class="zmax-input zmax-input-sm">
-                                    <datalist id="zmax-log-domains">
-                                        <option v-for="vh in vhosts" :key="vh.domain" :value="vh.domain"></option>
-                                    </datalist>
-                                    <input type="text" v-model="searchLog" :placeholder="t('logs_filter_placeholder')" class="zmax-input zmax-input-sm">
-                                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="clearLogFilters">{{ t('btn_clear') }}</button>
-                                    <button type="button" class="btn-zmax btn-orange btn-sm-compact" :disabled="reopeningLogs" @click="reopenLogs">{{ t('btn_reopen_logs') }}</button>
-                                </div>
-                            </div>
-
-                            <div class="terminal">
-                                <div class="terminal-line" v-for="(l, i) in filteredLogs" :key="i">
-                                    <span class="t-time">[{{ l.time }}]</span>
-                                    <span>{{ l.ip }}</span>
-                                    <strong class="text-orange">{{ l.method }}</strong>
-                                    <span class="t-path">{{ l.path }}</span>
-                                    <span :class="'t-status-' + l.status">{{ l.status }} OK</span>
-                                    <span class="t-latency">{{ l.latency }}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 7. YAPILANDIRMA (SETTINGS) -->
-                    <div v-if="currentTab === 'settings'">
-                        <div class="panel-card">
-                            <div class="panel-header">
-                                <h3 class="panel-title">
-                                    <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                                    <span>{{ t('settings_title') }}</span>
-                                </h3>
-                            </div>
-                            <div class="settings-list">
-                                <div>• <span class="text-muted-custom">{{ t('lbl_web_listener') }}:</span> <strong class="text-orange">{{ stats.listeners.http }}</strong></div>
-                                <div>• <span class="text-muted-custom">{{ t('lbl_admin_listener') }}:</span> <strong class="text-orange">{{ stats.listeners.admin }}</strong></div>
-                                <div>• <span class="text-muted-custom">{{ t('lbl_api_listener') }}:</span> <strong class="text-orange">{{ stats.listeners.api }}</strong></div>
-                                <div>• <span class="text-muted-custom">{{ t('lbl_allocator') }}:</span> <strong>mimalloc (~12 MB {{ t('lbl_idle') }})</strong></div>
-                                <div>• <span class="text-muted-custom">{{ t('lbl_fastcgi') }}:</span> <strong>127.0.0.1:9000</strong></div>
-                                <div>• <span class="text-muted-custom">{{ t('lbl_config_file') }}:</span> <code>conf/zmax.toml</code></div>
-                            </div>
-                        </div>
-                    </div>
+                    <!-- YAPILANDIRMA (SETTINGS) -->
+                    <view-settings
+                        v-if="currentTab === 'settings'"
+                        :stats="stats"
+                        :t="t"
+                    ></view-settings>
                 </div>
             </main>
+
+            <!-- API Token Giriş Modalı -->
+            <div id="tokenModal" v-if="isAuthModalOpen" class="d-flex align-items-center justify-content-center p-3" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 1060; overflow-y: auto;" @click.self="closeAuthModal">
+                <div class="panel-card w-100 mb-0" style="max-width: 500px; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85); border: 1px solid var(--border-color);">
+                    <div class="panel-header">
+                        <h3 class="panel-title">
+                            <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                            </svg>
+                            <span>{{ t('auth_modal_title') }}</span>
+                        </h3>
+                        <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="closeAuthModal" :aria-label="t('close_menu')">✕</button>
+                    </div>
+
+                    <form @submit.prevent="loginWithToken()">
+                        <p class="text-muted-custom small mb-3">
+                            {{ t('auth_modal_desc') }}
+                        </p>
+
+                        <!-- Aktif Token Durum Kutusu -->
+                        <div v-if="hasActiveToken" class="p-2 mb-3 rounded small d-flex align-items-center justify-content-between" style="background: rgba(0, 230, 118, 0.08); border: 1px solid rgba(0, 230, 118, 0.25);">
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="status-dot status-dot-active"></span>
+                                <span class="text-silver">{{ t('auth_active_token_info') }}</span>
+                            </div>
+                        </div>
+
+                        <!-- Hata Uyarısı -->
+                        <div v-if="authError" class="p-2 mb-3 rounded small d-flex align-items-center gap-2" style="background: rgba(255, 61, 113, 0.15); border: 1px solid var(--red); color: var(--red);">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="12" y1="8" x2="12" y2="12"></line>
+                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                            </svg>
+                            <span>{{ authError }}</span>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="form-label text-muted-custom small mb-1">{{ t('auth_token_label') }}</label>
+                            <div class="position-relative">
+                                <input
+                                    :type="authShowPassword ? 'text' : 'password'"
+                                    v-model="authTokenInput"
+                                    required
+                                    autofocus
+                                    :placeholder="t('auth_token_placeholder')"
+                                    class="zmax-input w-100 pe-5"
+                                    style="font-family: monospace;"
+                                >
+                                <button
+                                    type="button"
+                                    class="btn-zmax btn-ghost"
+                                    style="position: absolute; right: 4px; top: 4px; bottom: 4px; padding: 0 10px; border: none;"
+                                    @click="authShowPassword = !authShowPassword"
+                                    :title="authShowPassword ? t('auth_hide_token') : t('auth_show_token')"
+                                >
+                                    <svg v-if="!authShowPassword" class="icon text-muted-custom" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                    </svg>
+                                    <svg v-else class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="d-flex justify-content-between align-items-center gap-2 pt-3 border-top" style="border-color: var(--border-color) !important;">
+                            <div>
+                                <button
+                                    v-if="hasActiveToken"
+                                    type="button"
+                                    class="btn-zmax btn-ghost text-danger btn-sm-compact"
+                                    @click="logoutToken"
+                                >
+                                    {{ t('auth_btn_logout') }}
+                                </button>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn-zmax btn-ghost" @click="closeAuthModal">
+                                    {{ t('auth_btn_cancel') }}
+                                </button>
+                                <button type="submit" class="btn-zmax btn-orange" :disabled="authLoading">
+                                    <span v-if="authLoading">{{ t('auth_validating') }}</span>
+                                    <span v-else>{{ t('auth_btn_login') }}</span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
 
             <!-- Sabit Alt Bilgi (Fixed Footer) -->
             <footer class="app-footer">
                 <div class="footer-left">
-                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v{{ engineVersion }}</strong> <span class="d-none d-md-inline">({{ t('footer_enterprise') }})</span></span>
+                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v1.0.01</strong> <span class="d-none d-md-inline">({{ t('footer_enterprise') }})</span></span>
                 </div>
                 <div class="footer-right">
                     <span class="footer-badge d-none d-lg-inline-flex">{{ t('footer_engine') }}</span>
@@ -773,10 +356,17 @@
         </div>
     </div>
 
-    <!-- Footer Scriptleri: Bootstrap + Vue 3 + i18n + core.js -->
+    <!-- Script Yükleme Sırası: Vue 3 -> Bootstrap -> i18n -> API Client -> Views -> App Root -->
     <script src="js/vue.global.prod.js"></script>
     <script src="js/bootstrap.bundle.min.js"></script>
     <script src="js/i18n.js"></script>
-    <script src="js/core.js"></script>
+    <script src="js/api_client.js"></script>
+    <script src="js/views/dashboard.js"></script>
+    <script src="js/views/vhosts.js"></script>
+    <script src="js/views/cache_waf.js"></script>
+    <script src="js/views/modules.js"></script>
+    <script src="js/views/logs.js"></script>
+    <script src="js/views/settings.js"></script>
+    <script src="js/app.js"></script>
 </body>
 </html>

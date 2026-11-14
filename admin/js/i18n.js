@@ -61,27 +61,7 @@ const translations = {
 
         // Hizmet Durumları
         service_status_title: "Hizmet Durumları",
-        status_unknown: "Bilinmiyor",
-
-        status_unsupported: "Desteklenmiyor",
-
-        status_warning: "Uyarı",
-
-        status_unknown_caps: "BİLİNMİYOR",
-
-        status_warning_caps: "UYARI",
-
-        svc_summary_running: "● {n}/{total} Çalışıyor",
-
-        svc_summary_unknown: "{n} Bilinmiyor",
-
-        svc_hint_need_key: "API anahtarı gerekli",
-
-        svc_hint_api_error: "API'ye erişilemedi",
-
-        svc_hint_no_probe: "Canlı PHP-FPM denetimi yok",
-
-        srv_http3_sub: "UDP/QUIC yok",
+        status_all_running: "● 8/8 Çalışıyor",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -240,7 +220,27 @@ const translations = {
         logs_domain_placeholder: "Domain filtresi (opsiyonel)...",
         btn_reopen_logs: "Log Tanıtıcılarını Yenile",
         notice_logs_reopened: "Log tanıtıcıları başarıyla yenilendi",
-        notice_logs_reopen_error: "Log tanıtıcıları yenilenirken hata oluştu"
+        notice_logs_reopen_error: "Log tanıtıcıları yenilenirken hata oluştu",
+
+        // Oturum & API Token Yönetimi
+        auth_modal_title: "API Token Girişi",
+        auth_modal_desc: "WebAdmin ve kontrol API'sine erişim için geçerli yönetici API tokeni gereklidir.",
+        auth_token_label: "Yönetici API Tokeni (X-ZMax-Token)",
+        auth_token_placeholder: "Token girin veya yapıştırın...",
+        auth_btn_login: "Giriş Yap",
+        auth_btn_logout: "Oturumu Kapat",
+        auth_btn_cancel: "İptal",
+        auth_status_logged_in: "Oturum Açık",
+        auth_status_none: "Token Yok",
+        auth_unauthorized: "Yetkisiz erişim (401). Lütfen geçerli bir API tokeni giriniz.",
+        auth_token_empty: "Lütfen bir API tokeni giriniz.",
+        auth_validating: "Doğrulanıyor...",
+        auth_active_token_info: "Kayıtlı aktif token mevcut. Değiştirebilir veya oturumu kapatabilirsiniz.",
+        auth_show_token: "Tokeni Göster",
+        auth_hide_token: "Tokeni Gizle",
+        notice_auth_success: "API tokeni doğrulandı ve oturum açıldı",
+        notice_auth_invalid: "Geçersiz API tokeni! Yetkilendirme başarısız",
+        notice_auth_logout: "API tokeni temizlendi ve çıkış yapıldı"
     },
     en: {
         brand_title: "ZPANEL",
@@ -301,27 +301,7 @@ const translations = {
 
         // Service Status
         service_status_title: "Service Status",
-        status_unknown: "Unknown",
-
-        status_unsupported: "Unsupported",
-
-        status_warning: "Warning",
-
-        status_unknown_caps: "UNKNOWN",
-
-        status_warning_caps: "WARNING",
-
-        svc_summary_running: "● {n}/{total} Running",
-
-        svc_summary_unknown: "{n} Unknown",
-
-        svc_hint_need_key: "API key required",
-
-        svc_hint_api_error: "API unreachable",
-
-        svc_hint_no_probe: "No live PHP-FPM check",
-
-        srv_http3_sub: "No UDP/QUIC",
+        status_all_running: "● 8/8 Running",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -480,7 +460,27 @@ const translations = {
         logs_domain_placeholder: "Domain filter (optional)...",
         btn_reopen_logs: "Reopen Log Handles",
         notice_logs_reopened: "Log handles reopened successfully",
-        notice_logs_reopen_error: "Error reopening log handles"
+        notice_logs_reopen_error: "Error reopening log handles",
+
+        // Auth & API Token Management
+        auth_modal_title: "API Token Authentication",
+        auth_modal_desc: "A valid administrator API token is required to access WebAdmin and Control API.",
+        auth_token_label: "Admin API Token (X-ZMax-Token)",
+        auth_token_placeholder: "Enter or paste token...",
+        auth_btn_login: "Authenticate",
+        auth_btn_logout: "Log Out",
+        auth_btn_cancel: "Cancel",
+        auth_status_logged_in: "Authenticated",
+        auth_status_none: "No Token",
+        auth_unauthorized: "Unauthorized access (401). Please provide a valid API token.",
+        auth_token_empty: "Please enter an API token.",
+        auth_validating: "Validating...",
+        auth_active_token_info: "An active token is currently stored. You can update it or log out.",
+        auth_show_token: "Show Token",
+        auth_hide_token: "Hide Token",
+        notice_auth_success: "API token verified and session authenticated",
+        notice_auth_invalid: "Invalid API token! Authentication failed",
+        notice_auth_logout: "API token cleared and logged out"
     },
     de: {
         brand_title: "ZPANEL",
@@ -531,27 +531,7 @@ const translations = {
         unit_m: "Min",
         unit_s: "Sek",
         service_status_title: "Dienststatus",
-        status_unknown: "Unbekannt",
-
-        status_unsupported: "Nicht unterstützt",
-
-        status_warning: "Warnung",
-
-        status_unknown_caps: "UNBEKANNT",
-
-        status_warning_caps: "WARNUNG",
-
-        svc_summary_running: "● {n}/{total} Läuft",
-
-        svc_summary_unknown: "{n} Unbekannt",
-
-        svc_hint_need_key: "API-Schlüssel erforderlich",
-
-        svc_hint_api_error: "API nicht erreichbar",
-
-        svc_hint_no_probe: "Keine Live-PHP-FPM-Prüfung",
-
-        srv_http3_sub: "Kein UDP/QUIC",
+        status_all_running: "● 8/8 Aktiv",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -692,7 +672,27 @@ const translations = {
         logs_domain_placeholder: "Domainfilter (optional)...",
         btn_reopen_logs: "Log-Handles neu öffnen",
         notice_logs_reopened: "Log-Handles erfolgreich neu geöffnet",
-        notice_logs_reopen_error: "Fehler beim Neuöffnen der Logs"
+        notice_logs_reopen_error: "Fehler beim Neuöffnen der Logs",
+
+        // Auth & API Token Management
+        auth_modal_title: "API-Token-Authentifizierung",
+        auth_modal_desc: "Für den Zugriff auf WebAdmin und die Steuerungs-API ist ein gültiges Administrator-Token erforderlich.",
+        auth_token_label: "Admin-API-Token (X-ZMax-Token)",
+        auth_token_placeholder: "Token eingeben oder einfügen...",
+        auth_btn_login: "Anmelden",
+        auth_btn_logout: "Abmelden",
+        auth_btn_cancel: "Abbrechen",
+        auth_status_logged_in: "Angemeldet",
+        auth_status_none: "Kein Token",
+        auth_unauthorized: "Nicht autorisierter Zugriff (401). Bitte geben Sie ein gültiges API-Token ein.",
+        auth_token_empty: "Bitte geben Sie ein API-Token ein.",
+        auth_validating: "Wird überprüft...",
+        auth_active_token_info: "Ein aktives Token ist derzeit gespeichert. Sie können es aktualisieren oder sich abmelden.",
+        auth_show_token: "Token anzeigen",
+        auth_hide_token: "Token verbergen",
+        notice_auth_success: "API-Token verifiziert und Sitzung authentifiziert",
+        notice_auth_invalid: "Ungültiges API-Token! Authentifizierung fehlgeschlagen",
+        notice_auth_logout: "API-Token gelöscht und abgemeldet"
     },
     fr: {
         brand_title: "ZPANEL",
@@ -743,27 +743,7 @@ const translations = {
         unit_m: "min",
         unit_s: "s",
         service_status_title: "État des Services",
-        status_unknown: "Inconnu",
-
-        status_unsupported: "Non pris en charge",
-
-        status_warning: "Alerte",
-
-        status_unknown_caps: "INCONNU",
-
-        status_warning_caps: "ALERTE",
-
-        svc_summary_running: "● {n}/{total} En cours",
-
-        svc_summary_unknown: "{n} inconnu",
-
-        svc_hint_need_key: "Clé API requise",
-
-        svc_hint_api_error: "API inaccessible",
-
-        svc_hint_no_probe: "Pas de contrôle PHP-FPM en direct",
-
-        srv_http3_sub: "Pas d'UDP/QUIC",
+        status_all_running: "● 8/8 Actifs",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -904,7 +884,27 @@ const translations = {
         logs_domain_placeholder: "Filtre domaine (optionnel)...",
         btn_reopen_logs: "Rouvrir les journaux",
         notice_logs_reopened: "Journaux rouverts avec succès",
-        notice_logs_reopen_error: "Erreur lors de la réouverture des journaux"
+        notice_logs_reopen_error: "Erreur lors de la réouverture des journaux",
+
+        // Auth & API Token Management
+        auth_modal_title: "Authentification par Jeton API",
+        auth_modal_desc: "Un jeton administrateur valide est requis pour accéder à WebAdmin et à l'API.",
+        auth_token_label: "Jeton API Administrateur (X-ZMax-Token)",
+        auth_token_placeholder: "Entrez ou collez le jeton...",
+        auth_btn_login: "Se connecter",
+        auth_btn_logout: "Se déconnecter",
+        auth_btn_cancel: "Annuler",
+        auth_status_logged_in: "Connecté",
+        auth_status_none: "Aucun jeton",
+        auth_unauthorized: "Accès non autorisé (401). Veuillez fournir un jeton API valide.",
+        auth_token_empty: "Veuillez entrer un jeton API.",
+        auth_validating: "Validation en cours...",
+        auth_active_token_info: "Un jeton actif est actuellement enregistré. Vous pouvez le modifier ou vous déconnecter.",
+        auth_show_token: "Afficher le jeton",
+        auth_hide_token: "Masquer le jeton",
+        notice_auth_success: "Jeton API vérifié et session authentifiée",
+        notice_auth_invalid: "Jeton API invalide ! Échec de l'authentification",
+        notice_auth_logout: "Jeton API effacé et déconnecté"
     },
     ru: {
         brand_title: "ZPANEL",
@@ -955,27 +955,7 @@ const translations = {
         unit_m: "м",
         unit_s: "с",
         service_status_title: "Статус служб",
-        status_unknown: "Неизвестно",
-
-        status_unsupported: "Не поддерживается",
-
-        status_warning: "Предупреждение",
-
-        status_unknown_caps: "НЕИЗВЕСТНО",
-
-        status_warning_caps: "ВНИМАНИЕ",
-
-        svc_summary_running: "● {n}/{total} Работает",
-
-        svc_summary_unknown: "{n} неизвестно",
-
-        svc_hint_need_key: "Требуется ключ API",
-
-        svc_hint_api_error: "API недоступен",
-
-        svc_hint_no_probe: "Нет проверки PHP-FPM в реальном времени",
-
-        srv_http3_sub: "Нет UDP/QUIC",
+        status_all_running: "● 8/8 Работает",
         srv_web_core: "ZMax Web Core",
         srv_webadmin: "ZMax WebAdmin",
         srv_php: "PHP-FPM FastCGI",
@@ -1116,7 +1096,27 @@ const translations = {
         logs_domain_placeholder: "Фильтр домена (опционально)...",
         btn_reopen_logs: "Переоткрыть логи",
         notice_logs_reopened: "Файловые дескрипторы логов обновлены",
-        notice_logs_reopen_error: "Ошибка при обновлении дескрипторов логов"
+        notice_logs_reopen_error: "Ошибка при обновлении дескрипторов логов",
+
+        // Auth & API Token Management
+        auth_modal_title: "Аутентификация по токену API",
+        auth_modal_desc: "Для доступа к WebAdmin и API управления требуется действительный токен администратора.",
+        auth_token_label: "Токен API администратора (X-ZMax-Token)",
+        auth_token_placeholder: "Введите или вставьте токен...",
+        auth_btn_login: "Войти",
+        auth_btn_logout: "Выйти",
+        auth_btn_cancel: "Отмена",
+        auth_status_logged_in: "Авторизован",
+        auth_status_none: "Нет токена",
+        auth_unauthorized: "Неавторизованный доступ (401). Пожалуйста, введите действительный токен API.",
+        auth_token_empty: "Пожалуйста, введите токен API.",
+        auth_validating: "Проверка...",
+        auth_active_token_info: "Активный токен сохранен. Вы можете изменить его или выйти.",
+        auth_show_token: "Показать токен",
+        auth_hide_token: "Скрыть токен",
+        notice_auth_success: "Токен API проверен и сессия успешно авторизована",
+        notice_auth_invalid: "Недействительный токен API! Ошибка авторизации",
+        notice_auth_logout: "Токен API удален и выполнен выход"
     }
 };
 
