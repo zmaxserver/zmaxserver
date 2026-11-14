@@ -1,7 +1,8 @@
 //! K3: doğrula→uygula yeniden yükleme (reload) ve TLS sertifika yenileme.
 
 use crate::api::ServerState;
-use crate::modules_runtime::{append_error_log, build_redis_client, compile_policies, compute_effective_auth};
+use crate::api::compute_effective_auth;
+use crate::modules_runtime::{append_error_log, build_redis_client, compile_policies};
 use std::path::Path;
 use std::sync::Arc;
 use zmax_config::{load_vhosts_dir, resolve_path, LoadedModules, LoadedVHost, ZMaxConfig};

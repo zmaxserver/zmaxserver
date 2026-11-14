@@ -18,10 +18,11 @@ use crate::api::{
 use crate::core::signals::spawn_signal_handlers;
 use crate::core::state::{RuntimeState, ServerState, ServerStats};
 use crate::core::tasks::spawn_background_tasks;
-use crate::web_engine::pipeline::l2_protocol::h2 as h2_engine;
+use crate::pipeline::l2_protocol::h2 as h2_engine;
+use crate::api::compute_effective_auth;
 use crate::logger;
 use crate::modules_runtime::{
-    append_error_log, build_redis_client, compile_policies, compute_effective_auth,
+    append_error_log, build_redis_client, compile_policies,
 };
 use crate::web_engine;
 
@@ -235,7 +236,7 @@ pub use crate::api::admin_static::handle_admin_connection;
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli_args();
     if cli.show_version {
-        println!("ZMax Server v1.0.04 (ZePanel Universal Engine)");
+        println!("ZMax Server v{} (ZePanel Universal Engine)", env!("ZMAX_VERSION"));
         return Ok(());
     }
 
@@ -302,7 +303,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "{}",
-        zpoly!("  ⚡ ZMax Server v1.0.04 - ZePanel Universal Web Engine").as_str()
+        zpoly!(concat!("  ⚡ ZMax Server v", env!("ZMAX_VERSION"), " - ZePanel Universal Web Engine")).as_str()
     );
     println!(
         "{}",
@@ -326,7 +327,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let policies = compile_policies(&config, &modules);
     let redis_client = build_redis_client(&modules);
-    let auth = compute_effective_auth(&config, None);
+    let auth = compute_effective_auth(&config);
     for notice in &auth.auto_generated_notices {
         eprintln!("{}", notice);
         append_error_log(&base_dir, notice).await;
@@ -393,17 +394,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(ServerState {
         base_dir,
         cache: zmax_cache::ZMaxCache::with_disk_dir(cache_bytes, cache_ttl, &disk_cache_dir),
-        limiter: RwLock::new(zmax_security::RateLimiter::with_whitelist(
-            rate_max,
-            config.security.allow_ips.clone(),
-        )),
-        conn_limiter: Arc::new(zmax_security::ConnLimiter::new(
-            config.security.max_concurrent_connections_per_ip,
-            config.security.allow_ips.clone(),
-        )),
-        backend_semaphores: dashmap::DashMap::new(),
+        limiter: RwLock::new(zmax_security::RateLimiter::new(rate_max)),
         ban_manager: Arc::new(zmax_security::IpBanManager::new()),
         wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
+        basic_auth: Arc::new(zmax_security::BasicAuthManager::with_max_concurrent_hashes(
+            config.security.auth_max_concurrent_hashes,
+        )),
         buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
         upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::new(fastcgi_pool_size)),
         runtime: RwLock::new(RuntimeState {
@@ -422,6 +418,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         admin_tls: admin_sni,
         api_tls: api_sni,
         log_manager: log_mgr,
+        waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
         htaccess_resolver: htaccess_res,
         shutdown: shutdown_coord,
         access_logs: Mutex::new(VecDeque::with_capacity(200)),

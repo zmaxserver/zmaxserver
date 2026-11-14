@@ -2,6 +2,7 @@
 //! HTTP/1.1 ve HTTP/2 istek boru hatları için birleştirilmiş ve ortak güvenlik denetimleri.
 //! Hotlink koruması, IP/CIDR ACL, vHost WAF, WordPress kaba kuvvet ve HTTPS zorlama kuralları.
 
+use crate::pipeline::l5_router::ResolvedVHostContext;
 pub use crate::pipeline::l4_security::{
     build_merged_vhost_acl, evaluate_request_security, record_waf_block, SecurityVerdict,
 };

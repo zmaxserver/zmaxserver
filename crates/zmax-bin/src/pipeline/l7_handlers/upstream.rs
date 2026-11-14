@@ -1,7 +1,7 @@
 //! L7 — Upstream Katmanı
 //! Arka uç havuzu, yük dengeleme (`UpstreamBalancer`), PHP backend haritası ve bağlantı semaforları.
 
-pub use zmax_pool::{LbPolicy, UpstreamBalancer, UpstreamHealth};
+pub use zmax_pool::{LbPolicy, UpstreamBalancer};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

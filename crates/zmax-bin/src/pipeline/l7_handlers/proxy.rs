@@ -3,7 +3,7 @@
 
 use crate::api::{ParsedHttpRequest, ServerState};
 use crate::pipeline::l8_response::write_http_response;
-use crate::web_engine::context::ResolvedVHostContext;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;

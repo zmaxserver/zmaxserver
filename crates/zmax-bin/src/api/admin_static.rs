@@ -1,9 +1,10 @@
-use super::super::*;
+use crate::api::*;
+use zmax_httpparser::{resolve_real_ip, HttpReadLimits};
 use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Vue 3 WebAdmin Yönetim Paneli Yöneticisi (Varsayılan: 127.0.0.1:19485)
-pub(crate) async fn handle_admin_connection<S>(
+pub async fn handle_admin_connection<S>(
     mut socket: S,
     peer_addr: SocketAddr,
     state: Arc<ServerState>,
@@ -45,7 +46,7 @@ where
     if !is_local_control
         && (state.ban_manager.is_banned(peer_addr.ip()) || state.ban_manager.is_banned(real_ip))
     {
-        web_engine::write_http_response(
+        crate::web_engine::write_http_response(
             &mut socket,
             403,
             "Forbidden",
@@ -94,7 +95,7 @@ where
                 file_info.mime_type
             };
 
-            web_engine::write_http_response(
+            crate::web_engine::write_http_response(
                 &mut socket,
                 200,
                 "OK",
@@ -117,7 +118,7 @@ where
     }
 
     let not_found = b"404 Admin File Not Found";
-    web_engine::write_http_response(
+    crate::web_engine::write_http_response(
         &mut socket,
         404,
         "Not Found",

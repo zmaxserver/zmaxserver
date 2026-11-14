@@ -2,7 +2,8 @@
 //! HTTP/1.1 (`pipeline_h1`) ve HTTP/2 (`pipeline_h2`) ayni islevleri cagirir.
 
 use crate::api::ServerState;
-use crate::modules_runtime::{resolve_vhost_security_headers, CompiledPolicies};
+use crate::modules_runtime::CompiledPolicies;
+use crate::pipeline::l8_response::resolve_vhost_security_headers;
 use crate::web_engine::DEFAULT_LOG_MAX_BYTES;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

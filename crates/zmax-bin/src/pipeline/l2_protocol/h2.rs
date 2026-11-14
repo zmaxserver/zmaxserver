@@ -1,24 +1,23 @@
-//! # L2 — HTTP/2 Protokol Yöneticisi (`pipeline/l2_protocol/h2.rs`)
-//!
-//! `h2` crate'i üzerinden HTTP/2 çerçeveleme, akış çoklama (multiplexing),
-//! akış denetimi (flow control) ve 8 katmanlı boru hattı entegrasyonu.
+//! # ZMax HTTP/2 (`h2`) Çerçeve ve İstek İşleme Motoru
+//! `h2` crate'i üzerinden TLS ALPN "h2" el sıkışmasını kabul eder,
+//! her HTTP/2 akışını `web_engine` istek boru hattına yönlendirir.
 
 use bytes::{Bytes, BytesMut};
 use h2::server::{self, SendResponse};
-use h2::RecvStream;
+use h2::{RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{debug, error};
 
-use crate::core::state::ParsedHttpRequest;
-use crate::core::state::ServerState;
-use crate::pipeline::{Outcome, RequestContext, ResponseSink, Scheme};
+use crate::api::ServerState;
+use crate::logger::AccessLogEntry;
+use crate::web_engine::{self, H2BodyReceiver, ParsedHttpRequest};
 
 const DEFAULT_H2_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-const DEFAULT_H2_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// HTTP/2 bağlantısını karşılar ve gelen tüm akışları (streams) asenkron olarak boru hattına yönlendirir.
+/// HTTP/2 bağlantısını karşılar ve gelen tüm akışları (streams) asenkron olarak yürütür.
 pub async fn handle_h2_connection<S>(
     stream: S,
     peer_addr: SocketAddr,
@@ -30,11 +29,6 @@ pub async fn handle_h2_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let _conn_guard = match state.conn_limiter.try_acquire(peer_addr.ip(), None) {
-        Ok(guard) => guard,
-        Err(()) => return Ok(()),
-    };
-
     let mut builder = server::Builder::new();
     builder
         .max_concurrent_streams(128)
@@ -42,47 +36,77 @@ where
         .max_frame_size(16384)
         .max_send_buffer_size(1024 * 1024);
 
-    let mut connection = builder.handshake(stream).await?;
-
-    let shutdown = Arc::clone(&state.shutdown);
-    let mut shutdown_sub = shutdown.subscribe();
-    let mut graceful_sent = false;
-
-    loop {
-        let accept_fut = connection.accept();
-        tokio::select! {
-            result = accept_fut => {
-                let Some(res) = result else {
-                    break;
-                };
-                let (request, respond) = match res {
-                    Ok(pair) => pair,
-                    Err(_) => break,
-                };
-
-                let state_clone = Arc::clone(&state);
-                let sni_clone = tls_sni.clone();
-
-                tokio::spawn(async move {
-                    let _ = process_h2_stream(
-                        request,
-                        respond,
-                        peer_addr,
-                        state_clone,
-                        is_https,
-                        listen_port,
-                        sni_clone,
-                    )
-                    .await;
-                });
-            }
-            change_res = shutdown_sub.changed(), if !graceful_sent => {
-                if change_res.is_ok() && *shutdown_sub.borrow() {
-                    connection.graceful_shutdown();
-                    graceful_sent = true;
-                }
-            }
+    let mut connection = match tokio::time::timeout(Duration::from_secs(10), builder.handshake(stream)).await {
+        Ok(res) => res?,
+        Err(_) => {
+            debug!(peer = %peer_addr, "HTTP/2 handshake zaman asimi (10s)");
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "HTTP/2 handshake zaman aşımı (10 saniye)",
+            )));
         }
+    };
+    debug!(peer = %peer_addr, "HTTP/2 el sikismasi tamamlandi");
+
+    let (header_timeout, keep_alive_timeout) = {
+        let rt = state.runtime.read().await;
+        let sec = &rt.config.security;
+        (
+            Duration::from_secs(sec.slowloris_header_timeout_sec.max(1)),
+            Duration::from_secs(sec.keep_alive_timeout_sec.max(1)),
+        )
+    };
+
+    let mut is_first_stream = true;
+    loop {
+        let stream_timeout = if is_first_stream {
+            header_timeout
+        } else {
+            keep_alive_timeout
+        };
+
+        let accept_res = tokio::time::timeout(stream_timeout, connection.accept()).await;
+        let result = match accept_res {
+            Ok(Some(res)) => res,
+            Ok(None) => break,
+            Err(_) => {
+                debug!(
+                    peer = %peer_addr,
+                    is_first = is_first_stream,
+                    "HTTP/2 stream bekleme zaman asimi (slowloris/keep-alive)"
+                );
+                break;
+            }
+        };
+
+        is_first_stream = false;
+
+        let (request, respond) = match result {
+            Ok(pair) => pair,
+            Err(err) => {
+                debug!(peer = %peer_addr, error = %err, "HTTP/2 stream kabul hatasi");
+                break;
+            }
+        };
+
+        let state_clone = Arc::clone(&state);
+        let sni_clone = tls_sni.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = process_h2_stream(
+                request,
+                respond,
+                peer_addr,
+                state_clone,
+                is_https,
+                listen_port,
+                sni_clone,
+            )
+            .await
+            {
+                debug!(peer = %peer_addr, error = %e, "HTTP/2 akisi sonlandi");
+            }
+        });
     }
 
     Ok(())
@@ -101,24 +125,12 @@ async fn process_h2_stream(
     let (parts, mut recv_stream) = request.into_parts();
 
     let method = parts.method.as_str().to_string();
+    let _uri_string = parts.uri.to_string();
     let path_and_query = parts
         .uri
         .path_and_query()
-        .map(|pq| {
-            let p = pq.path();
-            let q = pq.query().unwrap_or("");
-            (p.to_string(), q.to_string())
-        })
-        .unwrap_or_else(|| {
-            let raw = parts.uri.to_string();
-            if let Some((p, q)) = raw.split_once('?') {
-                (if p.is_empty() { "/".to_string() } else { p.to_string() }, q.to_string())
-            } else if raw.is_empty() {
-                ("/".to_string(), String::new())
-            } else {
-                (raw, String::new())
-            }
-        });
+        .map(|pq| (pq.path().to_string(), pq.query().unwrap_or("").to_string()))
+        .unwrap_or_else(|| ("/".to_string(), String::new()));
     let path = path_and_query.0;
     let query = path_and_query.1;
 
@@ -131,176 +143,337 @@ async fn process_h2_stream(
                 .headers
                 .get(http::header::HOST)
                 .and_then(|h| h.to_str().ok())
-                .map(|s| {
-                    if let Some(stripped) = s.strip_prefix('[') {
-                        if let Some(end) = stripped.find(']') {
-                            return stripped[..end].to_string();
-                        }
-                    }
-                    s.split(':').next().unwrap_or("").to_string()
-                })
+                .map(|s| s.split(':').next().unwrap_or("").to_string())
         })
         .unwrap_or_default();
 
-    let mut headers_vec: Vec<(String, String)> = Vec::with_capacity(parts.headers.len() + 1);
+    let mut headers_vec: Vec<(String, String)> = Vec::with_capacity(parts.headers.len());
+    let mut referer = String::new();
+    let mut user_agent = String::new();
+
     for (k, v) in parts.headers.iter() {
         let key = k.as_str().to_string();
         let val = v.to_str().unwrap_or("").to_string();
+        if key.eq_ignore_ascii_case("referer") {
+            referer = val.clone();
+        } else if key.eq_ignore_ascii_case("user-agent") {
+            user_agent = val.clone();
+        }
         headers_vec.push((key, val));
     }
 
-    if !headers_vec.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) && !authority_host.is_empty() {
+    if !headers_vec
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("host"))
+        && !authority_host.is_empty()
+    {
         headers_vec.push(("host".to_string(), authority_host.clone()));
     }
 
-    let (max_body_bytes, body_timeout) = {
+    let (max_body, body_timeout) = {
         let rt = state.runtime.read().await;
-        let mb = rt.config.security.max_body_size_mb.max(1);
-        let sec = rt.config.security.slowloris_body_timeout_sec.max(5);
-        (
-            (mb as usize) * 1024 * 1024,
-            Duration::from_secs(sec),
-        )
+        let sec = &rt.config.security;
+        let mb = sec.max_body_size_mb * 1024 * 1024;
+        let mb = if mb == 0 {
+            DEFAULT_H2_MAX_BODY_BYTES
+        } else {
+            mb
+        };
+        let bt = Duration::from_secs(sec.slowloris_body_timeout_sec.max(1));
+        (mb, bt)
     };
 
-    let body_limit = max_body_bytes.max(DEFAULT_H2_MAX_BODY_BYTES);
-    let timeout_dur = if body_timeout.as_secs() > 0 {
-        body_timeout
-    } else {
-        DEFAULT_H2_BODY_TIMEOUT
-    };
+    let mut body_buf = BytesMut::new();
 
-    let mut body_bytes = BytesMut::new();
-    let body_read_res = tokio::time::timeout(timeout_dur, async {
+    let read_body_future = async {
         while let Some(chunk_res) = recv_stream.data().await {
-            let chunk = chunk_res.map_err(|e| format!("H2 stream read error: {}", e))?;
-            if body_bytes.len() + chunk.len() > body_limit {
-                return Err("H2 body size exceeds limit".to_string());
+            let chunk = match chunk_res {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
+            if body_buf.len() + chunk.len() > max_body {
+                return false;
             }
-            body_bytes.extend_from_slice(&chunk);
+            body_buf.extend_from_slice(&chunk);
             let _ = recv_stream.flow_control().release_capacity(chunk.len());
         }
-        Ok::<(), String>(())
-    })
+        true
+    };
+
+    let body_read_ok = tokio::time::timeout(body_timeout, read_body_future)
+        .await
+        .unwrap_or(false);
+
+    let req_id = if state.runtime.read().await.config.logging.add_request_id {
+        zmax_security::generate_request_id()
+    } else {
+        String::new()
+    };
+
+    if !body_read_ok {
+        let is_head = method.eq_ignore_ascii_case("HEAD");
+        let resp = http::Response::builder()
+            .status(413)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(())?;
+        let mut send_stream = respond.send_response(resp, is_head)?;
+        let err_body = Bytes::from_static(b"413 Payload Too Large (HTTP/2)\n");
+        let bytes_sent = if is_head {
+            0
+        } else {
+            let len = err_body.len();
+            send_stream.send_data(err_body, true)?;
+            len
+        };
+
+        let client_ip_str = peer_addr.ip().to_string();
+        let target_str = if query.is_empty() {
+            path.clone()
+        } else {
+            format!("{}?{}", path, query)
+        };
+
+        state.record_access_log_detailed(
+            &client_ip_str,
+            &method,
+            &path,
+            413,
+            started.elapsed(),
+            bytes_sent,
+            &referer,
+            &user_agent,
+        );
+
+        state.log_manager.log_access(AccessLogEntry {
+            timestamp: SystemTime::now(),
+            client_ip: client_ip_str,
+            method: method.clone(),
+            target: target_str,
+            protocol: "HTTP/2.0".to_string(),
+            status: 413,
+            bytes_sent,
+            referer,
+            user_agent,
+            request_id: req_id,
+            duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+            domain: "default".to_string(),
+            target_path: None,
+            json_format: false,
+            also_write_global: true,
+            max_size_bytes: 0,
+        });
+
+        return Ok(());
+    }
+
+    let parsed_req = ParsedHttpRequest {
+        method: method.clone(),
+        path: path.clone(),
+        query: query.clone(),
+        version: 2,
+        host: authority_host.clone(),
+        headers: headers_vec,
+        body: body_buf.to_vec(),
+        keep_alive: true,
+    };
+
+    let mut proxy_stream: Option<H2BodyReceiver> = None;
+    let dispatch_res = web_engine::handle_h2_dispatched_request(
+        &parsed_req,
+        peer_addr.ip(),
+        &state,
+        is_https,
+        listen_port,
+        tls_sni.as_deref(),
+        &req_id,
+        &mut proxy_stream,
+    )
     .await;
 
-    let scheme = if is_https { Scheme::Https } else { Scheme::Http };
-
-    match body_read_res {
-        Ok(Ok(())) => {
-            let req = ParsedHttpRequest {
-                method,
-                path,
-                query,
-                version: 2,
-                host: authority_host,
-                headers: headers_vec,
-                body: body_bytes.freeze().to_vec(),
-                keep_alive: false,
+    let (status_code, resp_headers, body_bytes, log_meta) = match dispatch_res {
+        Ok(out) => out,
+        Err(err) => {
+            error!(error = %err, "HTTP/2 istek isleme hatasi");
+            let err_body = Bytes::from_static(b"500 Internal Server Error\n");
+            let mut builder = http::Response::builder().status(500);
+            builder = builder.header("content-type", "text/plain; charset=utf-8");
+            let is_head = method.eq_ignore_ascii_case("HEAD");
+            let resp = builder.body(())?;
+            let mut send_stream = respond.send_response(resp, is_head)?;
+            let bytes_sent = if is_head {
+                0
+            } else {
+                let len = err_body.len();
+                send_stream.send_data(err_body, true)?;
+                len
             };
 
-            let ctx = RequestContext {
-                peer: peer_addr,
-                real_ip: peer_addr.ip(),
-                scheme,
-                req,
-                vhost: None,
-                route: None,
-                cache_status: None,
-                started,
-                req_id: String::new(),
-                server_port: listen_port,
-                tls_sni,
+            let client_ip_str = peer_addr.ip().to_string();
+            let target_str = if query.is_empty() {
+                path.clone()
+            } else {
+                format!("{}?{}", path, query)
             };
 
-            let mut sink = ResponseSink::H2(&mut respond);
-            execute_h2_pipeline(ctx, &state, &mut sink).await?;
-        }
-        Ok(Err(err_msg)) => {
-            let mut sink = ResponseSink::H2(&mut respond);
-            let resp = crate::pipeline::ResponseContext::simple(
-                413,
-                "Payload Too Large",
-                Bytes::copy_from_slice(err_msg.as_bytes()),
-                "text/plain; charset=utf-8",
+            state.record_access_log_detailed(
+                &client_ip_str,
+                &method,
+                &path,
+                500,
+                started.elapsed(),
+                bytes_sent,
+                &referer,
+                &user_agent,
             );
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(&mut sink, &state, resp).await?;
+
+            state.log_manager.log_access(AccessLogEntry {
+                timestamp: SystemTime::now(),
+                client_ip: client_ip_str,
+                method: method.clone(),
+                target: target_str,
+                protocol: "HTTP/2.0".to_string(),
+                status: 500,
+                bytes_sent,
+                referer,
+                user_agent,
+                request_id: req_id,
+                duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+                domain: "default".to_string(),
+                target_path: None,
+                json_format: false,
+                also_write_global: true,
+                max_size_bytes: 0,
+            });
+
+            return Ok(());
         }
-        Err(_) => {
-            let mut sink = ResponseSink::H2(&mut respond);
-            let resp = crate::pipeline::ResponseContext::simple(
-                408,
-                "Request Timeout",
-                Bytes::from_static(b"408 Request Timeout - Body Read Timed Out\n"),
-                "text/plain; charset=utf-8",
-            );
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(&mut sink, &state, resp).await?;
+    };
+
+    let mut response_builder = http::Response::builder().status(status_code);
+    for (hk, hv) in &resp_headers {
+        if hk.starts_with(':')
+            || hk.eq_ignore_ascii_case("connection")
+            || hk.eq_ignore_ascii_case("keep-alive")
+            || hk.eq_ignore_ascii_case("transfer-encoding")
+            || hk.eq_ignore_ascii_case("upgrade")
+        {
+            continue;
         }
+        response_builder = response_builder.header(hk.as_str(), hv.as_str());
     }
+
+    let is_head = method.eq_ignore_ascii_case("HEAD");
+    // [kart-2] HTTP/2: HEAD, 204 veya 304 durumunda govde gonderilmez; gonderilen bayt 0
+    let is_no_body = is_head || status_code == 204 || status_code == 304;
+    let has_body = !is_no_body && !body_bytes.is_empty();
+
+    let resp = response_builder.body(())?;
+    let bytes_sent = if let Some(body_rx) = proxy_stream {
+        // Ters vekil yanıtı: gövde arka uçtan geldikçe DATA çerçevesi olarak akıtılır.
+        let mut send_stream = respond.send_response(resp, false)?;
+        stream_body_to_h2(&mut send_stream, body_rx).await
+    } else {
+        let mut send_stream = respond.send_response(resp, !has_body)?;
+        if has_body {
+            let len = body_bytes.len();
+            send_stream.send_data(body_bytes, true)?;
+            len
+        } else {
+            0
+        }
+    };
+
+    let domain_str = log_meta
+        .domain
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+
+    state.record_access_log_detailed(
+        &peer_addr.ip().to_string(),
+        &method,
+        &path,
+        status_code,
+        started.elapsed(),
+        bytes_sent,
+        &referer,
+        &user_agent,
+    );
+
+    let client_ip_str = peer_addr.ip().to_string();
+    let target_str = if query.is_empty() {
+        path.clone()
+    } else {
+        format!("{}?{}", path, query)
+    };
+
+    state.log_manager.log_access(AccessLogEntry {
+        timestamp: SystemTime::now(),
+        client_ip: client_ip_str,
+        method: method.clone(),
+        target: target_str,
+        protocol: "HTTP/2.0".to_string(),
+        status: status_code,
+        bytes_sent,
+        referer,
+        user_agent,
+        request_id: req_id,
+        duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+        domain: domain_str,
+        target_path: log_meta.custom_log_path,
+        json_format: log_meta.json_format,
+        also_write_global: log_meta.also_write_global,
+        max_size_bytes: log_meta.max_log_size_bytes,
+    });
 
     Ok(())
 }
 
-/// HTTP/2 akışı için L3 -> L8 boru hattını işletir.
-async fn execute_h2_pipeline(
-    mut ctx: RequestContext,
-    state: &Arc<ServerState>,
-    sink: &mut ResponseSink<'_>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // L2 doğrulamaları
-    let l2 = super::L2ProtocolLayer;
-    let outcome = l2.run_validations(ctx, state).await;
-    match outcome {
-        Outcome::Respond(resp) => {
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(sink, state, resp).await?;
-            return Ok(());
-        }
-        Outcome::Continue(next_ctx) => ctx = next_ctx,
+/// Kanal kapanana dek gelen gövde parçalarını h2 akış denetimine (flow control) uyarak yazar ve
+/// akışı bitirir. Arka uç hatasında akış `INTERNAL_ERROR` ile sıfırlanır; istemci akışı sıfırlarsa
+/// bırakılır (alıcı düşünce arka uç okuyucu görevi de biter). Yazılan bayt sayısını döner.
+async fn stream_body_to_h2(send: &mut SendStream<Bytes>, mut rx: H2BodyReceiver) -> usize {
+    enum Event {
+        Item(Option<Result<Bytes, std::io::Error>>),
+        ClientReset,
     }
-
-    // L3 Real IP
-    let l3 = crate::pipeline::l3_realip::L3RealIpLayer;
-    match l3.run_internal(ctx, state).await {
-        Outcome::Respond(resp) => {
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(sink, state, resp).await?;
-            return Ok(());
+    let mut sent = 0usize;
+    loop {
+        let event = tokio::select! {
+            item = rx.recv() => Event::Item(item),
+            _ = std::future::poll_fn(|cx| send.poll_reset(cx)) => Event::ClientReset,
+        };
+        match event {
+            Event::ClientReset => {
+                debug!("HTTP/2 istemcisi akisi sifirladi; vekil govdesi birakildi");
+                return sent;
+            }
+            Event::Item(None) => {
+                if let Err(e) = send.send_data(Bytes::new(), true) {
+                    debug!(error = %e, "HTTP/2 akis sonu yazilamadi");
+                }
+                return sent;
+            }
+            Event::Item(Some(Err(e))) => {
+                debug!(error = %e, "vekil govdesi yarida kesildi; akis sifirlaniyor");
+                send.send_reset(h2::Reason::INTERNAL_ERROR);
+                return sent;
+            }
+            Event::Item(Some(Ok(mut data))) => {
+                while !data.is_empty() {
+                    send.reserve_capacity(data.len());
+                    let cap = match std::future::poll_fn(|cx| send.poll_capacity(cx)).await {
+                        Some(Ok(c)) if c > 0 => c,
+                        _ => return sent,
+                    };
+                    let piece = data.split_to(cap.min(data.len()));
+                    let piece_len = piece.len();
+                    if let Err(e) = send.send_data(piece, false) {
+                        debug!(error = %e, "HTTP/2 veri cercevesi yazilamadi");
+                        return sent;
+                    }
+                    sent += piece_len;
+                }
+            }
         }
-        Outcome::Continue(next_ctx) => ctx = next_ctx,
     }
-
-    // L4 Güvenlik
-    let l4 = crate::pipeline::l4_security::L4SecurityLayer;
-    match l4.run_internal(ctx, state).await {
-        Outcome::Respond(resp) => {
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(sink, state, resp).await?;
-            return Ok(());
-        }
-        Outcome::Continue(next_ctx) => ctx = next_ctx,
-    }
-
-    // L5 Yönlendirme
-    let l5 = crate::pipeline::l5_router::L5RouterLayer;
-    match l5.run_internal(ctx, state).await {
-        Outcome::Respond(resp) => {
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(sink, state, resp).await?;
-            return Ok(());
-        }
-        Outcome::Continue(next_ctx) => ctx = next_ctx,
-    }
-
-    // L6 Önbellek
-    let l6 = crate::pipeline::l6_cache::L6CacheLayer;
-    match l6.run_internal(ctx, state).await {
-        Outcome::Respond(resp) => {
-            crate::pipeline::l8_response::L8ResponseLayer::write_response_context(sink, state, resp).await?;
-            return Ok(());
-        }
-        Outcome::Continue(next_ctx) => ctx = next_ctx,
-    }
-
-    // L7 İşleyiciler
-    let resp = crate::pipeline::l7_handlers::dispatch_handler(ctx, state, sink).await?;
-    crate::pipeline::l8_response::L8ResponseLayer::write_response_context(sink, state, resp).await?;
-
-    Ok(())
 }

@@ -139,7 +139,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use zmax_httpparser::resolve_real_ip;
 
 /// Dahili Evrensel Kontrol API Yöneticisi (Varsayılan: 127.0.0.1:19486)
-pub(crate) async fn handle_api_connection<S>(
+pub async fn handle_api_connection<S>(
     mut socket: S,
     peer_addr: SocketAddr,
     state: Arc<ServerState>,

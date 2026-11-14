@@ -14,10 +14,10 @@ pub mod redis;
 pub mod security_pipeline;
 mod web_engine;
 
-use web_engine::pipeline::l2_protocol::h2 as h2_engine;
+use pipeline::l2_protocol::h2 as h2_engine;
 
-use api::{handle_api_route, RuntimeState, ServerState, ServerStats};
-use modules_runtime::{compile_policies, compute_effective_auth};
+use api::{compute_effective_auth, handle_api_route, RuntimeState, ServerState, ServerStats};
+use modules_runtime::compile_policies;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -53,9 +53,18 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn run_request(state: &Arc<ServerState>, https: bool, raw: &str) -> String {
+        let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        run_request_with_peer(state, peer, https, raw).await
+    }
+
+    async fn run_request_with_peer(
+        state: &Arc<ServerState>,
+        peer: SocketAddr,
+        https: bool,
+        raw: &str,
+    ) -> String {
         let (mut client, server) = tokio::io::duplex(256 * 1024);
         let st = Arc::clone(state);
-        let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
         let port = if https { 443 } else { 80 };
         let task = tokio::spawn(async move {
             web_engine::handle_web_connection(server, peer, st, https, port).await
@@ -98,7 +107,9 @@ mod tests {
         std::fs::write(root.join("range.bin"), b"0123456789ABCDEF").unwrap();
         std::fs::write(root.join(".env"), "SECRET=1234").unwrap();
         std::fs::write(
-            root.join(".well-known").join("acme-challenge").join("tok123"),
+            root.join(".well-known")
+                .join("acme-challenge")
+                .join("tok123"),
             "tok123.anahtar",
         )
         .unwrap();
@@ -124,7 +135,7 @@ mod tests {
         }
         let modules = LoadedModules::load_from_dir(&base.join("modules")).unwrap();
         let policies = compile_policies(&cfg, &modules);
-        let auth = compute_effective_auth(&cfg, None);
+        let auth = compute_effective_auth(&cfg);
         Arc::new(ServerState {
             base_dir: base.clone(),
             cache: zmax_cache::ZMaxCache::with_disk_dir(
@@ -133,10 +144,9 @@ mod tests {
                 base.join("cachedata"),
             ),
             limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
-            conn_limiter: Arc::new(zmax_security::ConnLimiter::new(0, Vec::new())),
-            backend_semaphores: dashmap::DashMap::new(),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {
@@ -150,7 +160,9 @@ mod tests {
                 vhosts_dir: base.join("vhosts"),
                 modules_dir: base.join("modules"),
             }),
-            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(base.join("admin"))),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(
+                base.join("admin"),
+            )),
             tls: Arc::new(zmax_tls::SniResolver::new()),
             admin_tls: Arc::new(zmax_tls::SniResolver::new()),
             api_tls: Arc::new(zmax_tls::SniResolver::new()),
@@ -163,6 +175,7 @@ mod tests {
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
             stats: ServerStats {
                 start_time: Instant::now(),
@@ -180,7 +193,12 @@ mod tests {
     #[tokio::test]
     async fn force_https_redirects_http_but_not_acme_and_not_https() {
         let state = test_state("fh");
-        let r = run_request(&state, false, "GET /a/b?x=1 HTTP/1.1\r\nHost: site.test\r\n\r\n").await;
+        let r = run_request(
+            &state,
+            false,
+            "GET /a/b?x=1 HTTP/1.1\r\nHost: site.test\r\n\r\n",
+        )
+        .await;
         assert!(r.starts_with("HTTP/1.1 301 Moved Permanently"), "{r}");
         assert!(r.contains("Location: https://site.test/a/b?x=1\r\n"), "{r}");
 
@@ -194,7 +212,10 @@ mod tests {
         assert!(acme.ends_with("tok123.anahtar"), "{acme}");
 
         let tls = run_request(&state, true, "GET / HTTP/1.1\r\nHost: site.test\r\n\r\n").await;
-        assert!(tls.starts_with("HTTP/1.1 200 OK") && tls.ends_with("ANASAYFA"), "{tls}");
+        assert!(
+            tls.starts_with("HTTP/1.1 200 OK") && tls.ends_with("ANASAYFA"),
+            "{tls}"
+        );
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
 
@@ -218,7 +239,10 @@ mod tests {
             "GET /altklasor/ HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r_dir.starts_with("HTTP/1.1 200 OK") && r_dir.ends_with("ALT_INDEX"), "{r_dir}");
+        assert!(
+            r_dir.starts_with("HTTP/1.1 200 OK") && r_dir.ends_with("ALT_INDEX"),
+            "{r_dir}"
+        );
 
         // 3. ETag çıkar + If-None-Match 304 doğrulaması
         let etag_line = r_dir
@@ -257,7 +281,10 @@ mod tests {
             "GET /range.bin HTTP/1.1\r\nHost: site.test\r\nRange: bytes=999-1005\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r_416.starts_with("HTTP/1.1 416 Range Not Satisfiable"), "{r_416}");
+        assert!(
+            r_416.starts_with("HTTP/1.1 416 Range Not Satisfiable"),
+            "{r_416}"
+        );
 
         // 5. HEAD gövdesiz ama Content-Length doğru
         let r_head = run_request(
@@ -285,7 +312,11 @@ mod tests {
     async fn keepalive_pipelining_gzip_and_413_payload_limit() {
         let state = test_state_with("ka", false, "[security]\nmax_body_size_mb = 1\n");
         let big_html = "<div>Merhaba ZMax GZIP Testi</div>".repeat(40);
-        std::fs::write(state.base_dir.join("www").join("site").join("big.html"), &big_html).unwrap();
+        std::fs::write(
+            state.base_dir.join("www").join("site").join("big.html"),
+            &big_html,
+        )
+        .unwrap();
 
         // 1. Tek bağlantıda 2 Keep-Alive isteği + 2. istekte gzip
         let two_reqs = concat!(
@@ -294,14 +325,24 @@ mod tests {
         );
         let resp_bytes = run_request_raw(&state, false, two_reqs.as_bytes()).await;
         let resp_lossy = String::from_utf8_lossy(&resp_bytes);
-        assert!(resp_lossy.contains("Connection: keep-alive"), "{resp_lossy}");
-        assert!(resp_lossy.contains("Content-Encoding: gzip"), "{resp_lossy}");
+        assert!(
+            resp_lossy.contains("Connection: keep-alive"),
+            "{resp_lossy}"
+        );
+        assert!(
+            resp_lossy.contains("Content-Encoding: gzip"),
+            "{resp_lossy}"
+        );
         assert!(resp_lossy.contains("ANASAYFA"), "{resp_lossy}");
 
         // 2. 1 MiB aşan Content-Length -> sessiz kesme yok, 413 Payload Too Large!
-        let oversized = "POST /index.html HTTP/1.1\r\nHost: site.test\r\nContent-Length: 2097152\r\n\r\n";
+        let oversized =
+            "POST /index.html HTTP/1.1\r\nHost: site.test\r\nContent-Length: 2097152\r\n\r\n";
         let r_413 = run_request(&state, false, oversized).await;
-        assert!(r_413.starts_with("HTTP/1.1 413 Payload Too Large"), "{r_413}");
+        assert!(
+            r_413.starts_with("HTTP/1.1 413 Payload Too Large"),
+            "{r_413}"
+        );
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
 
@@ -333,7 +374,10 @@ mod tests {
         client.read_to_end(&mut out).await.unwrap();
         t.await.unwrap().unwrap();
         let admin_resp = String::from_utf8_lossy(&out);
-        assert!(admin_resp.starts_with("HTTP/1.1 401 Unauthorized"), "{admin_resp}");
+        assert!(
+            admin_resp.starts_with("HTTP/1.1 401 Unauthorized"),
+            "{admin_resp}"
+        );
 
         // WP Brute force 4. denemede 403 ve ban_manager kaydı
         for i in 0..4 {
@@ -412,7 +456,10 @@ mod tests {
                 }
                 req_buf.extend_from_slice(&tmp[..n]);
                 // Boş FCGI_STDIN kaydını görünce dur (type=5, content_len=0)
-                if req_buf.windows(8).any(|w| w[0] == 1 && w[1] == 5 && w[4] == 0 && w[5] == 0) {
+                if req_buf
+                    .windows(8)
+                    .any(|w| w[0] == 1 && w[1] == 5 && w[4] == 0 && w[5] == 0)
+                {
                     break;
                 }
             }
@@ -516,9 +563,11 @@ mod tests {
             let req_txt = String::from_utf8_lossy(&buf[..n]);
             assert!(req_txt.contains("X-Forwarded-For: 127.0.0.1"), "{req_txt}");
             assert!(req_txt.contains("X-Forwarded-Proto: http"), "{req_txt}");
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nPROXY_BODY")
-                .await
-                .unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nPROXY_BODY",
+            )
+            .await
+            .unwrap();
         });
 
         {
@@ -535,7 +584,10 @@ mod tests {
         )
         .await;
         backend.await.unwrap();
-        assert!(resp.starts_with("HTTP/1.1 200 OK") && resp.ends_with("PROXY_BODY"), "{resp}");
+        assert!(
+            resp.starts_with("HTTP/1.1 200 OK") && resp.ends_with("PROXY_BODY"),
+            "{resp}"
+        );
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
 
@@ -549,8 +601,18 @@ mod tests {
         .unwrap();
         reload_runtime_state(&state).await.unwrap();
 
-        state.ban_manager.ban("10.20.30.40".parse().unwrap(), "WordPress brute-force (11 deneme)", 300);
-        state.record_access_log("127.0.0.1", "GET", "/test-log", 200, Duration::from_millis(2));
+        state.ban_manager.ban(
+            "10.20.30.40".parse().unwrap(),
+            "WordPress brute-force (11 deneme)",
+            300,
+        );
+        state.record_access_log(
+            "127.0.0.1",
+            "GET",
+            "/test-log",
+            200,
+            Duration::from_millis(2),
+        );
         state
             .cache
             .set_with_ttl(
@@ -593,10 +655,16 @@ mod tests {
         };
 
         let mods = call_api("GET", "/api/v1/modules", "").await;
-        assert!(mods.contains("\"mod_gzip\"") && mods.contains("\"categoryKey\":\"perf\""), "{mods}");
+        assert!(
+            mods.contains("\"mod_gzip\"") && mods.contains("\"categoryKey\":\"perf\""),
+            "{mods}"
+        );
 
         let bans = call_api("GET", "/api/v1/security/bans", "").await;
-        assert!(bans.contains("10.20.30.40") && bans.contains("reason_bruteforce"), "{bans}");
+        assert!(
+            bans.contains("10.20.30.40") && bans.contains("reason_bruteforce"),
+            "{bans}"
+        );
 
         let unban = call_api("POST", "/api/v1/security/unban", r#"{"ip":"10.20.30.40"}"#).await;
         assert!(unban.contains("\"unbanned\":true"), "{unban}");
@@ -606,7 +674,10 @@ mod tests {
         assert!(logs.contains("/test-log"), "{logs}");
 
         let purge = call_api("POST", "/api/v1/cache/purge", r#"{"tag":"etiket1"}"#).await;
-        assert!(purge.contains("\"scope\":\"tag\"") && purge.contains("\"purged\":1"), "{purge}");
+        assert!(
+            purge.contains("\"scope\":\"tag\"") && purge.contains("\"purged\":1"),
+            "{purge}"
+        );
         assert!(state.cache.get("k1").await.is_none());
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
@@ -616,11 +687,8 @@ mod tests {
     async fn dual_listener_same_port_is_rejected_without_reuse_port() {
         let first = create_reuse_listener("127.0.0.1:0".parse().unwrap(), 128, false).unwrap();
         let port = first.local_addr().unwrap().port();
-        let second = create_reuse_listener(
-            format!("127.0.0.1:{}", port).parse().unwrap(),
-            128,
-            false,
-        );
+        let second =
+            create_reuse_listener(format!("127.0.0.1:{}", port).parse().unwrap(), 128, false);
         assert!(
             second.is_err(),
             "reuse_port=false iken ayni porta ikinci dinleyici baglanamamali"
@@ -652,7 +720,9 @@ mod tests {
                 i += 1;
                 l
             } else if i + 4 <= bytes.len() {
-                let l = u32::from_be_bytes([bytes[i] & 0x7f, bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+                let l =
+                    u32::from_be_bytes([bytes[i] & 0x7f, bytes[i + 1], bytes[i + 2], bytes[i + 3]])
+                        as usize;
                 i += 4;
                 l
             } else {
@@ -663,7 +733,9 @@ mod tests {
                 i += 1;
                 l
             } else if i + 4 <= bytes.len() {
-                let l = u32::from_be_bytes([bytes[i] & 0x7f, bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+                let l =
+                    u32::from_be_bytes([bytes[i] & 0x7f, bytes[i + 1], bytes[i + 2], bytes[i + 3]])
+                        as usize;
                 i += 4;
                 l
             } else {
@@ -673,7 +745,8 @@ mod tests {
                 break;
             }
             let name = String::from_utf8_lossy(&bytes[i..i + name_len]).into_owned();
-            let val = String::from_utf8_lossy(&bytes[i + name_len..i + name_len + val_len]).into_owned();
+            let val =
+                String::from_utf8_lossy(&bytes[i + name_len..i + name_len + val_len]).into_owned();
             map.insert(name, val);
             i += name_len + val_len;
         }
@@ -708,7 +781,10 @@ mod tests {
             "GET / HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r_ok.starts_with("HTTP/1.1 200 OK") && r_ok.contains("ANASAYFA"), "{r_ok}");
+        assert!(
+            r_ok.starts_with("HTTP/1.1 200 OK") && r_ok.contains("ANASAYFA"),
+            "{r_ok}"
+        );
 
         let r_non_allow = run_request_from_peer(
             &state,
@@ -716,7 +792,10 @@ mod tests {
             "GET / HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r_non_allow.contains("403 Forbidden") && r_non_allow.contains("IP Access Denied"), "{r_non_allow}");
+        assert!(
+            r_non_allow.contains("403 Forbidden") && r_non_allow.contains("IP Access Denied"),
+            "{r_non_allow}"
+        );
 
         let r_global_deny = run_request_from_peer(
             &state,
@@ -744,7 +823,10 @@ mod tests {
             "GET /logo.png HTTP/1.1\r\nHost: site.test\r\nReferer: https://spammer.example/x.html\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(blocked.starts_with("HTTP/1.1 403 Forbidden") && blocked.contains("Hotlink Protection"), "{blocked}");
+        assert!(
+            blocked.starts_with("HTTP/1.1 403 Forbidden") && blocked.contains("Hotlink Protection"),
+            "{blocked}"
+        );
 
         let allowed_same = run_request(
             &state,
@@ -752,7 +834,10 @@ mod tests {
             "GET /logo.png HTTP/1.1\r\nHost: site.test\r\nReferer: https://www.site.test/anasayfa\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(allowed_same.starts_with("HTTP/1.1 200 OK") && allowed_same.contains("PNGDATA"), "{allowed_same}");
+        assert!(
+            allowed_same.starts_with("HTTP/1.1 200 OK") && allowed_same.contains("PNGDATA"),
+            "{allowed_same}"
+        );
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
@@ -792,7 +877,10 @@ mod tests {
             "GET /foto.jpg HTTP/1.1\r\nHost: site.test\r\nAccept: image/webp,*/*\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(webp.contains("Content-Type: image/webp") && webp.ends_with("WEBP_OPT"), "{webp}");
+        assert!(
+            webp.contains("Content-Type: image/webp") && webp.ends_with("WEBP_OPT"),
+            "{webp}"
+        );
 
         let jpeg = run_request(
             &state,
@@ -800,7 +888,10 @@ mod tests {
             "GET /foto.jpg HTTP/1.1\r\nHost: site.test\r\nAccept: image/png,*/*\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(jpeg.contains("Content-Type: image/jpeg") && jpeg.ends_with("JPEG_RAW"), "{jpeg}");
+        assert!(
+            jpeg.contains("Content-Type: image/jpeg") && jpeg.ends_with("JPEG_RAW"),
+            "{jpeg}"
+        );
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
@@ -888,14 +979,22 @@ mod tests {
 
     #[tokio::test]
     async fn cache_swr_serves_stale_and_revalidates() {
-        let cfg = "[cache]\nenabled = true\ndefault_ttl_seconds = 60\nstale_while_revalidate_sec = 30\n";
+        let cfg =
+            "[cache]\nenabled = true\ndefault_ttl_seconds = 60\nstale_while_revalidate_sec = 30\n";
         let state = test_state_with("swr_static", false, cfg);
         {
             let mut rt = state.runtime.write().await;
             rt.vhosts[0].entry.cache.enabled = true;
         }
 
-        let key = zmax_cache::build_cache_key("site.test", false, "GET", "/index.html", "", Some("identity"));
+        let key = zmax_cache::build_cache_key(
+            "site.test",
+            false,
+            "GET",
+            "/index.html",
+            "",
+            Some("identity"),
+        );
         state
             .cache
             .set_with_ttl_and_stale(
@@ -920,7 +1019,43 @@ mod tests {
         assert!(stale_resp.contains("X-Cache: STALE"), "{stale_resp}");
         assert!(stale_resp.contains("BAYAT_YANIT"), "{stale_resp}");
 
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        // Sabit sleep yerine arka plan yenileme liderinin StampedeGuard (Notify) sinyaliyle bekle
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                state.cache.get_with_stale(&key).await,
+                zmax_cache::CacheLookup::Fresh(_)
+            ) {
+                break;
+            }
+            match state.cache.try_acquire_fill(&key) {
+                zmax_cache::StampedeSlot::Follower(notify) => {
+                    let notified = notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if matches!(
+                        state.cache.get_with_stale(&key).await,
+                        zmax_cache::CacheLookup::Fresh(_)
+                    ) {
+                        break;
+                    }
+                    tokio::time::timeout_at(deadline, notified)
+                        .await
+                        .expect("SWR arka plan yenilemesi zaman asimina ugradi");
+                }
+                zmax_cache::StampedeSlot::Leader(guard) => {
+                    drop(guard);
+                    assert!(
+                        matches!(
+                            state.cache.get_with_stale(&key).await,
+                            zmax_cache::CacheLookup::Fresh(_)
+                        ),
+                        "SWR yenileme lideri tamamlandigi halde onbellek taze olmaliydi"
+                    );
+                    break;
+                }
+            }
+        }
 
         let fresh_resp = run_request(
             &state,
@@ -952,9 +1087,11 @@ mod tests {
                 if n == 0 {
                     break;
                 }
-                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nPONG")
-                    .await
-                    .unwrap();
+                sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nPONG",
+                )
+                .await
+                .unwrap();
                 sock.flush().await.unwrap();
             }
             tokio::time::sleep(Duration::from_millis(80)).await;
@@ -975,7 +1112,10 @@ mod tests {
             "GET /api/ping HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r1.starts_with("HTTP/1.1 200 OK") && r1.ends_with("PONG"), "{r1}");
+        assert!(
+            r1.starts_with("HTTP/1.1 200 OK") && r1.ends_with("PONG"),
+            "{r1}"
+        );
         assert_eq!(state.upstream_pool.idle_count(&up_addr), 1);
 
         let r2 = run_request(
@@ -984,7 +1124,10 @@ mod tests {
             "GET /api/ping HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(r2.starts_with("HTTP/1.1 200 OK") && r2.ends_with("PONG"), "{r2}");
+        assert!(
+            r2.starts_with("HTTP/1.1 200 OK") && r2.ends_with("PONG"),
+            "{r2}"
+        );
         srv.await.unwrap();
 
         assert_eq!(accepts.load(AtomicOrdering::SeqCst), 1);
@@ -999,9 +1142,10 @@ mod tests {
 
         let (mut client_ui, server_ui) = tokio::io::duplex(64 * 1024);
         let st_ui = Arc::clone(&state);
-        let t_ui = tokio::spawn(async move {
-            handle_admin_connection(server_ui, peer, st_ui, false).await
-        });
+        let t_ui =
+            tokio::spawn(
+                async move { handle_admin_connection(server_ui, peer, st_ui, false).await },
+            );
         client_ui
             .write_all(b"GET /zmax-panel/index.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
@@ -1011,13 +1155,17 @@ mod tests {
         client_ui.read_to_end(&mut out_ui).await.unwrap();
         t_ui.await.unwrap().unwrap();
         let ui_str = String::from_utf8_lossy(&out_ui);
-        assert!(ui_str.starts_with("HTTP/1.1 200 OK") && ui_str.contains("ADMIN_UI"), "{ui_str}");
+        assert!(
+            ui_str.starts_with("HTTP/1.1 200 OK") && ui_str.contains("ADMIN_UI"),
+            "{ui_str}"
+        );
 
         let (mut client_api, server_api) = tokio::io::duplex(64 * 1024);
         let st_api = Arc::clone(&state);
-        let t_api = tokio::spawn(async move {
-            handle_admin_connection(server_api, peer, st_api, true).await
-        });
+        let t_api =
+            tokio::spawn(
+                async move { handle_admin_connection(server_api, peer, st_api, true).await },
+            );
         client_api
             .write_all(b"GET /zmax-panel/api/v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
@@ -1027,7 +1175,10 @@ mod tests {
         client_api.read_to_end(&mut out_api).await.unwrap();
         t_api.await.unwrap().unwrap();
         let api_str = String::from_utf8_lossy(&out_api);
-        assert!(api_str.starts_with("HTTP/1.1 200 OK") && api_str.contains("\"status\":\"ok\""), "{api_str}");
+        assert!(
+            api_str.starts_with("HTTP/1.1 200 OK") && api_str.contains("\"status\":\"ok\""),
+            "{api_str}"
+        );
 
         let bad_tls = zmax_tls::build_single_cert_acceptor(
             &state.base_dir.join("yok.crt"),
@@ -1052,9 +1203,8 @@ mod tests {
         let (mut c_local, s_local) = tokio::io::duplex(64 * 1024);
         let st_local = Arc::clone(&state);
         let local_peer: SocketAddr = "127.0.0.1:53000".parse().unwrap();
-        let t_local = tokio::spawn(async move {
-            handle_api_connection(s_local, local_peer, st_local).await
-        });
+        let t_local =
+            tokio::spawn(async move { handle_api_connection(s_local, local_peer, st_local).await });
         c_local
             .write_all(b"GET /api/v1/security/bans HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
             .await
@@ -1085,13 +1235,17 @@ mod tests {
         c_remote.read_to_end(&mut out_remote).await.unwrap();
         t_remote.await.unwrap().unwrap();
         let remote_str = String::from_utf8_lossy(&out_remote);
-        assert!(remote_str.starts_with("HTTP/1.1 403 Forbidden"), "{remote_str}");
+        assert!(
+            remote_str.starts_with("HTTP/1.1 403 Forbidden"),
+            "{remote_str}"
+        );
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
 
     fn test_state_two_vhosts(tag: &str) -> Arc<ServerState> {
-        let base = std::env::temp_dir().join(format!("zmax_bin_2vh_{}_{}", tag, std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("zmax_bin_2vh_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root_a = base.join("www").join("vhost-a");
         let root_b = base.join("www").join("vhost-b");
@@ -1127,7 +1281,6 @@ mod tests {
         entry_a.logging.error_log = "logs/vhost-a.error.log".into();
         entry_a.security.waf_enabled = Some(true);
         entry_a.security.waf_exclude_paths = vec!["/muaf-yol".into()];
-        entry_a.error_docs.enabled = true; // web_engine özel hata sayfasını yalnız [vhost.error_docs] enabled=true iken sunar
         entry_a.error_docs.dir = "err".into();
         entry_a.error_docs.pages.insert(404, "404.html".into());
         entry_a.php.enabled = false;
@@ -1159,7 +1312,7 @@ mod tests {
         cfg.cache.enabled = false;
         let modules = LoadedModules::load_from_dir(&base.join("modules")).unwrap();
         let policies = compile_policies(&cfg, &modules);
-        let auth = compute_effective_auth(&cfg, None);
+        let auth = compute_effective_auth(&cfg);
 
         Arc::new(ServerState {
             base_dir: base.clone(),
@@ -1169,10 +1322,9 @@ mod tests {
                 base.join("cachedata"),
             ),
             limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
-            conn_limiter: Arc::new(zmax_security::ConnLimiter::new(0, Vec::new())),
-            backend_semaphores: dashmap::DashMap::new(),
             ban_manager: Arc::new(zmax_security::IpBanManager::new()),
             wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
             buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
             upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
             runtime: RwLock::new(RuntimeState {
@@ -1186,7 +1338,9 @@ mod tests {
                 vhosts_dir: base.join("vhosts"),
                 modules_dir: base.join("modules"),
             }),
-            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(base.join("admin"))),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(
+                base.join("admin"),
+            )),
             tls: Arc::new(zmax_tls::SniResolver::new()),
             admin_tls: Arc::new(zmax_tls::SniResolver::new()),
             api_tls: Arc::new(zmax_tls::SniResolver::new()),
@@ -1199,6 +1353,7 @@ mod tests {
             )),
             htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
             shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
             access_logs: Mutex::new(VecDeque::with_capacity(64)),
             stats: ServerStats {
                 start_time: Instant::now(),
@@ -1212,11 +1367,27 @@ mod tests {
     #[tokio::test]
     async fn two_vhosts_isolated_logging_and_reopen_writes_to_new_file() {
         let state = test_state_two_vhosts("log_iso");
-        let r1 = run_request(&state, false, "GET / HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n").await;
-        assert!(r1.starts_with("HTTP/1.1 200 OK") && r1.contains("VHOST_A_BODY_12345"), "{r1}");
+        let r1 = run_request(
+            &state,
+            false,
+            "GET / HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r1.starts_with("HTTP/1.1 200 OK") && r1.contains("VHOST_A_BODY_12345"),
+            "{r1}"
+        );
 
-        let r2 = run_request(&state, false, "GET / HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n").await;
-        assert!(r2.starts_with("HTTP/1.1 200 OK") && r2.contains("VHOST_B_BODY_67890"), "{r2}");
+        let r2 = run_request(
+            &state,
+            false,
+            "GET / HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r2.starts_with("HTTP/1.1 200 OK") && r2.contains("VHOST_B_BODY_67890"),
+            "{r2}"
+        );
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         state.log_manager.flush().await;
@@ -1230,30 +1401,61 @@ mod tests {
         let content_b = std::fs::read_to_string(&log_b).unwrap();
 
         let line_a = content_a.lines().next().unwrap_or("");
-        assert!(line_a.contains("GET / HTTP/1.1"), "Istek satiri bulunmali: {line_a}");
-        assert!(line_a.contains("[") && line_a.contains("]"), "Zaman damgasi olmali: {line_a}");
+        assert!(
+            line_a.contains("GET / HTTP/1.1"),
+            "Istek satiri bulunmali: {line_a}"
+        );
+        assert!(
+            line_a.contains("[") && line_a.contains("]"),
+            "Zaman damgasi olmali: {line_a}"
+        );
         let parts_a: Vec<&str> = line_a.split_whitespace().collect();
-        let status_idx_a = parts_a.iter().position(|&p| p == "200").expect("200 status kodu bulunmali");
-        let bytes_sent_a: usize = parts_a[status_idx_a + 1].parse().expect("Sayisal bayt degeri olmali");
-        assert_eq!(bytes_sent_a, 18, "vhost-a govde uzunlugu (VHOST_A_BODY_12345 = 18 bayt) olmali: {line_a}");
+        let status_idx_a = parts_a
+            .iter()
+            .position(|&p| p == "200")
+            .expect("200 status kodu bulunmali");
+        let bytes_sent_a: usize = parts_a[status_idx_a + 1]
+            .parse()
+            .expect("Sayisal bayt degeri olmali");
+        assert_eq!(
+            bytes_sent_a, 18,
+            "vhost-a govde uzunlugu (VHOST_A_BODY_12345 = 18 bayt) olmali: {line_a}"
+        );
         assert!(!line_a.contains(" 200 - "), "'-' bayt reddedilmeli");
         assert!(!line_a.contains(" 200 0 "), "'0' bayt reddedilmeli");
 
         let line_b = content_b.lines().next().unwrap_or("");
         let parts_b: Vec<&str> = line_b.split_whitespace().collect();
-        let status_idx_b = parts_b.iter().position(|&p| p == "200").expect("200 status kodu bulunmali");
-        let bytes_sent_b: usize = parts_b[status_idx_b + 1].parse().expect("Sayisal bayt degeri olmali");
-        assert_eq!(bytes_sent_b, 18, "vhost-b govde uzunlugu (VHOST_B_BODY_67890 = 18 bayt) olmali: {line_b}");
+        let status_idx_b = parts_b
+            .iter()
+            .position(|&p| p == "200")
+            .expect("200 status kodu bulunmali");
+        let bytes_sent_b: usize = parts_b[status_idx_b + 1]
+            .parse()
+            .expect("Sayisal bayt degeri olmali");
+        assert_eq!(
+            bytes_sent_b, 18,
+            "vhost-b govde uzunlugu (VHOST_B_BODY_67890 = 18 bayt) olmali: {line_b}"
+        );
 
         // reopen_all cagir ve yeni log satirini dogrula
         state.log_manager.reopen_all().await;
-        let r3 = run_request(&state, false, "GET / HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n").await;
+        let r3 = run_request(
+            &state,
+            false,
+            "GET / HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n",
+        )
+        .await;
         assert!(r3.starts_with("HTTP/1.1 200 OK"));
         tokio::time::sleep(Duration::from_millis(50)).await;
         state.log_manager.flush().await;
 
         let content_a2 = std::fs::read_to_string(&log_a).unwrap();
-        assert_eq!(content_a2.lines().count(), 2, "reopen_all sonrasi yeni satirlar yazilmali");
+        assert_eq!(
+            content_a2.lines().count(),
+            2,
+            "reopen_all sonrasi yeni satirlar yazilmali"
+        );
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
@@ -1261,14 +1463,35 @@ mod tests {
     #[tokio::test]
     async fn vhost_custom_error_docs_404_vs_default() {
         let state = test_state_two_vhosts("err_docs");
-        let r_a = run_request(&state, false, "GET /yok-sayfa.html HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n").await;
+        let r_a = run_request(
+            &state,
+            false,
+            "GET /yok-sayfa.html HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n",
+        )
+        .await;
         assert!(r_a.starts_with("HTTP/1.1 404 Not Found"), "{r_a}");
-        assert!(r_a.contains("CUSTOM_404_PAGE_FOR_VHOST_A"), "vhost-a ozel 404 sayfasi dondurmelidir: {r_a}");
+        assert!(
+            r_a.contains("CUSTOM_404_PAGE_FOR_VHOST_A"),
+            "vhost-a ozel 404 sayfasi dondurmelidir: {r_a}"
+        );
 
-        let r_b = run_request(&state, false, "GET /yok-sayfa.html HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n").await;
+        let r_b = run_request(
+            &state,
+            false,
+            "GET /yok-sayfa.html HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n",
+        )
+        .await;
         assert!(r_b.starts_with("HTTP/1.1 404 Not Found"), "{r_b}");
-        assert!(!r_b.contains("CUSTOM_404_PAGE_FOR_VHOST_A"), "vhost-b varsayilan sayfa dondurmelidir: {r_b}");
-        assert!(r_b.contains("404 Not Found") || r_b.contains("Sayfa Bulunamadı") || r_b.contains("ZMax"), "{r_b}");
+        assert!(
+            !r_b.contains("CUSTOM_404_PAGE_FOR_VHOST_A"),
+            "vhost-b varsayilan sayfa dondurmelidir: {r_b}"
+        );
+        assert!(
+            r_b.contains("404 Not Found")
+                || r_b.contains("Sayfa Bulunamadı")
+                || r_b.contains("ZMax"),
+            "{r_b}"
+        );
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
@@ -1277,16 +1500,40 @@ mod tests {
     async fn vhost_per_domain_waf_policy_and_exclude_paths() {
         let state = test_state_two_vhosts("waf_policy");
         // vhost-a WAF acik -> 403 Forbidden
-        let r_a_attack = run_request(&state, false, "GET /?q=union+select+1,2,3 HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n").await;
-        assert!(r_a_attack.starts_with("HTTP/1.1 403 Forbidden"), "vhost-a WAF saldiriyi engellemeli: {r_a_attack}");
+        let r_a_attack = run_request(
+            &state,
+            false,
+            "GET /?q=union+select+1,2,3 HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_a_attack.starts_with("HTTP/1.1 403 Forbidden"),
+            "vhost-a WAF saldiriyi engellemeli: {r_a_attack}"
+        );
 
         // vhost-a muaf yol -> 403 olmamali
-        let r_a_exempt = run_request(&state, false, "GET /muaf-yol?q=union+select+1,2,3 HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n").await;
-        assert!(!r_a_exempt.starts_with("HTTP/1.1 403 Forbidden"), "vhost-a muaf yol engellenmemeli: {r_a_exempt}");
+        let r_a_exempt = run_request(
+            &state,
+            false,
+            "GET /muaf-yol?q=union+select+1,2,3 HTTP/1.1\r\nHost: vhost-a.test\r\n\r\n",
+        )
+        .await;
+        assert!(
+            !r_a_exempt.starts_with("HTTP/1.1 403 Forbidden"),
+            "vhost-a muaf yol engellenmemeli: {r_a_exempt}"
+        );
 
         // vhost-b WAF kapali -> 200 OK (engellenmemeli)
-        let r_b_attack = run_request(&state, false, "GET /?q=union+select+1,2,3 HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n").await;
-        assert!(r_b_attack.starts_with("HTTP/1.1 200 OK"), "vhost-b WAF kapali oldugu icin gecmeli: {r_b_attack}");
+        let r_b_attack = run_request(
+            &state,
+            false,
+            "GET /?q=union+select+1,2,3 HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_b_attack.starts_with("HTTP/1.1 200 OK"),
+            "vhost-b WAF kapali oldugu icin gecmeli: {r_b_attack}"
+        );
 
         let _ = std::fs::remove_dir_all(&state.base_dir);
     }
@@ -1303,7 +1550,9 @@ mod tests {
             let _ = h2_engine::handle_h2_connection(server_io, peer, st_h2, false, 80, None).await;
         });
 
-        let (mut client, h2_conn) = h2::client::handshake(client_io).await.expect("h2 client handshake");
+        let (mut client, h2_conn) = h2::client::handshake(client_io)
+            .await
+            .expect("h2 client handshake");
         tokio::spawn(async move {
             let _ = h2_conn.await;
         });
@@ -1318,7 +1567,11 @@ mod tests {
         let (response, _send_stream) = client.send_request(req, true).expect("h2 send request");
         let resp = response.await.expect("h2 response");
         let (parts, mut body_stream) = resp.into_parts();
-        assert_eq!(parts.status, http::StatusCode::OK, "HTTP/2 yaniti 200 OK olmalidir");
+        assert_eq!(
+            parts.status,
+            http::StatusCode::OK,
+            "HTTP/2 yaniti 200 OK olmalidir"
+        );
 
         let mut body_buf = Vec::new();
         while let Some(chunk) = body_stream.data().await {
@@ -1327,13 +1580,1292 @@ mod tests {
             let _ = body_stream.flow_control().release_capacity(b.len());
         }
         let body_str = String::from_utf8_lossy(&body_buf);
-        assert!(body_str.contains("VHOST_A_BODY_12345"), "HTTP/2 govdesi dogru donmeli: {body_str}");
+        assert!(
+            body_str.contains("VHOST_A_BODY_12345"),
+            "HTTP/2 govdesi dogru donmeli: {body_str}"
+        );
 
         // 2. Eşzamanlı HTTP/1.1 isteği etkilenmemeli ve doğru dönmeli
-        let r_h1 = run_request(&state, false, "GET / HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n").await;
-        assert!(r_h1.starts_with("HTTP/1.1 200 OK") && r_h1.contains("VHOST_B_BODY_67890"), "HTTP/1.1 etkilenmemeli: {r_h1}");
+        let r_h1 = run_request(
+            &state,
+            false,
+            "GET / HTTP/1.1\r\nHost: vhost-b.test\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_h1.starts_with("HTTP/1.1 200 OK") && r_h1.contains("VHOST_B_BODY_67890"),
+            "HTTP/1.1 etkilenmemeli: {r_h1}"
+        );
 
         let _ = h2_srv;
         let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn kart2_real_bytes_all_response_types_and_panel_compatibility() {
+        // 1. Mock proxy backend
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            // Req 1: GET
+            let (mut sock, _) = proxy_listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nPROXY_DATA",
+            )
+            .await
+            .unwrap();
+            let _ = sock.shutdown().await;
+
+            // Req 2: HEAD
+            let (mut sock2, _) = proxy_listener.accept().await.unwrap();
+            let mut buf2 = [0u8; 1024];
+            let _ = sock2.read(&mut buf2).await.unwrap();
+            sock2
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let _ = sock2.shutdown().await;
+        });
+
+        // 2. Mock FastCGI backend
+        let fcgi_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fcgi_addr = fcgi_listener.local_addr().unwrap().to_string();
+        let fcgi_task = tokio::spawn(async move {
+            // Req 1: GET
+            {
+                let (mut sock, _) = fcgi_listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await.unwrap();
+                let body = "Status: 200 OK\r\nContent-Type: text/plain\r\n\r\nFASTCGI_OUTPUT"; // 14 bayt
+                let mut resp = build_fcgi_record(6, 1, body.as_bytes());
+                resp.extend_from_slice(&build_fcgi_record(6, 1, &[]));
+                resp.extend_from_slice(&build_fcgi_record(3, 1, &[0, 0, 0, 0, 0, 0, 0, 0]));
+                sock.write_all(&resp).await.unwrap();
+                let _ = sock.shutdown().await;
+            }
+            // Req 2: HEAD
+            {
+                let (mut sock, _) = fcgi_listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await.unwrap();
+                let body = "Status: 200 OK\r\nContent-Type: text/plain\r\n\r\nFASTCGI_OUTPUT";
+                let mut resp = build_fcgi_record(6, 1, body.as_bytes());
+                resp.extend_from_slice(&build_fcgi_record(6, 1, &[]));
+                resp.extend_from_slice(&build_fcgi_record(3, 1, &[0, 0, 0, 0, 0, 0, 0, 0]));
+                sock.write_all(&resp).await.unwrap();
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // 3. Test State olusturma
+        let base = std::env::temp_dir().join(format!("zmax_bin_kart2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("www").join("vhost-k2");
+        let err_dir = root.join("err");
+        std::fs::create_dir_all(&err_dir).unwrap();
+        std::fs::create_dir_all(base.join("modules")).unwrap();
+        std::fs::create_dir_all(base.join("admin")).unwrap();
+        std::fs::create_dir_all(base.join("logs")).unwrap();
+
+        std::fs::write(root.join("index.html"), "VHOST_K2_BODY_STATIC_12345").unwrap(); // 26 bayt
+        std::fs::write(root.join("cached.html"), "CACHED_BODY_HIT_67890").unwrap(); // 21 bayt
+        std::fs::write(root.join("test.php"), "<?php // test").unwrap();
+        std::fs::write(err_dir.join("404.html"), "CUSTOM_404_PAGE_FOR_K2_TEST").unwrap(); // 27 bayt
+
+        std::fs::write(
+            base.join("modules").join("mod_security.toml"),
+            "[module]\nname = \"mod_security\"\nenabled = true\n\n[settings]\nsql_injection_inspection = true\npath_traversal_shield = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("modules").join("mod_coreruleset.toml"),
+            "[module]\nname = \"mod_coreruleset\"\nenabled = true\n\n[settings]\nblock_sql_injection = true\n",
+        )
+        .unwrap();
+
+        let mut entry = zmax_config::VHostEntry {
+            name: "k2.test".into(),
+            aliases: vec!["www.k2.test".into()],
+            document_root: "www/vhost-k2".into(),
+            ..Default::default()
+        };
+        entry.logging.enabled = true;
+        entry.logging.access_log = "logs/k2.access.log".into();
+        entry.logging.error_log = "logs/k2.error.log".into();
+        entry.security.waf_enabled = Some(true);
+        entry.security.waf_exclude_paths = vec!["/muaf-waf".into()];
+        entry.error_docs.dir = "err".into();
+        entry.error_docs.pages.insert(404, "404.html".into());
+        entry.cache.enabled = true;
+        entry.cache.expire = 60;
+        entry.proxy.enabled = true;
+        entry.proxy.upstream = proxy_addr.to_string();
+        entry.proxy.path_prefix = "/proxy".to_string();
+        entry.php.enabled = true;
+        entry.php.upstream = fcgi_addr;
+
+        let vh = zmax_config::LoadedVHost {
+            resolved_doc_root: resolve_path(&base, &entry.document_root),
+            entry,
+            file_name: "k2.test.toml".into(),
+        };
+
+        let mut cfg = ZMaxConfig::parse_toml("").unwrap();
+        cfg.cache.enabled = true;
+        let modules = LoadedModules::load_from_dir(&base.join("modules")).unwrap();
+        let mut policies = compile_policies(&cfg, &modules);
+        policies.fastcgi.enabled = true;
+        policies.proxy.enabled = true;
+        let auth = compute_effective_auth(&cfg);
+
+        let state = Arc::new(ServerState {
+            base_dir: base.clone(),
+            cache: zmax_cache::ZMaxCache::with_disk_dir(
+                16 * 1024 * 1024,
+                60,
+                base.join("cachedata"),
+            ),
+            limiter: RwLock::new(zmax_security::RateLimiter::new(u32::MAX)),
+            ban_manager: Arc::new(zmax_security::IpBanManager::new()),
+            wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(3, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
+            buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
+            upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
+            runtime: RwLock::new(RuntimeState {
+                config: cfg,
+                vhosts: vec![vh],
+                modules,
+                policies,
+                redis_client: None,
+                auth,
+                conf_path: base.join("zmax.toml"),
+                vhosts_dir: base.join("vhosts"),
+                modules_dir: base.join("modules"),
+            }),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(
+                base.join("admin"),
+            )),
+            tls: Arc::new(zmax_tls::SniResolver::new()),
+            admin_tls: Arc::new(zmax_tls::SniResolver::new()),
+            api_tls: Arc::new(zmax_tls::SniResolver::new()),
+            log_manager: Arc::new(logger::AsyncLogManager::new(
+                base.clone(),
+                PathBuf::from("logs/access.log"),
+                PathBuf::from("logs/error.log"),
+                10,
+                16,
+            )),
+            htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
+            shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
+            access_logs: Mutex::new(VecDeque::with_capacity(64)),
+            stats: ServerStats {
+                start_time: Instant::now(),
+                total_requests: std::sync::atomic::AtomicU64::new(0),
+                cache_hits: std::sync::atomic::AtomicU64::new(0),
+                cache_misses: std::sync::atomic::AtomicU64::new(0),
+            },
+        });
+
+        // 4. Istekleri gonder:
+        // 1. Statik GET
+        let r_static_get = run_request(
+            &state,
+            false,
+            "GET /index.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_static_get.starts_with("HTTP/1.1 200 OK")
+                && r_static_get.contains("VHOST_K2_BODY_STATIC_12345"),
+            "{r_static_get}"
+        );
+        let etag = r_static_get
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("etag:"))
+            .map(|l| l.split(':').nth(1).unwrap().trim())
+            .unwrap_or("");
+
+        // 2. Statik HEAD
+        let r_static_head = run_request(
+            &state,
+            false,
+            "HEAD /index.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_static_head.starts_with("HTTP/1.1 200 OK")
+                && !r_static_head.contains("VHOST_K2_BODY_STATIC_12345"),
+            "{r_static_head}"
+        );
+
+        // 3. 304 Not Modified
+        let r_304 = run_request(&state, false, &format!("GET /index.html HTTP/1.1\r\nHost: k2.test\r\nIf-None-Match: {}\r\nConnection: close\r\n\r\n", etag)).await;
+        assert!(r_304.starts_with("HTTP/1.1 304 Not Modified"), "{r_304}");
+
+        // 4. Range Request GET (206)
+        let r_range_get = run_request(&state, false, "GET /index.html HTTP/1.1\r\nHost: k2.test\r\nRange: bytes=0-4\r\nConnection: close\r\n\r\n").await;
+        assert!(
+            r_range_get.starts_with("HTTP/1.1 206 Partial Content")
+                && r_range_get.contains("VHOST"),
+            "{r_range_get}"
+        );
+
+        // 5. Range Request HEAD (206)
+        let r_range_head = run_request(&state, false, "HEAD /index.html HTTP/1.1\r\nHost: k2.test\r\nRange: bytes=0-4\r\nConnection: close\r\n\r\n").await;
+        assert!(
+            r_range_head.starts_with("HTTP/1.1 206 Partial Content")
+                && !r_range_head.contains("VHOST"),
+            "{r_range_head}"
+        );
+
+        // 6. ErrorDoc 404 GET
+        let r_404_get = run_request(
+            &state,
+            false,
+            "GET /yok-sayfa.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_404_get.starts_with("HTTP/1.1 404 Not Found")
+                && r_404_get.contains("CUSTOM_404_PAGE_FOR_K2_TEST"),
+            "{r_404_get}"
+        );
+
+        // 7. ErrorDoc 404 HEAD
+        let r_404_head = run_request(
+            &state,
+            false,
+            "HEAD /yok-sayfa.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_404_head.starts_with("HTTP/1.1 404 Not Found")
+                && !r_404_head.contains("CUSTOM_404_PAGE_FOR_K2_TEST"),
+            "{r_404_head}"
+        );
+
+        // 8. ErrorDoc 403 GET (WAF engeli)
+        let r_403_get = run_request(
+            &state,
+            false,
+            "GET /?q=union+select+1 HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_403_get.starts_with("HTTP/1.1 403 Forbidden"),
+            "{r_403_get}"
+        );
+
+        // 9. ErrorDoc 403 HEAD (WAF engeli)
+        let r_403_head = run_request(
+            &state,
+            false,
+            "HEAD /?q=union+select+1 HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_403_head.starts_with("HTTP/1.1 403 Forbidden"),
+            "{r_403_head}"
+        );
+
+        // 10. Cache Warmup (MISS)
+        let r_c_miss = run_request(
+            &state,
+            false,
+            "GET /cached.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_c_miss.starts_with("HTTP/1.1 200 OK") && r_c_miss.contains("CACHED_BODY_HIT_67890"),
+            "{r_c_miss}"
+        );
+
+        // 11. Cache HIT GET
+        let r_c_hit = run_request(
+            &state,
+            false,
+            "GET /cached.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_c_hit.starts_with("HTTP/1.1 200 OK") && r_c_hit.contains("CACHED_BODY_HIT_67890"),
+            "{r_c_hit}"
+        );
+
+        // 12. Cache HIT HEAD
+        let r_c_head = run_request(
+            &state,
+            false,
+            "HEAD /cached.html HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_c_head.starts_with("HTTP/1.1 200 OK") && !r_c_head.contains("CACHED_BODY_HIT_67890"),
+            "{r_c_head}"
+        );
+
+        // 13. Reverse Proxy GET
+        let r_proxy_get = run_request(
+            &state,
+            false,
+            "GET /proxy/hello HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_proxy_get.starts_with("HTTP/1.1 200 OK") && r_proxy_get.contains("PROXY_DATA"),
+            "{r_proxy_get}"
+        );
+
+        // 14. Reverse Proxy HEAD
+        let r_proxy_head = run_request(
+            &state,
+            false,
+            "HEAD /proxy/hello HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_proxy_head.starts_with("HTTP/1.1 200 OK") && !r_proxy_head.contains("PROXY_DATA"),
+            "{r_proxy_head}"
+        );
+
+        // 15. FastCGI PHP GET
+        let r_fcgi_get = run_request(
+            &state,
+            false,
+            "GET /test.php HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_fcgi_get.starts_with("HTTP/1.1 200 OK") && r_fcgi_get.contains("FASTCGI_OUTPUT"),
+            "{r_fcgi_get}"
+        );
+
+        // 16. FastCGI PHP HEAD
+        let r_fcgi_head = run_request(
+            &state,
+            false,
+            "HEAD /test.php HTTP/1.1\r\nHost: k2.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r_fcgi_head.starts_with("HTTP/1.1 200 OK") && !r_fcgi_head.contains("FASTCGI_OUTPUT"),
+            "{r_fcgi_head}"
+        );
+
+        let _ = proxy_task.await;
+        let _ = fcgi_task.await;
+
+        // 17, 18, 19: HTTP/2 İstekleri (h2 client)
+        let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+        let st_h2 = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:51234".parse().unwrap();
+        let h2_srv = tokio::spawn(async move {
+            let _ = h2_engine::handle_h2_connection(server_io, peer, st_h2, false, 80, None).await;
+        });
+        let (mut client, h2_conn) = h2::client::handshake(client_io)
+            .await
+            .expect("h2 client handshake");
+        tokio::spawn(async move {
+            let _ = h2_conn.await;
+        });
+
+        // H2 GET
+        {
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("http://k2.test/index.html")
+                .header("host", "k2.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK);
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf.len(), 26);
+        }
+
+        // H2 HEAD
+        {
+            let req = http::Request::builder()
+                .method("HEAD")
+                .uri("http://k2.test/index.html")
+                .header("host", "k2.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK);
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf.len(), 0);
+        }
+
+        // H2 304
+        {
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("http://k2.test/index.html")
+                .header("host", "k2.test")
+                .header("if-none-match", etag)
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::NOT_MODIFIED);
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf.len(), 0);
+        }
+
+        drop(client);
+        let _ = h2_srv;
+
+        // 5. Günlük dosyasını bekle ve flush et
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        state.log_manager.flush().await;
+
+        let log_path = state.base_dir.join("logs").join("k2.access.log");
+        assert!(log_path.is_file(), "k2.access.log oluşturulmalı");
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        assert_eq!(
+            lines.len(),
+            19,
+            "Toplam 19 istek günlüğe kaydedilmeli: {content}"
+        );
+
+        // Beklenen (durum, bayt_str) tablosu:
+        let expected_records: Vec<(u16, &str)> = vec![
+            (200, "26"),        // 1. Statik GET
+            (200, "-"),         // 2. Statik HEAD -> NCSA '-' kurali
+            (304, "-"),         // 3. 304 Not Modified -> NCSA '-' kurali
+            (206, "5"),         // 4. Range GET (0-4 = 5 bayt)
+            (206, "-"),         // 5. Range HEAD -> '-'
+            (404, "27"),        // 6. 404 GET (custom 404 sayfası 27 bayt)
+            (404, "-"),         // 7. 404 HEAD -> '-'
+            (403, "CHECK_POS"), // 8. 403 GET (WAF engeli)
+            (403, "-"),         // 9. 403 HEAD -> '-'
+            (200, "21"),        // 10. Cache MISS
+            (200, "21"),        // 11. Cache HIT GET (21 bayt)
+            (200, "-"),         // 12. Cache HIT HEAD -> '-'
+            (200, "10"),        // 13. Proxy GET (10 bayt, baslik haric gercek govde!)
+            (200, "-"),         // 14. Proxy HEAD -> '-'
+            (200, "14"),        // 15. FastCGI GET (14 bayt)
+            (200, "-"),         // 16. FastCGI HEAD -> '-'
+            (200, "26"),        // 17. HTTP/2 GET (26 bayt)
+            (200, "-"),         // 18. HTTP/2 HEAD -> '-'
+            (304, "-"),         // 19. HTTP/2 304 -> '-'
+        ];
+
+        for (i, (exp_status, exp_bytes)) in expected_records.iter().enumerate() {
+            let line = lines[i];
+            // Format dogrulama: %h %l %u [%t] "%r" %>s %b "%{Referer}i" "%{User-Agent}i"
+            assert!(
+                line.contains("[") && line.contains(" +0000] \""),
+                "Zaman damgasi hatali: {line}"
+            );
+            assert!(
+                line.starts_with("127.0.0.1 - - ["),
+                "IP/ident baslangici hatali: {line}"
+            );
+
+            let parts: Vec<&str> = line.split('"').collect();
+            assert!(parts.len() >= 3, "Quoted kisimlar bulunamadi: {line}");
+            let status_bytes_str = parts[2].trim();
+            let tokens: Vec<&str> = status_bytes_str.split_whitespace().collect();
+            assert!(tokens.len() >= 2, "Status ve bytes ayrilamadi: {line}");
+            let status: u16 = tokens[0].parse().unwrap();
+            let bytes_val = tokens[1];
+
+            assert_eq!(
+                status, *exp_status,
+                "Satir {i} status kodu uyusmuyor: {line}"
+            );
+            if *exp_bytes == "CHECK_POS" {
+                let parsed_b: usize = bytes_val
+                    .parse()
+                    .expect("Pozitif sayisal bayt degeri olmali");
+                assert!(
+                    parsed_b > 0,
+                    "403 yanitinda govde bayti pozitif olmali: {line}"
+                );
+            } else {
+                assert_eq!(
+                    bytes_val, *exp_bytes,
+                    "Satir {i} ({line}) beklenen bayt '{exp_bytes}' vermedi"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_kart5_pipeline_http1_and_http2_security() {
+        let base = std::env::temp_dir().join(format!("zmax_bin_k5_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("www").join("k5");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(base.join("modules")).unwrap();
+        std::fs::write(
+            base.join("modules").join("mod_security.toml"),
+            "[module]\nname = \"mod_security\"\nenabled = true\n\n[settings]\nsql_injection_inspection = true\npath_traversal_shield = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("modules").join("mod_coreruleset.toml"),
+            "[module]\nname = \"mod_coreruleset\"\nenabled = true\n\n[settings]\nblock_sql_injection = true\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("resim.png"), "RESIM_ICERIK_PNG_12345").unwrap();
+        std::fs::write(root.join("sayfa.html"), "SAYFA_ICERIK_HTML_67890").unwrap();
+
+        let mut entry = zmax_config::VHostEntry {
+            name: "kart5.test".into(),
+            aliases: vec!["sub.kart5.test".into()],
+            document_root: "www/k5".into(),
+            ..Default::default()
+        };
+        entry.security.force_https = true;
+        entry.hotlink.enabled = true;
+        entry.hotlink.allowed_referers = vec![
+            "kart5.test".into(),
+            "*.kart5.test".into(),
+            "ortak.test".into(),
+        ];
+        entry.hotlink.extensions = vec!["png".into(), "jpg".into(), "webp".into()];
+        entry.security.allow_ips = vec!["127.0.0.1".into(), "10.0.0.0/8".into()];
+        entry.security.deny_ips = vec!["192.168.1.100".into(), "172.16.0.0/16".into()];
+        entry.security.waf_enabled = Some(true);
+        entry.tls.http2 = true;
+
+        let vh = zmax_config::LoadedVHost {
+            resolved_doc_root: resolve_path(&base, &entry.document_root),
+            entry,
+            file_name: "kart5.test.toml".into(),
+        };
+
+        let mut cfg = ZMaxConfig::parse_toml("[waf]\nenabled = true\n").unwrap();
+        cfg.listeners.https.port = 443;
+        cfg.cache.enabled = false;
+        let modules = LoadedModules::load_from_dir(&base.join("modules")).unwrap();
+        let policies = compile_policies(&cfg, &modules);
+        let auth = compute_effective_auth(&cfg);
+
+        let state = Arc::new(ServerState {
+            base_dir: base.clone(),
+            cache: zmax_cache::ZMaxCache::with_disk_dir(
+                4 * 1024 * 1024,
+                60,
+                base.join("cachedata"),
+            ),
+            ban_manager: Arc::new(zmax_security::IpBanManager::new()),
+            limiter: tokio::sync::RwLock::new(zmax_security::RateLimiter::new(1000)),
+            wp_guard: Arc::new(zmax_security::WpBruteForceGuard::new(10, 60, 300)),
+            basic_auth: Arc::new(zmax_security::BasicAuthManager::new()),
+            buffer_pool: Arc::new(zmax_pool::BufferPool::default()),
+            upstream_pool: Arc::new(zmax_pool::UpstreamSocketPool::default()),
+            runtime: RwLock::new(RuntimeState {
+                config: cfg,
+                vhosts: vec![vh],
+                modules,
+                policies,
+                redis_client: None,
+                auth,
+                conf_path: base.join("zmax.toml"),
+                vhosts_dir: base.join("vhosts"),
+                modules_dir: base.join("modules"),
+            }),
+            admin_static_handler: RwLock::new(zmax_static::StaticFileHandler::new(
+                base.join("admin"),
+            )),
+            tls: Arc::new(zmax_tls::SniResolver::new()),
+            admin_tls: Arc::new(zmax_tls::SniResolver::new()),
+            api_tls: Arc::new(zmax_tls::SniResolver::new()),
+            log_manager: Arc::new(logger::AsyncLogManager::new(
+                base.clone(),
+                PathBuf::from("logs/access.log"),
+                PathBuf::from("logs/error.log"),
+                250,
+                64,
+            )),
+            htaccess_resolver: Arc::new(zmax_rewrite::HtAccessResolver::new()),
+            shutdown: Arc::new(zmax_runtime::ShutdownCoordinator::new()),
+            waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
+            access_logs: Mutex::new(VecDeque::with_capacity(64)),
+            stats: ServerStats {
+                start_time: Instant::now(),
+                total_requests: std::sync::atomic::AtomicU64::new(0),
+                cache_hits: std::sync::atomic::AtomicU64::new(0),
+                cache_misses: std::sync::atomic::AtomicU64::new(0),
+            },
+        });
+
+        // -------------------------------------------------------------
+        // KISIM 1: HTTP/1.1 İstek Hattı Güvenlik Denetimleri
+        // -------------------------------------------------------------
+
+        // 1.1 Yabancı Referer -> 403 Forbidden (Hotlink Protection)
+        let r1 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: http://saldirgan.com/sayfa\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r1.starts_with("HTTP/1.1 403 Forbidden"),
+            "H1.1 403 olmalı: {r1}"
+        );
+        assert!(
+            r1.contains("Hotlink Protection"),
+            "H1.1 hotlink body içermeli: {r1}"
+        );
+
+        // 1.2 Boş Referer -> 200 OK (Doğrudan erişim izinli)
+        let r2 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r2.starts_with("HTTP/1.1 200 OK"), "H1.2 200 olmalı: {r2}");
+        assert!(
+            r2.ends_with("RESIM_ICERIK_PNG_12345"),
+            "H1.2 içerik eşleşmeli: {r2}"
+        );
+
+        // 1.3 İzinli Referer -> 200 OK
+        let r3 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: https://kart5.test/sayfa.html\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r3.starts_with("HTTP/1.1 200 OK"), "H1.3 200 olmalı: {r3}");
+
+        // 1.4 Joker İzinli Referer (*.kart5.test) -> 200 OK
+        let r4 = run_request(
+            &state,
+            true,
+            "GET /resim.png HTTP/1.1\r\nHost: kart5.test\r\nReferer: https://img.kart5.test/galeri\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r4.starts_with("HTTP/1.1 200 OK"), "H1.4 200 olmalı: {r4}");
+
+        // 1.5 Korunmayan Uzantı (HTML) -> 200 OK (Yabancı Referer olsa dahi)
+        let r5 = run_request(
+            &state,
+            true,
+            "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nReferer: http://saldirgan.com/\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(r5.starts_with("HTTP/1.1 200 OK"), "H1.5 200 olmalı: {r5}");
+
+        // 1.6 Deny CIDR IP -> 403 Forbidden (IP Access Denied)
+        let peer_denied: SocketAddr = "172.16.5.10:50000".parse().unwrap();
+        let r6 = run_request_with_peer(
+            &state,
+            peer_denied,
+            true,
+            "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r6.starts_with("HTTP/1.1 403 Forbidden"),
+            "H1.6 403 olmalı: {r6}"
+        );
+        assert!(
+            r6.contains("IP Access Denied"),
+            "H1.6 ACL body içermeli: {r6}"
+        );
+
+        // 1.7 WAF SQLi Engeli -> 403 Forbidden (WAF Blocked)
+        let r7 = run_request(
+            &state,
+            true,
+            "GET /sayfa.html?q=union+select+1 HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r7.starts_with("HTTP/1.1 403 Forbidden"),
+            "H1.7 403 olmalı: {r7}"
+        );
+        assert!(r7.contains("WAF Blocked"), "H1.7 WAF body içermeli: {r7}");
+
+        // 1.8 force_https -> 301 Moved Permanently (HTTP isteğinde)
+        let r8 = run_request(
+            &state,
+            false,
+            "GET /sayfa.html HTTP/1.1\r\nHost: kart5.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            r8.starts_with("HTTP/1.1 301 Moved Permanently"),
+            "H1.8 301 olmalı: {r8}"
+        );
+        assert!(
+            r8.contains("Location: https://kart5.test/sayfa.html"),
+            "H1.8 redirect header olmalı: {r8}"
+        );
+
+        // -------------------------------------------------------------
+        // KISIM 2: HTTP/2 İstek Hattı Güvenlik Denetimleri (Gerçek h2 Client)
+        // -------------------------------------------------------------
+
+        async fn make_h2_client(
+            state: &Arc<ServerState>,
+            peer: SocketAddr,
+            is_https: bool,
+        ) -> (
+            h2::client::SendRequest<bytes::Bytes>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+            let st = Arc::clone(state);
+            let port = if is_https { 443 } else { 80 };
+            let srv_task = tokio::spawn(async move {
+                let _ = h2_engine::handle_h2_connection(server_io, peer, st, is_https, port, None)
+                    .await;
+            });
+            let (client, h2_conn) = h2::client::handshake(client_io)
+                .await
+                .expect("h2 client handshake");
+            let conn_task = tokio::spawn(async move {
+                let _ = h2_conn.await;
+            });
+            let wait_task = tokio::spawn(async move {
+                let _ = srv_task.await;
+                let _ = conn_task.await;
+            });
+            (client, wait_task)
+        }
+
+        let loopback_peer: SocketAddr = "127.0.0.1:51234".parse().unwrap();
+
+        // 2.1 HTTP/2 Yabancı Referer -> 403 Forbidden (Hotlink Protection)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .header("referer", "http://saldirgan.com/sayfa")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::FORBIDDEN,
+                "H2.1 403 olmalı"
+            );
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            let body_str = String::from_utf8_lossy(&body_buf);
+            assert!(
+                body_str.contains("Hotlink Protection"),
+                "H2.1 hotlink body içermeli: {body_str}"
+            );
+        }
+
+        // 2.2 HTTP/2 Boş Referer -> 200 OK
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.2 200 olmalı");
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            assert_eq!(body_buf, b"RESIM_ICERIK_PNG_12345", "H2.2 içerik eşleşmeli");
+        }
+
+        // 2.3 HTTP/2 İzinli Referer -> 200 OK
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .header("referer", "https://kart5.test/sayfa.html")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.3 200 olmalı");
+        }
+
+        // 2.4 HTTP/2 Joker İzinli Referer (*.kart5.test) -> 200 OK
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/resim.png")
+                .header("host", "kart5.test")
+                .header("referer", "https://sub.kart5.test/galeri")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.4 200 olmalı");
+        }
+
+        // 2.5 HTTP/2 Korunmayan Uzantı (HTML) -> 200 OK (Yabancı Referer olsa dahi)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/sayfa.html")
+                .header("host", "kart5.test")
+                .header("referer", "http://saldirgan.com/")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(resp.status(), http::StatusCode::OK, "H2.5 200 olmalı");
+        }
+
+        // 2.6 HTTP/2 Deny CIDR IP -> 403 Forbidden (IP Access Denied)
+        {
+            let (mut client, _task) = make_h2_client(&state, peer_denied, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/sayfa.html")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::FORBIDDEN,
+                "H2.6 403 olmalı"
+            );
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            let body_str = String::from_utf8_lossy(&body_buf);
+            assert!(
+                body_str.contains("IP Access Denied"),
+                "H2.6 ACL body içermeli: {body_str}"
+            );
+        }
+
+        // 2.7 HTTP/2 WAF SQLi Engeli -> 403 Forbidden (WAF Blocked)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, true).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("https://kart5.test/sayfa.html?q=union+select+1")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::FORBIDDEN,
+                "H2.7 403 olmalı"
+            );
+            let mut body_stream = resp.into_body();
+            let mut body_buf = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let b = chunk.unwrap();
+                body_buf.extend_from_slice(&b);
+                let _ = body_stream.flow_control().release_capacity(b.len());
+            }
+            let body_str = String::from_utf8_lossy(&body_buf);
+            assert!(
+                body_str.contains("WAF Blocked"),
+                "H2.7 WAF body içermeli: {body_str}"
+            );
+        }
+
+        // 2.8 HTTP/2 force_https -> 301 Moved Permanently (HTTP üzerinden geldiğinde)
+        {
+            let (mut client, _task) = make_h2_client(&state, loopback_peer, false).await;
+            let req = http::Request::builder()
+                .method("GET")
+                .uri("http://kart5.test/sayfa.html")
+                .header("host", "kart5.test")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(req, true).unwrap();
+            let resp = response.await.unwrap();
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::MOVED_PERMANENTLY,
+                "H2.8 301 olmalı"
+            );
+            let loc = resp.headers().get("location").unwrap().to_str().unwrap();
+            assert_eq!(
+                loc, "https://kart5.test/sayfa.html",
+                "H2.8 location başlığı eşleşmeli"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[test]
+    fn k8_collect_tls_key_paths_resolves_listener_and_vhost_files_and_skips_empty() {
+        let base = std::env::temp_dir().join("zmax_k8_collect_tls");
+        let cfg = ZMaxConfig::parse_toml(
+            "[listeners.admin]\ntls_key = \"certs/admin.key\"\ntls_cert = \"\"\n\n[listeners.api]\ntls_cert = \"certs/api.pem\"\n",
+        )
+        .unwrap();
+        let entry = zmax_config::VHostEntry {
+            name: "a.test".into(),
+            document_root: "www/a".into(),
+            ssl: zmax_config::VHostSslSection {
+                certificate: "certs/a.pem".into(),
+                key: "certs/a.key".into(),
+            },
+            ..Default::default()
+        };
+        let vh = zmax_config::LoadedVHost {
+            resolved_doc_root: base.join("www/a"),
+            entry,
+            file_name: "a.test.toml".into(),
+        };
+        let got = collect_tls_key_paths(&base, &cfg, &[vh]);
+        assert_eq!(
+            got,
+            vec![
+                resolve_path(&base, "certs/admin.key"),
+                resolve_path(&base, "certs/api.pem"),
+                resolve_path(&base, "certs/a.key"),
+                resolve_path(&base, "certs/a.pem"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_slowloris_header_drip_timeout_returns_408_and_closes_socket() {
+        // Matris §1/§8: Slowloris başlık damlatma saldırısında soketin zaman aşımına uğrayıp 408 ile kapatılması.
+        let state = test_state_with(
+            "slow_hdr",
+            false,
+            "[security]\nslowloris_header_timeout_sec = 1\nslowloris_body_timeout_sec = 10\nkeep_alive_timeout_sec = 10\n",
+        );
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let st = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:50001".parse().unwrap();
+        let task = tokio::spawn(async move {
+            web_engine::handle_web_connection(server, peer, st, false, 80).await
+        });
+
+        let start = Instant::now();
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        // Başlık kısmı gönderiliyor ama bitirilmiyor (\r\n\r\n yok)
+        client_write
+            .write_all(
+                b"GET /index.html HTTP/1.1\r\nHost: site.test\r\nUser-Agent: Slowloris-Sim\r\n",
+            )
+            .await
+            .unwrap();
+
+        // Saldırgan 25 adım boyunca her 150 ms'de bir başlık damlatıyor (toplam 3.75 saniye sürecek damlatma)
+        let drip_task = tokio::spawn(async move {
+            for i in 0..25 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                if client_write
+                    .write_all(format!("X-Slow-Header-{i}: val\r\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // İstemci damlatma sürerken eşzamanlı olarak sunucunun yanıtını okur.
+        // Yeni koddaki kümülatif header_deadline sayesinde ~1.0-1.1 sn içinde 408 gelip soket kapatılmalıdır.
+        let mut out = Vec::new();
+        let _ = client_read.read_to_end(&mut out).await;
+        let elapsed = start.elapsed();
+        let _ = drip_task.await;
+
+        let resp = String::from_utf8_lossy(&out);
+        assert!(
+            resp.starts_with("HTTP/1.1 408 Request Timeout"),
+            "Slowloris başlık aşımı 408 dönmeli: {resp}"
+        );
+        assert!(
+            resp.contains("Connection: close"),
+            "Zaman aşımında bağlantı kapatılmalı: {resp}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "408 Request Timeout damlatma bitmeden (< 1.5 sn) gelmelidir! Geçen süre: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "408 zaman aşımı 1 saniyeden önce tetiklenmemelidir! Geçen süre: {elapsed:?}"
+        );
+
+        let _ = task.await;
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_slowloris_body_drip_timeout_returns_408_and_closes_socket() {
+        // Matris §1/§8: Content-Length gövdesi yavaş aktarıldığında body_timeout dolunca 408 ile kapatılması.
+        let state = test_state_with(
+            "slow_body",
+            false,
+            "[security]\nslowloris_header_timeout_sec = 10\nslowloris_body_timeout_sec = 1\nkeep_alive_timeout_sec = 10\n",
+        );
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let st = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:50002".parse().unwrap();
+        let task = tokio::spawn(async move {
+            web_engine::handle_web_connection(server, peer, st, false, 80).await
+        });
+
+        let start = Instant::now();
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        // Başlık tamam, 10000 baytlık gövde vaat ediliyor
+        client_write
+            .write_all(
+                b"POST /index.html HTTP/1.1\r\nHost: site.test\r\nContent-Length: 10000\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        // Yavaş gövde damlatma (25 adım * 150 ms = 3.75 saniye sürecek damlatma)
+        let drip_task = tokio::spawn(async move {
+            for _ in 0..25 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                if client_write.write_all(b"CHUNK").await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut out = Vec::new();
+        let _ = client_read.read_to_end(&mut out).await;
+        let elapsed = start.elapsed();
+        let _ = drip_task.await;
+
+        let resp = String::from_utf8_lossy(&out);
+        assert!(
+            resp.starts_with("HTTP/1.1 408 Request Timeout"),
+            "Slowloris gövde aşımı 408 dönmeli: {resp}"
+        );
+        assert!(
+            resp.contains("Connection: close"),
+            "Gövde aşımında bağlantı kapatılmalı: {resp}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "Gövde 408 damlatma bitmeden (< 1.5 sn) gelmelidir! Geçen süre: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "Gövde 408 zaman aşımı 1 saniyeden önce tetiklenmemelidir! Geçen süre: {elapsed:?}"
+        );
+
+        let _ = task.await;
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_keep_alive_idle_timeout_safely_closes_connection() {
+        // Matris §1/§8: İlk istek başarıyla tamamlandıktan sonra boşta bekleyen keep-alive soketin
+        // keep_alive_timeout dolduğunda güvenle (EOF ile) kapatılması.
+        let state = test_state_with(
+            "ka_idle",
+            false,
+            "[security]\nslowloris_header_timeout_sec = 10\nslowloris_body_timeout_sec = 10\nkeep_alive_timeout_sec = 1\n",
+        );
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let st = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:50003".parse().unwrap();
+        let task = tokio::spawn(async move {
+            web_engine::handle_web_connection(server, peer, st, false, 80).await
+        });
+
+        // 1. İstek gönderilir
+        client
+            .write_all(b"GET /index.html HTTP/1.1\r\nHost: site.test\r\n\r\n")
+            .await
+            .unwrap();
+
+        // 200 OK ve Keep-Alive başlığı okunur
+        let mut resp_buf = [0u8; 1024];
+        let n = client.read(&mut resp_buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&resp_buf[..n]);
+        assert!(
+            resp.starts_with("HTTP/1.1 200 OK"),
+            "İlk istek 200 dönmeli: {resp}"
+        );
+        assert!(
+            resp.contains("Connection: keep-alive"),
+            "Keep-Alive başlığı olmalı: {resp}"
+        );
+        assert!(
+            resp.contains("Keep-Alive: timeout=1"),
+            "Timeout bildirim başlığı olmalı: {resp}"
+        );
+
+        // İstemci ikinci istek göndermez, boşta bekler (idle).
+        // Sunucu 1 saniyelik keep_alive_timeout sonunda soketi temizce kapatmalıdır (EOF).
+        let mut idle_buf = [0u8; 64];
+        let next_n = client.read(&mut idle_buf).await.unwrap();
+        assert_eq!(
+            next_n, 0,
+            "Idle timeout dolunca soket EOF (0 bayt) ile kapanmalıdır"
+        );
+
+        let _ = task.await;
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_h2_handshake_timeout_drops_unresponsive_raw_tcp_client() {
+        // Matris P1: HTTP/2 el sıkışması göndermeyen ham TCP istemcinin 10 saniyelik
+        // handshake zaman aşımı dolduğunda kesildiğini ve soketin kapatıldığını kanıtlayan test.
+        let state = test_state("h2_hs_raw");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let st = Arc::clone(&state);
+        let server_task = tokio::spawn(async move {
+            let (sock, peer) = listener.accept().await.unwrap();
+            h2_engine::handle_h2_connection(sock, peer, st, false, local_addr.port(), None).await
+        });
+
+        // Ham TCP istemcisi bağlanır ancak hiçbir HTTP/2 Preface / Handshake göndermez
+        let mut raw_client = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+
+        let start = Instant::now();
+        let mut out = Vec::new();
+        let _ = raw_client.read_to_end(&mut out).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(9),
+            "Handshake zaman aşımı 10s dolmadan kesilmemeli: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "Handshake zaman aşımı 10s dolunca soketi kesmeli: {elapsed:?}"
+        );
+
+        let res = server_task.await.unwrap();
+        assert!(
+            res.is_err(),
+            "Sunucu handshake zaman aşımı hatası üretmelidir"
+        );
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("zaman aşımı") || err_msg.contains("TimedOut") || err_msg.contains("timed out"),
+            "Zaman aşımı mesajı içermelidir: {err_msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_h2_idle_stream_timeout_closes_connection() {
+        // Matris P1: HTTP/2 bağlantısı kurulduktan sonra ilk stream'i göndermeyen istemcinin
+        // header_timeout dolunca accept döngüsünden çıkıp bağlantıyı kapattığı doğrulanır.
+        let state = test_state_with(
+            "h2_idle",
+            false,
+            "[security]\nslowloris_header_timeout_sec = 1\nslowloris_body_timeout_sec = 10\nkeep_alive_timeout_sec = 1\n",
+        );
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let st = Arc::clone(&state);
+        let peer: SocketAddr = "127.0.0.1:50005".parse().unwrap();
+        let server_task = tokio::spawn(async move {
+            h2_engine::handle_h2_connection(server, peer, st, false, 80, None).await
+        });
+
+        // İstemci HTTP/2 el sıkışmasını tamamlar
+        let (_send_req, client_conn) = h2::client::handshake(client).await.unwrap();
+        let client_task = tokio::spawn(async move {
+            let _ = client_conn.await;
+        });
+
+        // İstemci hiçbir stream açmaz (boşta bekler). Sunucudaki header_timeout (1s) dolunca
+        // sunucu accept döngüsünden çıkar ve bağlantıyı kapatır.
+        let start = Instant::now();
+        let _ = client_task.await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "H2 stream bekleme zaman aşımından önce kesilmemeli: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "H2 stream bekleme zaman aşımı zamanında kesmeli: {elapsed:?}"
+        );
+
+        let _ = server_task.await;
+        let _ = std::fs::remove_dir_all(&state.base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_matrix_bounds_defaults_and_validation() {
+        // Matris §1 / §8: Varsayılan 10s header, 30s body, 65s keep-alive doğrulaması
+        let def = zmax_config::ZMaxConfig::default();
+        assert_eq!(def.security.slowloris_header_timeout_sec, 10);
+        assert_eq!(def.security.slowloris_body_timeout_sec, 30);
+        assert_eq!(def.security.keep_alive_timeout_sec, 65);
+
+        // 0 değerinin yapılandırma doğrulamasında reddedildiğini onayla
+        let mut bad_header = zmax_config::ZMaxConfig::default();
+        bad_header.security.slowloris_header_timeout_sec = 0;
+        assert!(bad_header.validate().is_err());
+
+        let mut bad_body = zmax_config::ZMaxConfig::default();
+        bad_body.security.slowloris_body_timeout_sec = 0;
+        assert!(bad_body.validate().is_err());
+
+        let mut bad_ka = zmax_config::ZMaxConfig::default();
+        bad_ka.security.keep_alive_timeout_sec = 0;
+        assert!(bad_ka.validate().is_err());
     }
 }

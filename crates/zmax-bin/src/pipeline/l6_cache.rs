@@ -1,7 +1,7 @@
 //! L6 Onbellek: onbellek etiket/politika kararlari, onbellekten yanit yazimi ve PURGE yetki/isleme.
 
 use crate::api::{constant_time_eq, ParsedHttpRequest, ServerState};
-use crate::web_engine::http_write::{default_status_reason, write_http_response};
+use crate::pipeline::l8_response::http_write::{default_status_reason, write_http_response};
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWrite;

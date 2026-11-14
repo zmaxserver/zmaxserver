@@ -2,10 +2,10 @@
 //! İstemciye yanıt yazımı, güvenlik başlıkları, hata sayfaları, NCSA loglama ve sıkıştırma.
 
 use crate::api::ServerState;
-use crate::web_engine::context::ResolvedVHostContext;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use crate::web_engine::DEFAULT_LOG_MAX_BYTES;
 use crate::modules_runtime::append_access_log_limit;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -59,12 +59,14 @@ pub fn compress_dynamic_content(
     if !wants_gzip || !gzip_policy.enabled || body.len() > max_memory_bytes || body.len() < 128 {
         return (body.to_vec(), false);
     }
-    if !zmax_compress::is_compressible_mime(content_type) {
+    if !zmax_compress::is_compressible_mime(content_type, &gzip_policy.mime_types) {
         return (body.to_vec(), false);
     }
-    match zmax_compress::gzip_compress(body) {
-        Ok(compressed) if compressed.len() < body.len() => (compressed, true),
-        _ => (body.to_vec(), false),
+    let compressed = zmax_compress::gzip_compress(body);
+    if compressed.len() < body.len() {
+        (compressed, true)
+    } else {
+        (body.to_vec(), false)
     }
 }
 
@@ -406,7 +408,7 @@ pub async fn record_and_log(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Alan adina ozel erisim ve hata gunlugu yazici (NCSA Combined, asenkron ve tamponlu).
 pub async fn record_and_log_vhost(
     state: &Arc<ServerState>,
     ip: &str,
@@ -434,33 +436,48 @@ pub async fn record_and_log_vhost(
         user_agent.unwrap_or(""),
     );
 
-    let Some(ctx) = vhost_ctx else {
-        return;
-    };
-    let Some(access_log_rel) = &ctx.access_log else {
-        return;
+    let (domain, target_path, json_format, also_write_global, max_size) = match vhost_ctx {
+        Some(ctx) => {
+            let p = if ctx.logging.enabled && !ctx.logging.access_log.trim().is_empty() {
+                Some(PathBuf::from(&ctx.logging.access_log))
+            } else {
+                None
+            };
+            (
+                ctx.vhost_name.clone(),
+                p,
+                ctx.logging.format.eq_ignore_ascii_case("json"),
+                ctx.logging.also_write_global,
+                ctx.max_log_size_bytes,
+            )
+        }
+        None => (
+            "default".to_string(),
+            None,
+            false,
+            true,
+            DEFAULT_LOG_MAX_BYTES,
+        ),
     };
 
-    let log_path = if access_log_rel.is_absolute() {
-        access_log_rel.clone()
-    } else {
-        ctx.doc_root.join(access_log_rel)
-    };
-
-    let referer_clean = referer.unwrap_or("-").replace(['\r', '\n'], "");
-    let ua_clean = user_agent.unwrap_or("-").replace(['\r', '\n'], "");
-    let bytes_str = if bytes_sent == 0 {
-        "-".to_string()
-    } else {
-        bytes_sent.to_string()
-    };
-
-    let line = format!(
-        "{} - - \"{} {} {}\" {} {} \"{}\" \"{}\" {:.3}ms [{}]\r\n",
-        ip, method, path, http_version, status, bytes_str, referer_clean, ua_clean, duration_ms, req_id
-    );
-
-    append_access_log_limit(&log_path, &line, ctx.max_log_size_bytes).await;
+    state.log_manager.log_access(crate::logger::AccessLogEntry {
+        timestamp: std::time::SystemTime::now(),
+        client_ip: ip.to_string(),
+        method: method.to_string(),
+        target: path.to_string(),
+        protocol: http_version.to_string(),
+        status,
+        bytes_sent,
+        referer: referer.unwrap_or("").to_string(),
+        user_agent: user_agent.unwrap_or("").to_string(),
+        request_id: req_id.to_string(),
+        duration_ms,
+        domain: domain.clone(),
+        target_path,
+        json_format,
+        also_write_global,
+        max_size_bytes: max_size,
+    });
 }
 
 // =========================================================================

@@ -3,14 +3,13 @@
 
 use crate::api::{ParsedHttpRequest, ServerState};
 use crate::pipeline::l8_response::{write_http_head, write_http_response};
-use crate::web_engine::cache_policy::append_domain_and_uri_cache_tags;
-use crate::web_engine::context::ResolvedVHostContext;
+use crate::pipeline::l6_cache::append_domain_and_uri_cache_tags;
+use crate::pipeline::l5_router::ResolvedVHostContext;
 use crate::web_engine::{MAX_GZIP_IN_MEMORY_BYTES, MAX_STATIC_CACHE_BYTES};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
-#[cfg(target_os = "linux")]
 use tokio::io::AsyncSeekExt;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
