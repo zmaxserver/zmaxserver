@@ -16,31 +16,69 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// `[listeners.api]` veya `[listeners.admin]` token doğrulaması (`Authorization: Bearer <token>` veya `X-ZMax-Token`).
-pub fn is_authorized(req: &ParsedHttpRequest, expected_token: &str, require_token: bool) -> bool {
-    if expected_token.is_empty() && !require_token {
-        return true;
+/// Istek rolu: `Admin` = yonetim tokeni, `Read` = yalniz okuma tokeni.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthRole {
+    Admin,
+    Read,
+}
+
+/// Token dogrulama sonucu rol; `None` = 401 (token yok/yanlis). 403 cagiran tarafta verilir.
+pub fn authorize_role(
+    req: &ParsedHttpRequest,
+    expected_token: &str,
+    read_token: &str,
+    require_token: bool,
+    local: bool,
+) -> Option<AuthRole> {
+    if expected_token.is_empty() {
+        // Token yok: yalniz loopback kaynakli istek gecer; require_token aciksa hic gecmez.
+        return if local && !require_token { Some(AuthRole::Admin) } else { None };
     }
-    if expected_token.is_empty() && require_token {
-        return false;
-    }
+    let mut role = None;
+    let mut check = |cand: &str| {
+        if constant_time_eq(cand, expected_token) {
+            role = Some(AuthRole::Admin);
+        } else if !read_token.is_empty() && constant_time_eq(cand, read_token) && role.is_none() {
+            role = Some(AuthRole::Read);
+        }
+    };
     for (name, val) in &req.headers {
         if name.eq_ignore_ascii_case("authorization") {
             if let Some(bearer) = val
                 .strip_prefix("Bearer ")
                 .or_else(|| val.strip_prefix("bearer "))
             {
-                if constant_time_eq(bearer.trim(), expected_token) {
-                    return true;
-                }
+                check(bearer.trim());
             }
-        } else if name.eq_ignore_ascii_case("x-zmax-token")
-            && constant_time_eq(val.trim(), expected_token)
-        {
-            return true;
+        } else if name.eq_ignore_ascii_case("x-zmax-token") {
+            check(val.trim());
         }
     }
-    false
+    role
+}
+
+/// `[listeners.api]` / `[listeners.admin]` yonetim rolu dogrulamasi; token bossa yalniz loopback gecer.
+pub fn is_authorized(
+    req: &ParsedHttpRequest,
+    expected_token: &str,
+    require_token: bool,
+    local: bool,
+) -> bool {
+    authorize_role(req, expected_token, "", require_token, local) == Some(AuthRole::Admin)
+}
+
+/// Okuma rolunun erisebildigi uclar: yalniz GET/HEAD ve salt-okunur yollar.
+pub fn read_role_allowed(method: &str, path: &str) -> bool {
+    if !(method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")) {
+        return false;
+    }
+    let p = path.trim_end_matches('/');
+    let p = p.strip_prefix("/api/v1").or_else(|| p.strip_prefix("/api")).unwrap_or(p);
+    matches!(
+        p,
+        "/status" | "/metrics" | "/health" | "/logs" | "/vhosts" | "/ports" | "/config" | "/version"
+    )
 }
 
 /// OS CSPRNG (`RandomState` / `BCryptGenRandom` / `getrandom`) tabanlı 256-bit rastgele API/Admin token üretir.
@@ -62,6 +100,8 @@ pub fn generate_secure_token() -> String {
 pub struct EffectiveAuthTokens {
     pub api_token: String,
     pub api_require_token: bool,
+    pub api_read_token: String,
+    pub admin_read_token: String,
     pub admin_token: String,
     pub admin_require_token: bool,
     pub auto_generated_notices: Vec<String>,
@@ -126,6 +166,11 @@ pub fn compute_effective_auth(config: &ZMaxConfig) -> EffectiveAuthTokens {
     EffectiveAuthTokens {
         api_token,
         api_require_token,
+        api_read_token: config.listeners.api.read_token.trim().to_string(),
+        admin_read_token: {
+            let r = config.listeners.admin.read_token.trim();
+            if r.is_empty() { config.listeners.api.read_token.trim().to_string() } else { r.to_string() }
+        },
         admin_token,
         admin_require_token,
         auto_generated_notices: notices,
@@ -155,9 +200,10 @@ mod tests {
             body: Vec::new(),
             keep_alive: false,
         };
-        assert!(is_authorized(&req, "my-secret-token", true));
-        assert!(!is_authorized(&req, "wrong-token", true));
-        assert!(is_authorized(&req, "", false));
+        assert!(is_authorized(&req, "my-secret-token", true, false));
+        assert!(!is_authorized(&req, "wrong-token", true, false));
+        assert!(is_authorized(&req, "", false, true));
+        assert!(!is_authorized(&req, "", false, false));
     }
 
     #[test]

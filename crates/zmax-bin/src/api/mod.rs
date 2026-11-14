@@ -54,21 +54,24 @@ pub async fn handle_api_route<S>(
     req: &ParsedHttpRequest,
     state: &Arc<ServerState>,
     strict_api_only: bool,
+    local: bool,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let (cors_origin, expected_token, require_token, proxy_prefix) = {
+    let (cors_origin, expected_token, read_token, require_token, proxy_prefix) = {
         let rt = state.runtime.read().await;
-        let (tok, req_tok, prefix) = if strict_api_only {
+        let (tok, rtok, req_tok, prefix) = if strict_api_only {
             (
                 rt.auth.api_token.clone(),
+                rt.auth.api_read_token.clone(),
                 rt.auth.api_require_token,
                 rt.config.listeners.api.proxy_prefix.clone(),
             )
         } else {
             (
                 rt.auth.admin_token.clone(),
+                rt.auth.admin_read_token.clone(),
                 rt.auth.admin_require_token,
                 rt.config.listeners.admin.proxy_prefix.clone(),
             )
@@ -76,6 +79,7 @@ where
         (
             rt.config.listeners.api.cors_allow_origin.clone(),
             tok,
+            rtok,
             req_tok,
             prefix,
         )
@@ -108,11 +112,18 @@ where
 
 
     // Token kontrolü (yapılandırılmışsa veya dinleyici loopback dışındaysa zorunlu)
-    if !is_authorized(req, &expected_token, require_token) {
-        let err =
-            r#"{"ok":false,"error":"Yetkisiz erisim: Gecerli Bearer veya X-ZMax-Token gerekli."}"#;
-        send_json_response(socket, 401, "Unauthorized", &cors_origin, err).await?;
-        return Ok(true);
+    match authorize_role(req, &expected_token, &read_token, require_token, local) {
+        None => {
+            let err = r#"{"ok":false,"error":"Yetkisiz erisim: Gecerli Bearer veya X-ZMax-Token gerekli."}"#;
+            send_json_response(socket, 401, "Unauthorized", &cors_origin, err).await?;
+            return Ok(true);
+        }
+        Some(AuthRole::Read) if !read_role_allowed(&req.method, &req_path) => {
+            let err = r#"{"ok":false,"error":"Yasak: okuma rolu bu islem icin yetkili degil, yonetim tokeni gerekli."}"#;
+            send_json_response(socket, 403, "Forbidden", &cors_origin, err).await?;
+            return Ok(true);
+        }
+        Some(_) => {}
     }
 
     if routes::system::handle(socket, req, state, &req_path, &cors_origin).await? {
@@ -197,7 +208,7 @@ where
         .await?;
         return Ok(());
     }
-    let _ = handle_api_route(&mut socket, &req, &state, true).await?;
+    let _ = handle_api_route(&mut socket, &req, &state, true, is_local_control).await?;
     Ok(())
 }
 
@@ -242,9 +253,9 @@ mod tests {
             body: Vec::new(),
             keep_alive: false,
         };
-        assert!(is_authorized(&req, "secret-key", true));
-        assert!(!is_authorized(&req, "wrong-key", true));
-        assert!(is_authorized(&req, "", false));
+        assert!(is_authorized(&req, "secret-key", true, false));
+        assert!(!is_authorized(&req, "wrong-key", true, false));
+        assert!(is_authorized(&req, "", false, true));
     }
 
     #[test]
@@ -383,7 +394,7 @@ token = "api-secret-token"
             };
             let st = Arc::clone(state);
             let task = tokio::spawn(async move {
-                let handled = handle_api_route(&mut server, &req, &st, strict_api_only)
+                let handled = handle_api_route(&mut server, &req, &st, strict_api_only, true)
                     .await
                     .unwrap();
                 let _ = server.shutdown().await;
@@ -665,7 +676,7 @@ path = "conf/vhosts"
             };
             let st = Arc::clone(state);
             let task = tokio::spawn(async move {
-                let handled = handle_api_route(&mut server, &req, &st, true)
+                let handled = handle_api_route(&mut server, &req, &st, true, true)
                     .await
                     .unwrap();
                 let _ = server.shutdown().await;

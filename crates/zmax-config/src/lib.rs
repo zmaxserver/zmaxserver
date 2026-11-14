@@ -190,6 +190,8 @@ pub struct AdminListenerConfig {
     pub document_root: String,
     pub require_token: bool,
     pub token: String,
+    /// Yalniz okuma rolu icin istege bagli token (bos = okuma rolu kapali).
+    pub read_token: String,
     pub ssl: bool,
     pub tls_cert: String,
     pub tls_key: String,
@@ -206,6 +208,7 @@ impl Default for AdminListenerConfig {
             document_root: "admin".to_string(),
             require_token: false,
             token: String::new(),
+            read_token: String::new(),
             ssl: false,
             tls_cert: String::new(),
             tls_key: String::new(),
@@ -223,6 +226,8 @@ pub struct ApiListenerConfig {
     pub port: u16,
     pub unix_socket: String,
     pub token: String,
+    /// Yalniz okuma rolu icin istege bagli token (bos = okuma rolu kapali).
+    pub read_token: String,
     pub require_token: bool,
     pub cors_allow_origin: String,
     pub ssl: bool,
@@ -240,6 +245,7 @@ impl Default for ApiListenerConfig {
             port: DEFAULT_API_PORT,
             unix_socket: String::new(),
             token: String::new(),
+            read_token: String::new(),
             require_token: false,
             cors_allow_origin: "*".to_string(),
             ssl: false,
