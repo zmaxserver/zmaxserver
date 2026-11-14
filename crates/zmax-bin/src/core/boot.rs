@@ -1,3 +1,12 @@
+use crate::api::admin_static::handle_admin_connection;
+use crate::api::{
+    compute_effective_auth, handle_api_connection, handle_api_route, normalize_panel_request_path,
+    read_http_request_with_limits, refresh_tls_certs, send_http_read_error,
+};
+use crate::core::state::{RuntimeState, ServerState, ServerStats};
+use crate::modules_runtime::{append_error_log, build_redis_client, compile_policies};
+use crate::pipeline::l2_protocol::h2 as h2_engine;
+use crate::{config, logger, web_engine};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -6,25 +15,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-
 use zmax_config::{load_vhosts_dir, resolve_path, LoadedModules, ZMaxConfig};
 use zmax_httpparser::{resolve_real_ip, HttpReadLimits};
 use zmax_obfuscate::zpoly;
-
-use crate::api::{
-    handle_api_connection, handle_api_route, normalize_panel_request_path,
-    read_http_request_with_limits, refresh_tls_certs, send_http_read_error,
-};
-use crate::core::signals::spawn_signal_handlers;
-use crate::core::state::{RuntimeState, ServerState, ServerStats};
-use crate::core::tasks::spawn_background_tasks;
-use crate::pipeline::l2_protocol::h2 as h2_engine;
-use crate::api::compute_effective_auth;
-use crate::logger;
-use crate::modules_runtime::{
-    append_error_log, build_redis_client, compile_policies,
-};
-use crate::web_engine;
 
 pub struct CliOptions {
     pub show_version: bool,
@@ -147,18 +140,8 @@ pub fn create_reuse_listener(
     TcpListener::from_std(std_listener)
 }
 
-pub fn parse_bind_addr(ip: &str, port: u16) -> Result<SocketAddr, String> {
-    let formatted = if ip.contains(':') && !ip.starts_with('[') {
-        format!("[{}]:{}", ip, port)
-    } else {
-        format!("{}:{}", ip, port)
-    };
-    formatted
-        .parse::<SocketAddr>()
-        .map_err(|e| format!("Gecersiz dinleme adresi ({}): {}", formatted, e))
-}
-
-pub(crate) fn collect_tls_key_paths(
+/// Yapılandırmadaki TLS sertifika/anahtar dosya yollarını (vhost + admin/api dinleyicileri) toplar.
+pub fn collect_tls_key_paths(
     base_dir: &Path,
     config: &ZMaxConfig,
     vhosts: &[zmax_config::LoadedVHost],
@@ -230,7 +213,16 @@ pub fn run_fix_tls_perms(
     }
 }
 
-pub use crate::api::admin_static::handle_admin_connection;
+pub fn parse_bind_addr(ip: &str, port: u16) -> Result<SocketAddr, String> {
+    let formatted = if ip.contains(':') && !ip.starts_with('[') {
+        format!("[{}]:{}", ip, port)
+    } else {
+        format!("{}:{}", ip, port)
+    };
+    formatted
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("Gecersiz dinleme adresi ({}): {}", formatted, e))
+}
 
 /// ZMax Server ana çalıştırma fonksiyonu
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -272,7 +264,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .validate_workspace_layout(&base_dir, &vhosts, &modules)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    crate::acme_runtime::apply_global_acme_root(&config, &base_dir);
+    config::acme::apply_global_acme_root(&config, &base_dir);
 
     if cli.fix_tls_perms {
         return run_fix_tls_perms(&base_dir, &config, &vhosts);
@@ -418,9 +410,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         admin_tls: admin_sni,
         api_tls: api_sni,
         log_manager: log_mgr,
-        waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
         htaccess_resolver: htaccess_res,
         shutdown: shutdown_coord,
+        waf_events: Arc::new(zmax_security::waf_events::WafEventStore::new()),
         access_logs: Mutex::new(VecDeque::with_capacity(200)),
         stats: ServerStats {
             start_time: Instant::now(),
@@ -430,29 +422,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     });
 
-    // K6: Arka plan bakım görevleri
-    spawn_background_tasks(Arc::clone(&state));
+    // Arka plan bellek & havuz bakım görevi
+    {
+        let maint_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let _ = maint_state.upstream_pool.purge_expired();
+                let _ = maint_state.limiter.read().await.purge_expired();
+                let _ = maint_state.ban_manager.list_banned();
+            }
+        });
+    }
 
     if http_enabled {
         let web_listener = create_reuse_listener(http_addr, http_backlog, http_reuse_port)?;
         println!("* Web Sunucusu  : http://{}", http_addr);
-        let state_web = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                if let Ok((socket, peer_addr)) = web_listener.accept().await {
-                    if http_nodelay {
-                        let _ = socket.set_nodelay(true);
-                    }
-                    let s = Arc::clone(&state_web);
-                    tokio::spawn(async move {
-                        let _ = web_engine::handle_web_connection(
-                            socket, peer_addr, s, false, http_port,
-                        )
-                        .await;
-                    });
-                }
-            }
-        });
+        web_engine::spawn_http_accept_loop(web_listener, Arc::clone(&state), http_nodelay, http_port);
     }
 
     if https_enabled {
@@ -471,37 +459,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "* HTTPS Sunucu  : https://{} (TLS 1.2/1.3, ALPN h2/http/1.1, {} sertifika)",
             https_addr, loaded
         );
-        let state_tls = Arc::clone(&state);
-        tokio::spawn(async move {
-            loop {
-                if let Ok((socket, peer_addr)) = https_listener.accept().await {
-                    if http_nodelay {
-                        let _ = socket.set_nodelay(true);
-                    }
-                    let s = Arc::clone(&state_tls);
-                    let acc = acceptor.clone();
-                    tokio::spawn(async move {
-                        let hs =
-                            tokio::time::timeout(Duration::from_secs(10), acc.accept(socket)).await;
-                        if let Ok(Ok(tls_stream)) = hs {
-                            let alpn = zmax_tls::negotiated_alpn(&tls_stream);
-                            let sni = zmax_tls::client_sni(&tls_stream).map(|s| s.to_string());
-                            if alpn.as_deref() == Some(b"h2") {
-                                let _ = h2_engine::handle_h2_connection(
-                                    tls_stream, peer_addr, s, true, https_port, sni,
-                                )
-                                .await;
-                            } else {
-                                let _ = web_engine::handle_web_connection(
-                                    tls_stream, peer_addr, s, true, https_port,
-                                )
-                                .await;
-                            }
-                        }
-                    });
-                }
-            }
-        });
+        web_engine::spawn_https_accept_loop(
+            https_listener,
+            acceptor,
+            Arc::clone(&state),
+            http_nodelay,
+            https_port,
+        );
     }
 
     let (admin_tls_cfg, api_tls_cfg) = {
@@ -532,7 +496,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let _ = state.admin_tls.replace(&[cert_src]);
             Some(
-                zmax_tls::build_acceptor_with_alpn(Arc::clone(&state.admin_tls), vec![b"http/1.1".to_vec()]).map_err(|e| {
+                zmax_tls::build_acceptor_with_alpn(
+                    Arc::clone(&state.admin_tls),
+                    vec![b"http/1.1".to_vec()],
+                )
+                .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         format!("WebAdmin TLS baslatilamadi: {e}"),
@@ -562,7 +530,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             )
                             .await;
                             if let Ok(Ok(tls_stream)) = hs {
-                                let _ = handle_admin_connection(tls_stream, peer_addr, s, true).await;
+                                let _ =
+                                    handle_admin_connection(tls_stream, peer_addr, s, true).await;
                             }
                         } else {
                             let _ = handle_admin_connection(socket, peer_addr, s, false).await;
@@ -585,7 +554,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let _ = state.api_tls.replace(&[cert_src]);
             Some(
-                zmax_tls::build_acceptor_with_alpn(Arc::clone(&state.api_tls), vec![b"http/1.1".to_vec()]).map_err(|e| {
+                zmax_tls::build_acceptor_with_alpn(
+                    Arc::clone(&state.api_tls),
+                    vec![b"http/1.1".to_vec()],
+                )
+                .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         format!("Kontrol API TLS baslatilamadi: {e}"),
@@ -597,7 +570,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         let api_listener = create_reuse_listener(api_addr, 512, false)?;
         if api_acceptor.is_some() {
-            println!("* Kontrol API   : https://{}/api/v1/health (TLS aktif)", api_addr);
+            println!(
+                "* Kontrol API   : https://{}/api/v1/health (TLS aktif)",
+                api_addr
+            );
         } else {
             println!("* Kontrol API   : http://{}/api/v1/health", api_addr);
         }
@@ -626,13 +602,19 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // [ek-dinleyici] [[listeners.extra]]: sabit arka uçlu TLS ters vekil dinleyicileri (fail-closed)
+    let extra_errors = web_engine::reconcile_extra_listeners(&state).await;
+    if !extra_errors.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, extra_errors.join("; ")).into());
+    }
+
     #[cfg(unix)]
     if !unix_api_sock.trim().is_empty() {
         let sock_path = PathBuf::from(unix_api_sock.trim());
         if let Some(parent) = sock_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let _ = std::fs::remove_file(&sock_path);
+        let _ = tokio::fs::remove_file(&sock_path).await;
         if let Ok(unix_listener) = tokio::net::UnixListener::bind(&sock_path) {
             println!("* API Unix Soket: {}", sock_path.display());
             let state_unix = Arc::clone(&state);
@@ -648,7 +630,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 header_timeout: Duration::from_secs(10),
                                 body_timeout: Duration::from_secs(15),
                             };
-                            match read_http_request_with_limits(&mut stream, &mut leftover, limits).await {
+                            match read_http_request_with_limits(&mut stream, &mut leftover, limits)
+                                .await
+                            {
                                 Ok(Some(req)) => {
                                     let _ = handle_api_route(&mut stream, &req, &s, true).await;
                                 }
@@ -662,8 +646,220 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // K1: Sinyal işleyicileri
-    spawn_signal_handlers(Arc::clone(&state));
+    // [kart-8] drop_privileges bağlama: dinleyiciler bağlandıktan sonra kök yetkilerini yapılandırılan kullanıcıya düşür
+    'yetki_dusurme: {
+        let (
+            priv_user,
+            priv_group,
+            access_log_cfg,
+            error_log_cfg,
+            disk_cache_cfg,
+            tmp_dir_cfg,
+            tls_paths,
+        ) = {
+            let rt = state.runtime.read().await;
+            (
+                rt.config.server.user.clone(),
+                rt.config.server.group.clone(),
+                rt.config.logging.access_log.clone(),
+                rt.config.logging.error_log.clone(),
+                rt.config.cache.disk_cache_dir.clone(),
+                rt.config.server.tmp_dir.clone(),
+                collect_tls_key_paths(&state.base_dir, &rt.config, &rt.vhosts),
+            )
+        };
+
+        // Boş user/group: root değilse atla (gönderilen conf/zmax.toml böyledir); root'ta fail-closed.
+        match zmax_core::plan_privilege_drop(
+            &priv_user,
+            &priv_group,
+            zmax_core::is_running_as_root(),
+        ) {
+            Err(err) => {
+                eprintln!("[KRİTİK GÜVENLİK HATASI] Yetki düşürme başarısız: {}", err);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Yetki düşürme başarısız (fail-closed): {}", err),
+                )
+                .into());
+            }
+            Ok(zmax_core::PrivilegeDropPlan::Skip) => {
+                println!(
+                    "[Bilgi] server.user/server.group boş ve süreç root değil: yetki düşürme atlandı."
+                );
+                break 'yetki_dusurme;
+            }
+            Ok(zmax_core::PrivilegeDropPlan::Drop) => {}
+        }
+
+        let log_path = state.base_dir.join("logs");
+        let vhost_logs_path = log_path.join("vhosts");
+        let cache_path = state.base_dir.join("cache");
+        let disk_cache_path = resolve_path(&state.base_dir, &disk_cache_cfg);
+        let access_log_path = resolve_path(&state.base_dir, &access_log_cfg);
+        let error_log_path = resolve_path(&state.base_dir, &error_log_cfg);
+        // Tahmin edilebilir ortak /tmp/zmax yerine yapılandırılabilir (server.tmp_dir), varsayılan <kök>/tmp.
+        let tmp_path = if tmp_dir_cfg.trim().is_empty() {
+            state.base_dir.join("tmp")
+        } else {
+            resolve_path(&state.base_dir, tmp_dir_cfg.trim())
+        };
+
+        for dir in [&log_path, &vhost_logs_path, &cache_path, &disk_cache_path] {
+            if let Err(err) = tokio::fs::create_dir_all(dir).await {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "[KRİTİK GÜVENLİK HATASI] Yetki düşürme öncesi dizin oluşturulamadı ('{}'): {}",
+                        dir.display(),
+                        err
+                    ),
+                )
+                .into());
+            }
+        }
+        if let Err(err) = zmax_core::prepare_private_tmp_dir(&tmp_path, &priv_user) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "[KRİTİK GÜVENLİK HATASI] Geçici dizin güvenli hazırlanamadı: {}",
+                    err
+                ),
+            )
+            .into());
+        }
+        for log_file in [&access_log_path, &error_log_path] {
+            if let Some(parent) = log_file.parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                        return Err(std::io::Error::new(
+                            err.kind(),
+                            format!(
+                                "[KRİTİK GÜVENLİK HATASI] Günlük dizini oluşturulamadı ('{}'): {}",
+                                parent.display(),
+                                err
+                            ),
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+
+        let acme_path = state.base_dir.join("acme");
+        let ssl_path = state.base_dir.join("ssl");
+        for dir in [&acme_path, &ssl_path] {
+            if let Err(err) = tokio::fs::create_dir_all(dir).await {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "[KRİTİK GÜVENLİK HATASI] Yetki düşürme öncesi dizin oluşturulamadı ('{}'): {}",
+                        dir.display(),
+                        err
+                    ),
+                )
+                .into());
+            }
+        }
+
+        let base_ownership_paths = vec![
+            log_path,
+            vhost_logs_path,
+            cache_path,
+            disk_cache_path,
+            access_log_path,
+            error_log_path,
+            tmp_path,
+            acme_path,
+            ssl_path,
+        ];
+
+        #[cfg(unix)]
+        let ownership_paths: Vec<PathBuf> = {
+            let mut paths = base_ownership_paths;
+            if !unix_api_sock.trim().is_empty() {
+                paths.push(PathBuf::from(unix_api_sock.trim()));
+            }
+            paths
+        };
+        #[cfg(not(unix))]
+        let ownership_paths: Vec<PathBuf> = base_ownership_paths;
+
+        if let Err(err) = zmax_core::drop_privileges_with_paths_and_tls(
+            &priv_user,
+            &priv_group,
+            &ownership_paths,
+            &tls_paths,
+        ) {
+            eprintln!(
+                "[KRİTİK GÜVENLİK HATASI] Yetki düşürme başarısız (root={}, user='{}', group='{}'): {}",
+                zmax_core::is_running_as_root(),
+                priv_user,
+                priv_group,
+                err
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Yetki düşürme başarısız (fail-closed): {}", err),
+            )
+            .into());
+        }
+
+        // Düşürme sonrası: TLS anahtar/sertifika yolları yeni kimlikle okunabiliyor mu? (kapanış doğrulaması)
+        for (path, err) in zmax_core::unreadable_paths(&tls_paths) {
+            let line = format!(
+                "[TLS] Yetki düşürme sonrası okunamıyor ('{}'): {}. Anahtarı hizmet grubunun okuyabileceği şekilde \
+                 (root:{} 0640) ayarlayın; yenilemeden sonra 'zmax --fix-tls-perms' çalıştırın.",
+                path.display(),
+                err,
+                priv_group
+            );
+            eprintln!("{}", line);
+            append_error_log(&state.base_dir, &line).await;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        let state_sighup = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Ok(mut sighup) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            {
+                while sighup.recv().await.is_some() {
+                    match crate::api::reload_runtime_state(&state_sighup).await {
+                        Ok(vhost_count) => {
+                            state_sighup.cache.purge_all().await;
+                            println!(
+                                "[Yeniden Yuklendi] SIGHUP alindi -> {} sanal konak ve yapilandirma yenilendi.",
+                                vhost_count
+                            );
+                        }
+                        Err(err) => {
+                            eprintln!("[SIGHUP Hata] Yeniden yukleme basarisiz: {}", err);
+                            append_error_log(
+                                &state_sighup.base_dir,
+                                &format!("[SIGHUP Hata] {}", err),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        });
+
+        let state_sigusr1 = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Ok(mut sigusr1) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            {
+                while sigusr1.recv().await.is_some() {
+                    state_sigusr1.log_manager.reopen_all().await;
+                    println!("[LOG] SIGUSR1 alindi -> Gunluk dosyalari yeniden acildi.");
+                }
+            }
+        });
+    }
 
     println!("------------------------------------------------------------");
     println!("⚡ ZMax Server tum panellerle sifir port cakismasiyla hazir!");
@@ -672,3 +868,4 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Kapatiliyor] ZMax Server zarif sekilde sonlandirildi.");
     Ok(())
 }
+

@@ -251,18 +251,28 @@ where
     let _ = file_offset;
 
     let mut buf = state.buffer_pool.acquire();
-    while remaining > 0 {
-        let chunk_cap = usize::try_from(remaining)
-            .unwrap_or(usize::MAX)
-            .min(buf.capacity());
-        let read_n = file.read(&mut buf[..chunk_cap]).await?;
-        if read_n == 0 {
-            break;
-        }
-        socket.write_all(&buf[..read_n]).await?;
-        remaining = remaining.saturating_sub(read_n as u64);
+    let target_cap = 64 * 1024;
+    if buf.capacity() < target_cap {
+        buf.reserve(target_cap - buf.capacity());
     }
-    Ok(())
+    buf.resize(target_cap, 0);
+
+    let res = async {
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(buf.len());
+            let n = file.read(&mut buf[..to_read]).await?;
+            if n == 0 {
+                break;
+            }
+            socket.write_all(&buf[..n]).await?;
+            remaining -= n as u64;
+        }
+        Ok(())
+    }
+    .await;
+
+    state.buffer_pool.release(buf);
+    res
 }
 
 // =========================================================================
