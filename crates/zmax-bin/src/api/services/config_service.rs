@@ -27,10 +27,13 @@ where
             Err(e) => {
                 super::super::audit::kayit(state, "api", "reload", "tum-yapilandirma", false).await;
                 crate::api::bridge::emit("config_rejected", &format!(r#"{{"error":"{}"}}"#, json_escape(&e)));
+                // Reddedilen yenilemede sunucu eski yapılandırmada kalır: gerçek yüklü vhost sayısı yazılır.
+                let aktif_vhost = state.runtime.read().await.vhosts.len();
                 let json = format!(
-                    r#"{{"ok":false,"error":"{}","generation":{},"vhosts_loaded":0,"errors":["{}"]}}"#,
+                    r#"{{"ok":false,"error":"{}","generation":{},"vhosts_loaded":{},"errors":["{}"]}}"#,
                     json_escape(&e),
                     crate::core::state::CONFIG_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
+                    aktif_vhost,
                     json_escape(&e)
                 );
                 send_json_response(socket, 500, "Internal Server Error", &cors_origin, &json)
