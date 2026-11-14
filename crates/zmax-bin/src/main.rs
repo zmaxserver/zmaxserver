@@ -6,6 +6,7 @@ mod acme_runtime;
 mod api;
 mod logger;
 mod modules_runtime;
+pub mod pipeline;
 pub mod security_pipeline;
 mod web_engine;
 
