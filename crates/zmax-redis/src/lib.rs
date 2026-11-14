@@ -157,8 +157,35 @@ impl ClusterSyncEvent {
         }
     }
 
+    /// Olayı gönderen düğüm kimliğiyle sarar: `@<node>|<olay>` (eski düğümler sarmalsız biçimi de okunur).
+    pub fn to_wire_with_node(&self, node_id: &str) -> String {
+        let clean: String = node_id.chars().filter(|c| *c != '|' && *c != '@' && !c.is_whitespace()).collect();
+        if clean.is_empty() {
+            self.to_wire_string()
+        } else {
+            format!("@{}|{}", clean, self.to_wire_string())
+        }
+    }
+
+    /// Sarmalı (varsa) çözer; düğüm kimliği ve olayı döndürür.
+    pub fn parse_wire_with_node(raw: &str) -> Result<(Option<String>, Self), String> {
+        let trimmed = raw.trim();
+        if let Some(rest) = trimmed.strip_prefix('@') {
+            if let Some((node, inner)) = rest.split_once('|') {
+                let node = node.trim();
+                let node = if node.is_empty() { None } else { Some(node.to_string()) };
+                return Ok((node, Self::parse_inner(inner)?));
+            }
+        }
+        Ok((None, Self::parse_inner(trimmed)?))
+    }
+
     /// Tel biçimindeki Redis Pub/Sub mesajını `ClusterSyncEvent` değerine ayrıştırır.
     pub fn parse_wire(raw: &str) -> Result<Self, String> {
+        Self::parse_wire_with_node(raw).map(|(_, ev)| ev)
+    }
+
+    fn parse_inner(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
         if trimmed == "reload" {
             return Ok(Self::ReloadConfig);
@@ -581,9 +608,18 @@ pub async fn connect_and_auth(config: &RedisConfig) -> Result<BufReader<TcpStrea
 
 /// Küme senkronizasyon olayını Redis Pub/Sub kanalına yayınlar (`PUBLISH`) ve alıcı sayısını döner.
 pub async fn publish_event(config: &RedisConfig, event: &ClusterSyncEvent) -> Result<i64, String> {
+    publish_event_from(config, "", event).await
+}
+
+/// Olayı düğüm kimliğiyle yayınlar (`node_id` boşsa sarmalsız eski biçim).
+pub async fn publish_event_from(
+    config: &RedisConfig,
+    node_id: &str,
+    event: &ClusterSyncEvent,
+) -> Result<i64, String> {
     let mut reader = connect_and_auth(config).await?;
     let channel = config.effective_events_channel();
-    let payload = event.to_wire_string();
+    let payload = event.to_wire_with_node(node_id);
     let cmd = encode_resp_command(&["PUBLISH", &channel, &payload]);
 
     reader
@@ -604,7 +640,7 @@ pub async fn publish_event(config: &RedisConfig, event: &ClusterSyncEvent) -> Re
     }
 }
 
-fn extract_pubsub_event(items: &[RespFrame]) -> Option<ClusterSyncEvent> {
+fn extract_pubsub_event(items: &[RespFrame]) -> Option<(Option<String>, ClusterSyncEvent)> {
     let kind = items.first()?.as_str()?;
     let payload_str = if kind.eq_ignore_ascii_case("message") && items.len() >= 3 {
         items[2].as_str()?
@@ -614,8 +650,8 @@ fn extract_pubsub_event(items: &[RespFrame]) -> Option<ClusterSyncEvent> {
         return None;
     };
 
-    match ClusterSyncEvent::parse_wire(payload_str) {
-        Ok(event) => Some(event),
+    match ClusterSyncEvent::parse_wire_with_node(payload_str) {
+        Ok(pair) => Some(pair),
         Err(err) => {
             tracing::warn!("Geçersiz küme Pub/Sub mesajı yoksayıldı: {}", err);
             None
@@ -626,11 +662,23 @@ fn extract_pubsub_event(items: &[RespFrame]) -> Option<ClusterSyncEvent> {
 /// Redis Pub/Sub kanalına abone olur; kopmalarda üstel geri çekilme (backoff) ile yeniden bağlanır.
 pub async fn subscribe_events<F>(
     config: &RedisConfig,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
     mut on_event: F,
 ) -> Result<(), String>
 where
     F: FnMut(ClusterSyncEvent) + Send,
+{
+    subscribe_events_origin(config, shutdown, move |_, ev| on_event(ev)).await
+}
+
+/// `subscribe_events` ile aynı; olayı gönderen düğüm kimliğini de verir.
+pub async fn subscribe_events_origin<F>(
+    config: &RedisConfig,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut on_event: F,
+) -> Result<(), String>
+where
+    F: FnMut(Option<String>, ClusterSyncEvent) + Send,
 {
     let channel = config.effective_events_channel();
     let base_backoff = config.reconnect_backoff_ms.max(10);
@@ -660,8 +708,8 @@ where
                             frame_res = read_resp_frame(&mut reader) => {
                                 match frame_res {
                                     Ok(RespFrame::Array(Some(items))) => {
-                                        if let Some(event) = extract_pubsub_event(&items) {
-                                            on_event(event);
+                                        if let Some((node, event)) = extract_pubsub_event(&items) {
+                                            on_event(node, event);
                                         }
                                     }
                                     Ok(RespFrame::Error(err)) => {
@@ -769,6 +817,23 @@ impl ZMaxRedisClient {
             .into()),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e).into()),
         }
+    }
+
+    /// Küme olayını düğüm kimliğiyle yayınlar.
+    pub async fn publish_event_from(&self, node_id: &str, event: &ClusterSyncEvent) -> Result<i64, String> {
+        publish_event_from(&self.config, node_id, event).await
+    }
+
+    /// Düğüm kimliğini veren abonelik.
+    pub async fn subscribe_events_origin<F>(
+        &self,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        on_event: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(Option<String>, ClusterSyncEvent) + Send,
+    {
+        subscribe_events_origin(&self.config, shutdown, on_event).await
     }
 
     /// Yapılandırılmış küme olayını yayınlar.

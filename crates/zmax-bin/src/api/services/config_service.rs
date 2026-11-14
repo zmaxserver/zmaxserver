@@ -14,6 +14,8 @@ where
         match reload_runtime_state(state).await {
             Ok(vhosts_count) => {
                 state.cache.purge_all().await;
+                let redis_opt = state.runtime.read().await.redis_client.clone();
+                crate::redis::publish_reload(redis_opt.as_ref());
                 let json = format!(
                     r#"{{"ok":true,"status":"reloaded","vhosts_loaded":{},"message":"Yapilandirma, moduller ve vHost tablosu sifir kesintiyle yenilendi."}}"#,
                     vhosts_count

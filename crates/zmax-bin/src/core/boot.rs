@@ -437,6 +437,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    crate::redis::events::spawn_subscriber(Arc::clone(&state));
+
     if http_enabled {
         let web_listener = create_reuse_listener(http_addr, http_backlog, http_reuse_port)?;
         println!("* Web Sunucusu  : http://{}", http_addr);
