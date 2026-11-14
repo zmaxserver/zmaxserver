@@ -81,6 +81,12 @@ where
         let existed = state.ban_manager.unban(ip);
         state.wp_guard.reset(ip);
         super::super::audit::kayit(state, "api", "unban", &ip.to_string(), true).await;
+        {
+            let rt = state.runtime.read().await;
+            if crate::redis::ban_settings(&rt.modules).0 {
+                crate::redis::publish_unban(rt.redis_client.as_ref(), &ip.to_string());
+            }
+        }
         let json = format!(
             r#"{{"ok":true,"ip":"{}","unbanned":{}}}"#,
             json_escape(&ip.to_string()),

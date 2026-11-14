@@ -1,9 +1,46 @@
 use std::time::Duration;
+use std::sync::OnceLock;
+use zmax_config::LoadedModules;
 use zmax_redis::{ClusterSyncEvent, ZMaxRedisClient};
+
+/// Bu sürecin küme düğüm kimliği (kendi yayınını yok saymak için).
+pub fn node_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}-{:x}", std::process::id(), nanos)
+    })
+}
+
+/// `mod_redis` içinden (ban eşitleme açık mı, ban süresi sn). Ayar yoksa (açık, 900).
+pub fn ban_settings(modules: &LoadedModules) -> (bool, u64) {
+    match modules.get("mod_redis") {
+        Some(m) => (
+            m.get_bool("banned_ip_sync").unwrap_or(true),
+            m.get_u64("banned_ip_ttl_seconds").unwrap_or(900),
+        ),
+        None => (true, 900),
+    }
+}
+
+fn spawn_event(redis: &ZMaxRedisClient, ev: ClusterSyncEvent) {
+    let redis = redis.clone();
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(250),
+            redis.publish_event_from(node_id(), &ev),
+        )
+        .await;
+    });
+}
 
 /// WP brute-force veya güvenlik ihlali nedeniyle bir IP adresini Redis kümesine yayınlar.
 pub fn publish_ban(redis: Option<&ZMaxRedisClient>, ip: &str, ttl_secs: u64) {
     if let Some(redis) = redis {
+        spawn_event(redis, ClusterSyncEvent::BanIp { ip: ip.to_string(), ttl_secs });
         let redis = redis.clone();
         let ip_s = ip.to_string();
         tokio::spawn(async move {
@@ -13,6 +50,20 @@ pub fn publish_ban(redis: Option<&ZMaxRedisClient>, ip: &str, ttl_secs: u64) {
             )
             .await;
         });
+    }
+}
+
+/// Yasak kaldırma olayını kümeye yayınlar.
+pub fn publish_unban(redis: Option<&ZMaxRedisClient>, ip: &str) {
+    if let Some(redis) = redis {
+        spawn_event(redis, ClusterSyncEvent::UnbanIp { ip: ip.to_string() });
+    }
+}
+
+/// Yapılandırma yeniden yükleme olayını kümeye yayınlar.
+pub fn publish_reload(redis: Option<&ZMaxRedisClient>) {
+    if let Some(redis) = redis {
+        spawn_event(redis, ClusterSyncEvent::ReloadConfig);
     }
 }
 
@@ -27,7 +78,7 @@ pub fn publish_purge_tag(redis: Option<&ZMaxRedisClient>, domain: &str, tag: &st
         tokio::spawn(async move {
             let _ = tokio::time::timeout(
                 Duration::from_millis(250),
-                redis.publish_event(&ev),
+                redis.publish_event_from(node_id(), &ev),
             )
             .await;
         });
@@ -48,7 +99,7 @@ pub fn publish_purge_tags(redis: Option<&ZMaxRedisClient>, domain: &str, tags: &
                 };
                 let _ = tokio::time::timeout(
                     Duration::from_millis(250),
-                    redis.publish_event(&ev),
+                    redis.publish_event_from(node_id(), &ev),
                 )
                 .await;
             }
@@ -99,7 +150,7 @@ pub fn publish_purge_domain(redis: Option<&ZMaxRedisClient>, domain: &str) {
         tokio::spawn(async move {
             let _ = tokio::time::timeout(
                 Duration::from_millis(250),
-                redis.publish_event(&ev),
+                redis.publish_event_from(node_id(), &ev),
             )
             .await;
         });
@@ -143,7 +194,7 @@ pub fn publish_purge_all(redis: Option<&ZMaxRedisClient>) {
         tokio::spawn(async move {
             let _ = tokio::time::timeout(
                 Duration::from_millis(250),
-                redis.publish_event(&ClusterSyncEvent::PurgeAll),
+                redis.publish_event_from(node_id(), &ClusterSyncEvent::PurgeAll),
             )
             .await;
         });
@@ -166,5 +217,7 @@ mod tests {
         publish_purge_domain_uri(None, "example.com", "/index.php");
         publish_purge_uri(None, "/index.php");
         publish_purge_all(None);
+        publish_unban(None, "127.0.0.1");
+        publish_reload(None);
     }
 }

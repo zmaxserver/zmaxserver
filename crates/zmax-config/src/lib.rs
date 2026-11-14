@@ -2276,7 +2276,7 @@ host = "127.0.0.1"
 port = 6379
 
 [features]
-object_cache_bridge = true
+banned_ip_sync = true
 pubsub_channel = "zmax:cache:purge"
 "#,
         )
@@ -2307,7 +2307,7 @@ enable_htaccess = true
         let redis = mods.get("mod_redis").unwrap();
         assert_eq!(redis.get_str("host"), Some("127.0.0.1"));
         assert_eq!(redis.get_u64("port"), Some(6379));
-        assert_eq!(redis.get_bool("object_cache_bridge"), Some(true));
+        assert_eq!(redis.get_bool("banned_ip_sync"), Some(true));
         assert_eq!(redis.get_str("pubsub_channel"), Some("zmax:cache:purge"));
 
         // Disk üzerinde toggle ve yorum koruma doğrulaması

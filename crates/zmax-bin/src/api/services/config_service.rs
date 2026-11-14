@@ -15,6 +15,8 @@ where
             Ok(vhosts_count) => {
                 super::super::audit::kayit(state, "api", "reload", "tum-yapilandirma", true).await;
                 state.cache.purge_all().await;
+                let redis_opt = state.runtime.read().await.redis_client.clone();
+                crate::redis::publish_reload(redis_opt.as_ref());
                 let json = format!(
                     r#"{{"ok":true,"status":"reloaded","vhosts_loaded":{},"message":"Yapilandirma, moduller ve vHost tablosu sifir kesintiyle yenilendi."}}"#,
                     vhosts_count

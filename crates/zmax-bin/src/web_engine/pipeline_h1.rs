@@ -181,7 +181,13 @@ where
                 )
                 .await;
             } else if reason.contains("Brute Force") {
-                crate::redis::publish_ban(redis_client.as_ref(), &real_ip_str, 900);
+                let (ban_sync, ban_ttl) = {
+                    let rt = state.runtime.read().await;
+                    crate::redis::ban_settings(&rt.modules)
+                };
+                if ban_sync {
+                    crate::redis::publish_ban(redis_client.as_ref(), &real_ip_str, ban_ttl);
+                }
             }
             let written_bytes = write_error_response(
                 socket,
