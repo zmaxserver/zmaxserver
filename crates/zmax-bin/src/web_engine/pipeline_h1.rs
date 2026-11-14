@@ -18,7 +18,7 @@ use crate::api::{
     read_http_request_with_limits, send_http_read_error, ParsedHttpRequest, ServerState,
 };
 use crate::modules_runtime::append_error_log_limit;
-use super::pipeline::l8_response::headers::resolve_vhost_security_headers;
+use crate::pipeline::l8_response::resolve_vhost_security_headers;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
