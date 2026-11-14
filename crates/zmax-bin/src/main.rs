@@ -647,7 +647,7 @@ mod tests {
                     keep_alive: false,
                 };
                 let t = tokio::spawn(async move {
-                    let _ = handle_api_route(&mut server, &parsed, &st, true).await;
+                    let _ = handle_api_route(&mut server, &parsed, &st, true, true).await;
                 });
                 let mut out = Vec::new();
                 client.read_to_end(&mut out).await.unwrap();

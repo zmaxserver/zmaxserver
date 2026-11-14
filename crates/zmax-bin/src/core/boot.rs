@@ -634,7 +634,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 .await
                             {
                                 Ok(Some(req)) => {
-                                    let _ = handle_api_route(&mut stream, &req, &s, true).await;
+                                    let _ = handle_api_route(&mut stream, &req, &s, true, true).await;
                                 }
                                 Err(err) => send_http_read_error(&mut stream, &err).await,
                                 Ok(None) => {}
