@@ -176,6 +176,7 @@
                 cache_misses: 0,
                 workers: 0,
                 ram_mb: 0,
+                version: '',
                 cpu_usage: 0,
                 current_rps: 0,
                 ports: {
@@ -350,6 +351,7 @@
                         if (typeof statusData.cache_misses === 'number') stats.value.cache_misses = statusData.cache_misses;
                         if (typeof statusData.workers === 'number') stats.value.workers = statusData.workers;
                         if (typeof statusData.ram_mb === 'number') stats.value.ram_mb = statusData.ram_mb;
+                        if (typeof statusData.version === 'string' && statusData.version) stats.value.version = statusData.version;
                         if (typeof statusData.cpu_usage === 'number') stats.value.cpu_usage = statusData.cpu_usage;
                         if (typeof statusData.current_rps === 'number') stats.value.current_rps = statusData.current_rps;
                         if (statusData.ports) {
