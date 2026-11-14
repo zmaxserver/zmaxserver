@@ -7,9 +7,11 @@ mod api;
 mod h2_engine;
 mod logger;
 mod modules_runtime;
+mod redis;
 pub mod security_pipeline;
 mod web_engine;
 
+use crate::redis::build_redis_client;
 use api::{
     handle_api_route, normalize_panel_request_path, read_http_request_with_limits,
     refresh_tls_certs, send_http_read_error, RuntimeState, ServerState, ServerStats,
@@ -17,7 +19,7 @@ use api::{
 #[cfg(not(target_env = "musl"))]
 use mimalloc::MiMalloc;
 use modules_runtime::{
-    append_error_log, build_redis_client, compile_policies, compute_effective_auth,
+    append_error_log, compile_policies, compute_effective_auth,
 };
 use std::collections::VecDeque;
 use std::net::SocketAddr;
