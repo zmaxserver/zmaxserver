@@ -61,19 +61,7 @@ where
         match (domain_opt, tag_opt, tags_opt, uri_opt) {
             (Some(domain), Some(tag), _, _) => {
                 let purged = state.cache.purge_by_domain_tag(&domain, &tag).await;
-                if let Some(redis) = redis_opt {
-                    let ev = zmax_redis::ClusterSyncEvent::PurgeTag {
-                        domain: domain.clone(),
-                        tag: tag.clone(),
-                    };
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            redis.publish_event(&ev),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_purge_tag(redis_opt.as_ref(), &domain, &tag);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -89,23 +77,7 @@ where
             }
             (Some(domain), None, Some(tags), _) => {
                 let purged = state.cache.purge_by_tags(&domain, &tags).await;
-                if let Some(redis) = redis_opt {
-                    let d = domain.clone();
-                    let t_list = tags.clone();
-                    tokio::spawn(async move {
-                        for t in t_list {
-                            let ev = zmax_redis::ClusterSyncEvent::PurgeTag {
-                                domain: d.clone(),
-                                tag: t,
-                            };
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(250),
-                                redis.publish_event(&ev),
-                            )
-                            .await;
-                        }
-                    });
-                }
+                crate::redis::publish_purge_tags(redis_opt.as_ref(), &domain, &tags);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -121,16 +93,7 @@ where
             }
             (None, Some(tag), _, _) => {
                 let purged = state.cache.purge_by_tag(&tag).await;
-                if let Some(redis) = redis_opt {
-                    let msg = format!("tag:{}", tag);
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            redis.publish_purge(&msg),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_purge_raw_tag(redis_opt.as_ref(), &tag);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -148,19 +111,7 @@ where
                 for t in &tags {
                     purged += state.cache.purge_by_tag(t).await;
                 }
-                if let Some(redis) = redis_opt {
-                    let t_list = tags.clone();
-                    tokio::spawn(async move {
-                        for t in t_list {
-                            let msg = format!("tag:{}", t);
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(250),
-                                redis.publish_purge(&msg),
-                            )
-                            .await;
-                        }
-                    });
-                }
+                crate::redis::publish_purge_raw_tags(redis_opt.as_ref(), &tags);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -175,18 +126,7 @@ where
             }
             (Some(domain), None, None, None) => {
                 let purged = state.cache.purge_by_domain(&domain).await;
-                if let Some(redis) = redis_opt {
-                    let ev = zmax_redis::ClusterSyncEvent::PurgeDomain {
-                        domain: domain.clone(),
-                    };
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            redis.publish_event(&ev),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_purge_domain(redis_opt.as_ref(), &domain);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -201,18 +141,7 @@ where
             }
             (Some(domain), None, None, Some(target_uri)) => {
                 let purged = state.cache.purge_by_domain_uri(&domain, &target_uri).await;
-                if let Some(redis) = redis_opt {
-                    let d = domain.clone();
-                    let u = target_uri.clone();
-                    tokio::spawn(async move {
-                        let msg = format!("{}:{}", d, u);
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            redis.publish_purge(&msg),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_purge_domain_uri(redis_opt.as_ref(), &domain, &target_uri);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -228,16 +157,7 @@ where
             }
             (_, _, _, Some(target_uri)) => {
                 let purged = state.cache.purge_by_uri(&target_uri).await;
-                if let Some(redis) = redis_opt {
-                    let msg = target_uri.clone();
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            redis.publish_purge(&msg),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_purge_uri(redis_opt.as_ref(), &target_uri);
                 let json = serde_json::json!({
                     "ok": true,
                     "status": "success",
@@ -253,15 +173,7 @@ where
             }
             (None, None, None, None) => {
                 state.cache.purge_all().await;
-                if let Some(redis) = redis_opt {
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            redis.publish_event(&zmax_redis::ClusterSyncEvent::PurgeAll),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_purge_all(redis_opt.as_ref());
                 let json = r#"{"ok":true,"status":"success","scope":"all","message":"L1 & L2 Onbellegi tamamen temizlendi!"}"#;
                 send_json_response(socket, 200, "OK", &cors_origin, json).await?;
                 return Ok(true);

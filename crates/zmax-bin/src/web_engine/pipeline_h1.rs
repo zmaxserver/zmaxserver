@@ -181,16 +181,7 @@ where
                 )
                 .await;
             } else if reason.contains("Brute Force") {
-                if let Some(redis) = redis_client {
-                    let ip_s = real_ip_str.clone();
-                    tokio::spawn(async move {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(200),
-                            redis.ban_ip(&ip_s, 900),
-                        )
-                        .await;
-                    });
-                }
+                crate::redis::publish_ban(redis_client.as_ref(), &real_ip_str, 900);
             }
             let written_bytes = write_error_response(
                 socket,
