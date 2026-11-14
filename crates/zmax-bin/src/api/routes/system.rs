@@ -115,7 +115,7 @@ pub(super) async fn status<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/status" || req_path == "/api/v1/status") && req.method == "GET" {
+    if req_path == "/api/v1/status" && req.method == "GET" {
         let uptime_secs = state.stats.start_time.elapsed().as_secs();
         let total = state.stats.total_requests.load(Ordering::Relaxed);
         let hits = state.stats.cache_hits.load(Ordering::Relaxed);
@@ -192,7 +192,7 @@ pub(super) async fn modules_list<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/v1/modules" || req_path == "/api/modules") && req.method == "GET" {
+    if req_path == "/api/v1/modules" && req.method == "GET" {
         let rt = state.runtime.read().await;
         let items: Vec<String> = rt
             .modules
@@ -233,7 +233,7 @@ pub(super) async fn modules_toggle<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/v1/modules/toggle" || req_path == "/api/modules/toggle")
+    if req_path == "/api/v1/modules/toggle"
         && req.method == "POST"
     {
         let body_str = String::from_utf8_lossy(&req.body);

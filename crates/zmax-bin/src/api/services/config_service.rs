@@ -10,7 +10,7 @@ pub(crate) async fn reload<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    if (req_path == "/api/reload" || req_path == "/api/v1/reload") && req.method == "POST" {
+    if req_path == "/api/v1/reload" && req.method == "POST" {
         match reload_runtime_state(state).await {
             Ok(vhosts_count) => {
                 state.cache.purge_all().await;

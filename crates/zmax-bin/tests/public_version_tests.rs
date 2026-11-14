@@ -181,7 +181,7 @@ fn version_endpoint_is_public_on_admin_and_api_but_nothing_else_is() {
 
         // Muafiyet yalnız bu yolda: başka yollar token'sız 401 kalır
         for path in [
-            "/api/status",
+            "/api/v1/status",
             "/api/v1/status",
             "/api/v1/vhosts",
             "/api/v1/security/bans",

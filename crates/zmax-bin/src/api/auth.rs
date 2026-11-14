@@ -192,7 +192,7 @@ mod tests {
     fn test_is_authorized() {
         let req = ParsedHttpRequest {
             method: "GET".to_string(),
-            path: "/api/status".to_string(),
+            path: "/api/v1/status".to_string(),
             query: String::new(),
             version: 1,
             host: "127.0.0.1".to_string(),
