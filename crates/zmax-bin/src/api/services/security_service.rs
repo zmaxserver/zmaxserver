@@ -80,6 +80,7 @@ where
         };
         let existed = state.ban_manager.unban(ip);
         state.wp_guard.reset(ip);
+        super::super::audit::kayit(state, "api", "unban", &ip.to_string(), true).await;
         let json = format!(
             r#"{{"ok":true,"ip":"{}","unbanned":{}}}"#,
             json_escape(&ip.to_string()),

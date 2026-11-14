@@ -81,6 +81,7 @@ where
 
         match write_vhost_atomic_with_rollback(&vhosts_dir, &domain, &entry, state).await {
             Ok(count) => {
+                super::super::audit::kayit(state, "api", "vhost-kaydet", &domain, true).await;
                 let json = format!(
                     r#"{{"ok":true,"status":"saved","domain":"{}","vhosts_loaded":{}}}"#,
                     json_escape(&domain),
@@ -89,6 +90,7 @@ where
                 send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
             }
             Err(e) => {
+                super::super::audit::kayit(state, "api", "vhost-kaydet", &domain, false).await;
                 let err = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&e));
                 send_json_response(socket, 400, "Bad Request", &cors_origin, &err).await?;
             }
@@ -132,6 +134,7 @@ where
                 return Ok(true);
             }
             if let Err(e) = tokio::fs::remove_file(&target).await {
+                super::super::audit::kayit(state, "api", "vhost-sil", &domain, false).await;
                 let err = format!(
                     r#"{{"ok":false,"error":"Dosya silinemedi: {}"}}"#,
                     json_escape(&e.to_string())
@@ -140,6 +143,7 @@ where
                     .await?;
                 return Ok(true);
             }
+            super::super::audit::kayit(state, "api", "vhost-sil", &domain, true).await;
             let count = reload_runtime_state(state).await.unwrap_or(0);
             let json = format!(
                 r#"{{"ok":true,"status":"deleted","domain":"{}","vhosts_loaded":{}}}"#,

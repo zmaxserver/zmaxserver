@@ -13,6 +13,7 @@ where
     if (req_path == "/api/reload" || req_path == "/api/v1/reload") && req.method == "POST" {
         match reload_runtime_state(state).await {
             Ok(vhosts_count) => {
+                super::super::audit::kayit(state, "api", "reload", "tum-yapilandirma", true).await;
                 state.cache.purge_all().await;
                 let json = format!(
                     r#"{{"ok":true,"status":"reloaded","vhosts_loaded":{},"message":"Yapilandirma, moduller ve vHost tablosu sifir kesintiyle yenilendi."}}"#,
@@ -21,6 +22,7 @@ where
                 send_json_response(socket, 200, "OK", &cors_origin, &json).await?;
             }
             Err(e) => {
+                super::super::audit::kayit(state, "api", "reload", "tum-yapilandirma", false).await;
                 let json = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&e));
                 send_json_response(socket, 500, "Internal Server Error", &cors_origin, &json)
                     .await?;

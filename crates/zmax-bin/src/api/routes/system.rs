@@ -251,6 +251,7 @@ where
         };
         match res {
             Ok(new_state) => {
+                super::super::audit::kayit(state, "api", if new_state { "modul-ac" } else { "modul-kapat" }, &name, true).await;
                 let cfg_clone = rt.config.clone();
                 let policies = compile_policies(&cfg_clone, &rt.modules);
                 let new_rate = policies.effective_rate_limit;
@@ -271,6 +272,7 @@ where
             }
             Err(msg) => {
                 drop(rt);
+                super::super::audit::kayit(state, "api", "modul-degistir", &name, false).await;
                 let json = format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&msg));
                 send_json_response(socket, 404, "Not Found", &cors_origin, &json).await?;
             }
