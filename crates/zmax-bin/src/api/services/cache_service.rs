@@ -58,6 +58,15 @@ where
 
         let redis_opt = state.runtime.read().await.redis_client.clone();
 
+        let hedef = match (&domain_opt, &tag_opt, &tags_opt, &uri_opt) {
+            (Some(d), _, _, _) => d.clone(),
+            (None, Some(t), _, _) => format!("tag:{t}"),
+            (None, None, Some(_), _) => "tags".to_string(),
+            (None, None, None, Some(u)) => format!("uri:{u}"),
+            _ => "tum-onbellek".to_string(),
+        };
+        super::super::audit::kayit(state, "api", "cache-purge", &hedef, true).await;
+
         match (domain_opt, tag_opt, tags_opt, uri_opt) {
             (Some(domain), Some(tag), _, _) => {
                 let purged = state.cache.purge_by_domain_tag(&domain, &tag).await;
