@@ -64,7 +64,7 @@ where
         return Ok(());
     }
 
-    if handle_api_route(&mut socket, &req, &state, false).await? {
+    if super::guard::ISTEMCI_IP.scope(real_ip, handle_api_route(&mut socket, &req, &state, false)).await? {
         return Ok(());
     }
 
