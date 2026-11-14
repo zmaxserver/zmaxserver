@@ -4,7 +4,7 @@
 
 use crate::modules_runtime::{
     append_error_log, build_redis_client, compile_policies,
-    module_category_key, CompiledPolicies, EffectiveAuthTokens,
+    module_category_key, CompiledPolicies,
 };
 use std::net::IpAddr;
 use std::path::Path;
@@ -24,290 +24,15 @@ use zmax_obfuscate::zpoly;
 pub use crate::core::state::{
     current_hms_utc, AccessLogRecord, RuntimeState, ServerState, ServerStats,
 };
-use crate::core::state::MAX_IN_MEMORY_LOGS;
 
+mod auth;
+mod guard;
+mod http;
 
-#[derive(Debug, Clone)]
-pub struct ParsedHttpRequest {
-    pub method: String,
-    pub path: String,
-    pub query: String,
-    pub version: u8,
-    pub host: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    pub keep_alive: bool,
-}
+pub use auth::*;
+pub use guard::*;
+pub use http::*;
 
-impl From<HttpRequestData> for ParsedHttpRequest {
-    fn from(d: HttpRequestData) -> Self {
-        Self {
-            method: d.method,
-            path: d.path,
-            query: d.query,
-            version: d.version,
-            host: d.host,
-            headers: d.headers,
-            body: d.body,
-            keep_alive: d.keep_alive,
-        }
-    }
-}
-
-/// JSON dizgesi için RFC 8259 uyumlu kaçış uygular.
-pub fn json_escape(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 8);
-    for ch in input.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Düz JSON gövdesinden basit `"key":"value"` metin alanı çıkarır (dış bağımlılık gerektirmez).
-pub fn extract_json_string(body: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{}\"", key);
-    let idx = body.find(&pattern)?;
-    let rest = &body[idx + pattern.len()..];
-    let colon_idx = rest.find(':')?;
-    let after_colon = rest[colon_idx + 1..].trim_start();
-    if !after_colon.starts_with('"') {
-        return None;
-    }
-    let mut chars = after_colon[1..].chars();
-    let mut val = String::new();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(esc) = chars.next() {
-                match esc {
-                    'n' => val.push('\n'),
-                    'r' => val.push('\r'),
-                    't' => val.push('\t'),
-                    '"' => val.push('"'),
-                    '\\' => val.push('\\'),
-                    '/' => val.push('/'),
-                    other => val.push(other),
-                }
-            }
-        } else if c == '"' {
-            return Some(val);
-        } else {
-            val.push(c);
-        }
-    }
-    None
-}
-
-/// Düz JSON gövdesinden basit `"key": true/false` mantıksal alanı çıkarır.
-pub fn extract_json_bool(body: &str, key: &str) -> Option<bool> {
-    let pattern = format!("\"{}\"", key);
-    let idx = body.find(&pattern)?;
-    let rest = &body[idx + pattern.len()..];
-    let colon_idx = rest.find(':')?;
-    let after_colon = rest[colon_idx + 1..].trim_start();
-    if after_colon.starts_with("true") {
-        Some(true)
-    } else if after_colon.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// Düz JSON gövdesinden basit `"key": 123` tam sayı alanı çıkarır.
-pub fn extract_json_u64(body: &str, key: &str) -> Option<u64> {
-    let pattern = format!("\"{}\"", key);
-    let idx = body.find(&pattern)?;
-    let rest = &body[idx + pattern.len()..];
-    let colon_idx = rest.find(':')?;
-    let after_colon = rest[colon_idx + 1..].trim_start();
-    let num_str: String = after_colon
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if num_str.is_empty() {
-        None
-    } else {
-        num_str.parse::<u64>().ok()
-    }
-}
-
-/// Düz JSON gövdesinden basit `["a","b"]` dizge dizisini çıkarır.
-pub fn extract_json_string_array(body: &str, key: &str) -> Option<Vec<String>> {
-    let pattern = format!("\"{}\"", key);
-    let idx = body.find(&pattern)?;
-    let rest = &body[idx + pattern.len()..];
-    let colon_idx = rest.find(':')?;
-    let after_colon = rest[colon_idx + 1..].trim_start();
-    if !after_colon.starts_with('[') {
-        return None;
-    }
-    let end = after_colon.find(']')?;
-    let inner = &after_colon[1..end];
-    let mut items = Vec::new();
-    let mut cur = String::new();
-    let mut in_str = false;
-    let mut escaped = false;
-    for ch in inner.chars() {
-        if escaped {
-            cur.push(ch);
-            escaped = false;
-            continue;
-        }
-        if in_str {
-            if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                items.push(cur.clone());
-                cur.clear();
-                in_str = false;
-            } else {
-                cur.push(ch);
-            }
-        } else if ch == '"' {
-            in_str = true;
-        }
-    }
-    Some(items)
-}
-
-/// Akıştan yapılandırılmış sınırlarla HTTP/1.1 isteği okur (`Content-Length` + `chunked` + `413/431/408`).
-pub async fn read_http_request_with_limits<S>(
-    stream: &mut S,
-    leftover: &mut Vec<u8>,
-    limits: HttpReadLimits,
-) -> Result<Option<ParsedHttpRequest>, HttpReadError>
-where
-    S: tokio::io::AsyncRead + Unpin,
-{
-    let opt = read_http1_request_buffered(stream, leftover, limits).await?;
-    Ok(opt.map(ParsedHttpRequest::from))
-}
-
-/// HTTP okuma hatasını uygun HTTP durum koduyla (413, 431, 408, 400) istemciye yazar.
-pub async fn send_http_read_error<S>(socket: &mut S, err: &HttpReadError)
-where
-    S: tokio::io::AsyncWrite + Unpin,
-{
-    let (code, reason, body) = match err {
-        HttpReadError::PayloadTooLarge => (413u16, "Payload Too Large", "413 Payload Too Large"),
-        HttpReadError::HeadersTooLarge => (
-            431u16,
-            "Request Header Fields Too Large",
-            "431 Request Header Fields Too Large",
-        ),
-        HttpReadError::Timeout => (408u16, "Request Timeout", "408 Request Timeout"),
-        HttpReadError::BadRequest(_) => (400u16, "Bad Request", "400 Bad Request"),
-        HttpReadError::Io(_) => return,
-    };
-    let resp = format!(
-        "HTTP/1.1 {} {}\r\nServer: zmaxserver\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        code,
-        reason,
-        body.len(),
-        body
-    );
-    let _ = socket.write_all(resp.as_bytes()).await;
-}
-
-pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.bytes().zip(b.bytes()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// `[listeners.api]` veya `[listeners.admin]` token doğrulaması (`Authorization: Bearer <token>` veya `X-ZMax-Token`).
-pub fn is_authorized(req: &ParsedHttpRequest, expected_token: &str, require_token: bool) -> bool {
-    if expected_token.is_empty() && !require_token {
-        return true;
-    }
-    if expected_token.is_empty() && require_token {
-        return false;
-    }
-    for (name, val) in &req.headers {
-        if name.eq_ignore_ascii_case("authorization") {
-            if let Some(bearer) = val
-                .strip_prefix("Bearer ")
-                .or_else(|| val.strip_prefix("bearer "))
-            {
-                if constant_time_eq(bearer.trim(), expected_token) {
-                    return true;
-                }
-            }
-        } else if name.eq_ignore_ascii_case("x-zmax-token")
-            && constant_time_eq(val.trim(), expected_token)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-async fn send_response_with_content_type<S>(
-    socket: &mut S,
-    status_code: u16,
-    status_text: &str,
-    content_type: &str,
-    cors_origin: &str,
-    body: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: tokio::io::AsyncWrite + Unpin,
-{
-    let origin = if cors_origin.is_empty() {
-        "*"
-    } else {
-        cors_origin
-    };
-    let resp = format!(
-        "HTTP/1.1 {} {}\r\nServer: {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status_code,
-        status_text,
-        zpoly!("zmaxserver-api").as_str(),
-        content_type,
-        origin,
-        body.len(),
-        body
-    );
-    socket.write_all(resp.as_bytes()).await?;
-    Ok(())
-}
-
-/// Standart CORS ve Server başlıklarıyla JSON yanıtı gönderir.
-pub async fn send_json_response<S>(
-    socket: &mut S,
-    status_code: u16,
-    status_text: &str,
-    cors_origin: &str,
-    json_body: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: tokio::io::AsyncWrite + Unpin,
-{
-    send_response_with_content_type(
-        socket,
-        status_code,
-        status_text,
-        "application/json; charset=utf-8",
-        cors_origin,
-        json_body,
-    )
-    .await
-}
 
 pub use crate::config::reload::{
     refresh_tls_certs, reload_runtime_state,
@@ -417,83 +142,12 @@ async fn rollback_vhost_file(target: &Path, backup: Option<&[u8]>) {
     }
 }
 
-fn percent_decode_component(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (
-                    (bytes[i + 1] as char).to_digit(16),
-                    (bytes[i + 2] as char).to_digit(16),
-                ) {
-                    out.push(((h << 4) | l) as u8);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    let trimmed = query.strip_prefix('?').unwrap_or(query);
-    if trimmed.is_empty() {
-        return None;
-    }
-    for pair in trimmed.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (raw_k, raw_v) = match pair.split_once('=') {
-            Some((k, v)) => (k, v),
-            None => (pair, ""),
-        };
-        if percent_decode_component(raw_k) == key {
-            return Some(percent_decode_component(raw_v));
-        }
-    }
-    None
-}
-
 fn merge_vhost_json_patch(
     base: &VHostEntry,
     domain: &str,
     body: &[u8],
 ) -> Result<VHostEntry, String> {
     zmax_config::vhost_json::merge_vhost_json_patch(base, domain, body)
-}
-
-/// Ters vekil arkasındaki panel/API isteklerinden yapılandırılmış `proxy_prefix` önekini soyar.
-pub fn normalize_panel_request_path(raw_path: &str, proxy_prefix: &str) -> String {
-    let prefix = proxy_prefix.trim().trim_end_matches('/');
-    if prefix.is_empty() || prefix == "/" {
-        return raw_path.to_string();
-    }
-    if raw_path == prefix {
-        return "/".to_string();
-    }
-    if let Some(rest) = raw_path.strip_prefix(prefix) {
-        if rest.is_empty() || rest == "/" {
-            return "/".to_string();
-        }
-        if rest.starts_with('/') {
-            return rest.to_string();
-        }
-    }
-    raw_path.to_string()
 }
 
 /// Hem WebAdmin (`/api/*`) hem Kontrol API (`/api/v1/*`) isteklerini tek noktadan işler.
@@ -1518,6 +1172,73 @@ where
     let err = r#"{"ok":false,"error":"Bilinmeyen veya desteklenmeyen API uc noktasi"}"#;
     send_json_response(socket, 404, "Not Found", &cors_origin, err).await?;
     Ok(true)
+}
+
+use std::net::SocketAddr;
+use tokio::io::{AsyncRead, AsyncWrite};
+use zmax_httpparser::resolve_real_ip;
+
+/// Dahili Evrensel Kontrol API Yöneticisi (Varsayılan: 127.0.0.1:19486)
+pub(crate) async fn handle_api_connection<S>(
+    mut socket: S,
+    peer_addr: SocketAddr,
+    state: Arc<ServerState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut leftover = Vec::with_capacity(4096);
+    let (max_body, trusted_proxies) = {
+        let rt = state.runtime.read().await;
+        (
+            rt.config.security.max_body_size_mb.clamp(1, 64) * 1024 * 1024,
+            rt.config.listeners.api.trusted_proxies.clone(),
+        )
+    };
+    let limits = HttpReadLimits {
+        max_header_bytes: 64 * 1024,
+        max_body_bytes: max_body,
+        header_timeout: Duration::from_secs(10),
+        body_timeout: Duration::from_secs(15),
+    };
+    let req = match read_http_request_with_limits(&mut socket, &mut leftover, limits).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Ok(()),
+        Err(err) => {
+            send_http_read_error(&mut socket, &err).await;
+            return Ok(());
+        }
+    };
+    let real_ip = resolve_real_ip(
+        peer_addr.ip(),
+        &req.headers,
+        "x-forwarded-for",
+        &trusted_proxies,
+        true,
+    );
+    let is_local_control = peer_addr.ip().is_loopback() && real_ip.is_loopback();
+    if !is_local_control
+        && (state.ban_manager.is_banned(peer_addr.ip()) || state.ban_manager.is_banned(real_ip))
+    {
+        crate::web_engine::write_http_response(
+            &mut socket,
+            403,
+            "Forbidden",
+            &[("Content-Type".into(), "text/plain; charset=utf-8".into())],
+            b"403 Forbidden - IP Blocked",
+            None,
+            req.method.eq_ignore_ascii_case("HEAD"),
+            false,
+            false,
+            0,
+            None,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    let _ = handle_api_route(&mut socket, &req, &state, true).await?;
+    Ok(())
 }
 
 #[cfg(test)]
