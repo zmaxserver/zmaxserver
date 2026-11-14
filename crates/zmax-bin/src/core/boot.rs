@@ -387,7 +387,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         base_dir,
         cache: zmax_cache::ZMaxCache::with_disk_dir(cache_bytes, cache_ttl, &disk_cache_dir),
         limiter: RwLock::new(zmax_security::RateLimiter::new(rate_max)),
-        ban_manager: Arc::new(zmax_security::IpBanManager::new()),
+        ban_manager: {
+            let m = zmax_security::IpBanManager::new();
+            m.set_exempt(config.security.ban_exempt_ips.clone());
+            Arc::new(m)
+        },
         wp_guard: Arc::new(zmax_security::WpBruteForceGuard::default()),
         basic_auth: Arc::new(zmax_security::BasicAuthManager::with_max_concurrent_hashes(
             config.security.auth_max_concurrent_hashes,

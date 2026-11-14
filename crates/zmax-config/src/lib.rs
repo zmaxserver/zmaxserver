@@ -361,6 +361,10 @@ pub struct SecurityConfig {
     pub allow_ips: Vec<String>,
     #[serde(default)]
     pub deny_ips: Vec<String>,
+    /// Otomatik ban'dan (ardışık 401, WAF, hız sınırı) muaf IP/CIDR listesi. Boş varsayılan; loopback koddan her zaman muaf.
+    /// Not: `allow_ips` sıkı beyaz listedir (listede olmayanı engeller), ban muafiyeti DEĞİLDİR.
+    #[serde(default)]
+    pub ban_exempt_ips: Vec<String>,
     /// Basic Auth için eşzamanlı Argon2/apr1 doğrulama üst sınırı (semafor; yeniden başlatmada geçerli).
     pub auth_max_concurrent_hashes: usize,
     /// API/admin ardışık 401 eşiği (aşılınca IP banlanır).
@@ -394,6 +398,7 @@ impl Default for SecurityConfig {
             max_header_size_kb: 64,
             allow_ips: Vec::new(),
             deny_ips: Vec::new(),
+            ban_exempt_ips: Vec::new(),
             auth_max_concurrent_hashes: 4,
             auth_fail_limit: 5,
             auth_fail_window_sec: 300,
