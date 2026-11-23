@@ -108,7 +108,7 @@
             }
         }
 
-        // Oturum doğrulama
+        // Oturum doğrulama (Öneri 3 / ZMX P0: Kimliksiz /health yerine yetkili /session/verify ve /status kullanımı)
         async validateToken(customToken) {
             const tokenToTest = (customToken || this.getToken()).trim();
             if (!tokenToTest) return false;
@@ -118,7 +118,10 @@
             headers.set('Authorization', `Bearer ${tokenToTest}`);
 
             try {
-                const res = await window.fetch('api/v1/health', { headers });
+                let res = await window.fetch('api/v1/session/verify', { headers });
+                if (res.status === 404 || res.status === 405) {
+                    res = await window.fetch('api/v1/status', { headers });
+                }
                 return res.ok;
             } catch (_) {
                 return false;
@@ -219,41 +222,109 @@
             return this.fetch('api/v1/logs/reopen', { method: 'POST' });
         }
 
-        // SSE Canlı Günlük Akışı Altyapısı (/api/v1/logs/stream)
+        async gracefulReload() {
+            let res = await this.fetch('api/v1/reload', { method: 'POST' });
+            if (!res.ok && (res.status === 404 || res.status === 405)) {
+                res = await this.fetch('api/reload', { method: 'POST' });
+            }
+            return res;
+        }
+
+        async getServerConfig() {
+            return this.fetchJson('api/v1/config/server');
+        }
+
+        async saveServerConfig(payload) {
+            return this.fetch('api/v1/config/server', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        }
+
+        async getListeners() {
+            return this.fetchJson('api/v1/listeners');
+        }
+
+        async saveListener(payload) {
+            return this.fetch('api/v1/listeners', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        }
+
+        async getLiveStats() {
+            return this.fetchJson('api/v1/livestats');
+        }
+
+        // SSE Canlı Günlük Akışı Altyapısı (/api/v1/logs/stream) - Güvenli Başlık Modu
         createLogsStream(onMessage, onError) {
             const token = this.getToken();
-            const url = `api/v1/logs/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`;
-            let eventSource = null;
+            const abortController = new AbortController();
+            let isClosed = false;
 
-            try {
-                eventSource = new EventSource(url);
-                eventSource.onmessage = (event) => {
-                    if (typeof onMessage === 'function') {
-                        try {
-                            const parsed = JSON.parse(event.data);
-                            onMessage(parsed);
-                        } catch (_) {
-                            onMessage(event.data);
+            // Fetch Streaming (Token'ı URL'ye yazmadan Authorization Header ile güvenli iletim)
+            const startFetchStream = async () => {
+                const headers = new Headers();
+                if (token) {
+                    headers.set('Authorization', `Bearer ${token}`);
+                    headers.set('X-ZMax-Token', token);
+                }
+                headers.set('Accept', 'text/event-stream');
+
+                try {
+                    const response = await window.fetch('api/v1/logs/stream', {
+                        headers,
+                        signal: abortController.signal
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`SSE Bağlantı Hatası: ${response.status}`);
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder('utf-8');
+                    let buffer = '';
+
+                    while (!isClosed) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n\n');
+                        buffer = lines.pop() || '';
+
+                        for (const block of lines) {
+                            const trimmed = block.trim();
+                            if (!trimmed || trimmed.startsWith(':')) continue; // Yorum/ping satırları
+                            const dataLine = trimmed.split('\n').find((l) => l.startsWith('data:'));
+                            if (dataLine) {
+                                const jsonStr = dataLine.slice(5).trim();
+                                if (typeof onMessage === 'function') {
+                                    try {
+                                        onMessage(JSON.parse(jsonStr));
+                                    } catch (_) {
+                                        onMessage(jsonStr);
+                                    }
+                                }
+                            }
                         }
                     }
-                };
-                eventSource.onerror = (err) => {
-                    if (typeof onError === 'function') {
+                } catch (err) {
+                    if (!isClosed && err.name !== 'AbortError' && typeof onError === 'function') {
                         onError(err);
                     }
-                };
-            } catch (err) {
-                if (typeof onError === 'function') {
-                    onError(err);
                 }
-            }
+            };
+
+            startFetchStream();
 
             return {
                 close: () => {
-                    if (eventSource) {
-                        eventSource.close();
-                        eventSource = null;
-                    }
+                    isClosed = true;
+                    try {
+                        abortController.abort();
+                    } catch (_) {}
                 }
             };
         }

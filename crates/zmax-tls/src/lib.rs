@@ -1,29 +1,58 @@
 //! # zmax-tls
-//! TLS 1.3 / 1.2 (rustls + ring), vhost başına SNI sertifika seçimi ve ALPN.
+//! TLS 1.3 / 1.2 (rustls + ring), dinleyici (listener) bazlı çoklu port mimarisi,
+//! vhost başına SNI ve joker karakter (wildcard) sertifika seçimi,
+//! ALPN müzakeresi (HTTP/1.1, HTTP/2, HTTP/3 hazırlığı),
+//! ACME HTTP-01 challenge doğrulaması ve TLS oturum önbellek optimizasyonu.
 //!
 //! Davranış kararları:
 //! * SNI eşleşmezse veya istemci SNI göndermezse: ilk yüklenen sertifika (vhost dosyalarının
 //!   ada göre sıralı ilki) varsayılan olarak sunulur; hiç sertifika yoksa el sıkışma reddedilir.
+//! * Joker karakter sertifikaları (`*.example.com`) alt alan adları ile otomatik eşleşir.
 //! * ALPN varsayılan olarak `["h2", "http/1.1"]` sırasıyla duyurulur; istemci yalnız
-//!   `http/1.1` sunarsa `http/1.1` seçilir, ayrıca `build_acceptor_with_alpn` ile özelleştirilebilir.
+//!   `http/1.1` sunarsa `http/1.1` seçilir, ayrıca `build_acceptor_with_alpn` veya `ListenerTlsBuilder` ile özelleştirilebilir.
 //! * Bozuk/eksik sertifika veya anahtar dosyası sunucuyu çökertmez: o vhost atlanır ve
 //!   `LoadReport::skipped` içinde nedeni döner (çağıran log'a yazar).
-//! * Sertifika tablosu `SniResolver::replace` ile dinleyiciyi yeniden başlatmadan değiştirilir.
+//! * Sertifika tablosu `SniResolver::replace`, `reload` veya `add_certificate_pem` ile
+//!   dinleyiciyi yeniden başlatmadan çalışma zamanında kesintisiz değiştirilir.
+//! * ACME HTTP-01 challenge istekleri (`/.well-known/acme-challenge/*`) bellek içi güvenli
+//!   `AcmeChallengeStore` üzerinden yanıtlanır.
+//! * TLS oturum sürdürme (session resumption) bellek sınırlı `InstrumentedSessionCache` ve
+//!   `SessionTicket` rotasyonu ile yüksek performansta çalışır.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+pub mod acme;
+pub mod alpn;
+pub mod listener;
+pub mod session;
+pub mod sni;
 
-use rustls::crypto::ring::sign::any_supported_type;
+use std::path::Path;
+use std::sync::Arc;
+
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use zmax_config::{resolve_path, LoadedVHost};
 
-pub use tokio_rustls::TlsAcceptor;
+pub use acme::{
+    base64url_encode, days_until_cert_expiry, days_until_cert_file_expiry,
+    days_until_cert_pem_expiry, extract_cert_validity, is_acme_challenge_path,
+    is_cert_due_for_renewal, is_cert_expired, parse_asn1_time, AcmeChallengeStore,
+    AcmeManager, RenewalCandidate, RenewalOutcome, ACME_CHALLENGE_PREFIX,
+};
+pub use alpn::{
+    default_alpn_protocols, format_alpn, negotiated_alpn, negotiated_alpn_enum, parse_alpn_list,
+    AlpnConfig, AlpnProtocol, ALPN_H2, ALPN_H3, ALPN_H3_29, ALPN_HTTP10, ALPN_HTTP11,
+};
+pub use listener::{
+    ClientAuthMode, ListenerTlsAcceptor, ListenerTlsBuilder, ListenerTlsConfig, TlsAcceptor,
+    TlsVersion,
+};
+pub use session::{InstrumentedSessionCache, SessionCacheMetrics, TlsSessionConfig};
+pub use sni::{
+    extract_cert_serial_hex, load_certified_key, load_certified_key_from_pem, sources_from_vhosts,
+    sources_from_vhosts_filtered, CertSource, LoadReport, SkippedCert, SniResolver,
+};
 
+/// Geriye dönük uyumluluk için statik TLS yapılandırma nesnesi.
 pub struct TlsConfig {
     pub cert_path: String,
     pub key_path: String,
@@ -38,196 +67,7 @@ impl TlsConfig {
     }
 }
 
-/// Bir sertifika çiftinin hangi alan adlarına hizmet edeceği.
-#[derive(Debug, Clone)]
-pub struct CertSource {
-    pub label: String,
-    pub names: Vec<String>,
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-}
-
-/// Atlanan bir vhost sertifikası ve nedeni.
-#[derive(Debug, Clone)]
-pub struct SkippedCert {
-    pub label: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Default)]
-pub struct LoadReport {
-    pub loaded: usize,
-    pub skipped: Vec<SkippedCert>,
-}
-
-#[derive(Default)]
-struct CertTable {
-    by_name: HashMap<String, Arc<CertifiedKey>>,
-    default: Option<Arc<CertifiedKey>>,
-}
-
-/// SNI ile sertifika seçen, çalışırken değiştirilebilir çözümleyici.
-pub struct SniResolver {
-    table: RwLock<Arc<CertTable>>,
-    sources: RwLock<Vec<CertSource>>,
-}
-
-impl std::fmt::Debug for SniResolver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SniResolver")
-    }
-}
-
-impl SniResolver {
-    pub fn new() -> Self {
-        Self {
-            table: RwLock::new(Arc::new(CertTable::default())),
-            sources: RwLock::new(Vec::new()),
-        }
-    }
-
-    /// Kaynaklardan yeni tablo kurar ve tek hamlede değiştirir (sıfır kesinti).
-    /// Verilen kaynaklar ilerideki `reload()` çağrıları için saklanır.
-    pub fn replace(&self, sources: &[CertSource]) -> LoadReport {
-        if let Ok(mut s) = self.sources.write() {
-            *s = sources.to_vec();
-        }
-        let (table, report) = build_table(sources);
-        if let Ok(mut guard) = self.table.write() {
-            *guard = Arc::new(table);
-        }
-        report
-    }
-
-    /// Saklanan sertifika kaynaklarını diskten YENİDEN okuyarak tabloyu atomik olarak günceller.
-    /// Certbot veya harici bir araç diskteki sertifikayı yenilediğinde dinleyiciyi durdurmadan yeni sertifikayı sunar.
-    pub fn reload(&self) -> LoadReport {
-        let current_sources = self.sources.read().map(|s| s.clone()).unwrap_or_default();
-        let (table, report) = build_table(&current_sources);
-        if let Ok(mut guard) = self.table.write() {
-            *guard = Arc::new(table);
-        }
-        report
-    }
-
-    /// vhost tablosundaki güncel yapılandırmadan kaynakları çıkarır ve tabloyu günceller.
-    pub fn reload_from_vhosts(&self, vhosts: &[LoadedVHost], base_dir: &Path) -> LoadReport {
-        let sources = sources_from_vhosts(vhosts, base_dir);
-        self.replace(&sources)
-    }
-
-    /// Çözümleyicide kayıtlı mevcut sertifika kaynaklarını döndürür.
-    pub fn current_sources(&self) -> Vec<CertSource> {
-        self.sources.read().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    pub fn has_default(&self) -> bool {
-        self.table
-            .read()
-            .map(|t| t.default.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Verilen SNI adı için sertifika (eşleşme yoksa varsayılan).
-    pub fn lookup(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
-        let table = self.table.read().ok()?.clone();
-        if let Some(name) = sni {
-            let key = name.trim_end_matches('.').to_ascii_lowercase();
-            if let Some(ck) = table.by_name.get(&key) {
-                return Some(Arc::clone(ck));
-            }
-        }
-        table.default.clone()
-    }
-
-    /// Belirtilen SNI adı (veya varsayılan) için sunulacak sertifikanın
-    /// X.509 seri numarasını küçük harf onaltılık (hex) dize olarak döndürür.
-    pub fn lookup_serial(&self, sni: Option<&str>) -> Option<String> {
-        let ck = self.lookup(sni)?;
-        let first_der = ck.cert.first()?;
-        extract_cert_serial_hex(first_der.as_ref())
-    }
-}
-
-impl Default for SniResolver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ResolvesServerCert for SniResolver {
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        self.lookup(client_hello.server_name())
-    }
-}
-
-fn load_certified_key(cert_path: &Path, key_path: &Path) -> Result<CertifiedKey, String> {
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
-        .map_err(|e| format!("sertifika dosyası açılamadı ({}): {}", cert_path.display(), e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("sertifika PEM hatası ({}): {}", cert_path.display(), e))?;
-    if certs.is_empty() {
-        return Err(format!("sertifika dosyasında CERTIFICATE yok ({})", cert_path.display()));
-    }
-    let key = PrivateKeyDer::from_pem_file(key_path)
-        .map_err(|e| format!("anahtar dosyası okunamadı ({}): {}", key_path.display(), e))?;
-    let signing_key = any_supported_type(&key)
-        .map_err(|e| format!("anahtar türü desteklenmiyor ({}): {}", key_path.display(), e))?;
-    let ck = CertifiedKey::new(certs, signing_key);
-    ck.keys_match()
-        .map_err(|e| format!("sertifika ile anahtar uyuşmuyor: {}", e))?;
-    Ok(ck)
-}
-
-fn build_table(sources: &[CertSource]) -> (CertTable, LoadReport) {
-    let mut table = CertTable::default();
-    let mut report = LoadReport::default();
-    for src in sources {
-        match load_certified_key(&src.cert_path, &src.key_path) {
-            Ok(ck) => {
-                let ck = Arc::new(ck);
-                for n in &src.names {
-                    let n = n.trim().trim_end_matches('.').to_ascii_lowercase();
-                    if !n.is_empty() {
-                        table.by_name.entry(n).or_insert_with(|| Arc::clone(&ck));
-                    }
-                }
-                if table.default.is_none() {
-                    table.default = Some(Arc::clone(&ck));
-                }
-                report.loaded += 1;
-            }
-            Err(reason) => {
-                tracing::warn!("TLS sertifikasi atlandi [{}]: {}", src.label, reason);
-                report.skipped.push(SkippedCert {
-                    label: src.label.clone(),
-                    reason,
-                });
-            }
-        }
-    }
-    (table, report)
-}
-
-/// vhost tablosundan sertifika kaynaklarını çıkarır: `[vhost.ssl] certificate/key`
-/// ikisi de doluysa; ad + alias adlarıyla. Boş olan vhost için sertifika yoktur.
-pub fn sources_from_vhosts(vhosts: &[LoadedVHost], base_dir: &Path) -> Vec<CertSource> {
-    vhosts
-        .iter()
-        .filter(|v| !v.entry.ssl.certificate.trim().is_empty() && !v.entry.ssl.key.trim().is_empty())
-        .map(|v| {
-            let mut names = vec![v.entry.name.clone()];
-            names.extend(v.entry.aliases.iter().cloned());
-            CertSource {
-                label: v.file_name.clone(),
-                names,
-                cert_path: resolve_path(base_dir, v.entry.ssl.certificate.trim()),
-                key_path: resolve_path(base_dir, v.entry.ssl.key.trim()),
-            }
-        })
-        .collect()
-}
-
+/// Tek sertifikalı dinleyiciler için sabit çözümleyici.
 struct FixedCertResolver(Arc<CertifiedKey>);
 
 impl std::fmt::Debug for FixedCertResolver {
@@ -240,33 +80,6 @@ impl ResolvesServerCert for FixedCertResolver {
     fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(Arc::clone(&self.0))
     }
-}
-
-fn default_alpn_protocols() -> Vec<Vec<u8>> {
-    vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-}
-
-/// Yapılandırmadaki ALPN protokol adlarını (`"h2"`, `"http/1.1"` vb.) bayt listesine dönüştürür.
-/// Boş girdileri ve yinelenen protokolleri sırayı bozmadan temizler.
-pub fn parse_alpn_list(alpn: &[String]) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    for raw in alpn {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let bytes = if trimmed.eq_ignore_ascii_case("h2") {
-            b"h2".to_vec()
-        } else if trimmed.eq_ignore_ascii_case("http/1.1") {
-            b"http/1.1".to_vec()
-        } else {
-            trimmed.as_bytes().to_vec()
-        };
-        if !out.contains(&bytes) {
-            out.push(bytes);
-        }
-    }
-    out
 }
 
 fn build_acceptor_with_resolver(
@@ -311,90 +124,18 @@ pub fn build_single_cert_acceptor_with_alpn(
     build_acceptor_with_resolver(Arc::new(FixedCertResolver(Arc::new(ck))), alpn_protocols)
 }
 
-/// Sunucu tarafındaki TLS akışından müzakere edilen ALPN protokolünü okur.
-pub fn negotiated_alpn<T>(stream: &tokio_rustls::server::TlsStream<T>) -> Option<Vec<u8>> {
-    stream.get_ref().1.alpn_protocol().map(|p| p.to_vec())
-}
-
 /// Sunucu tarafındaki TLS akışından istemcinin gönderdiği SNI alan adını okur.
 pub fn client_sni<T>(stream: &tokio_rustls::server::TlsStream<T>) -> Option<String> {
     stream.get_ref().1.server_name().map(|s| s.to_string())
 }
 
-/// Basit ASN.1 DER (Tag-Length-Value) ayrıştırıcısı.
-fn parse_der_tlv<'a>(input: &'a [u8]) -> Option<(u8, &'a [u8], &'a [u8])> {
-    if input.is_empty() {
-        return None;
-    }
-    let tag = input[0];
-    let mut i = 1;
-    if i >= input.len() {
-        return None;
-    }
-    let len_byte = input[i];
-    i += 1;
-    let len = if len_byte & 0x80 == 0 {
-        len_byte as usize
-    } else {
-        let count = (len_byte & 0x7f) as usize;
-        if count == 0 || count > 4 || i + count > input.len() {
-            return None;
-        }
-        let mut l = 0usize;
-        for &b in &input[i..i + count] {
-            l = (l << 8) | (b as usize);
-        }
-        i += count;
-        l
-    };
-    if i + len > input.len() {
-        return None;
-    }
-    let value = &input[i..i + len];
-    let rest = &input[i + len..];
-    Some((tag, value, rest))
-}
-
-/// Bir DER kodlu X.509 sertifikasının seri numarasını onaltılık (hex) dize olarak çıkarır.
-pub fn extract_cert_serial_hex(cert_der: &[u8]) -> Option<String> {
-    // 1. Certificate SEQUENCE
-    let (tag, cert_val, _) = parse_der_tlv(cert_der)?;
-    if tag != 0x30 {
-        return None;
-    }
-    // 2. TBSCertificate SEQUENCE
-    let (tag, mut tbs_val, _) = parse_der_tlv(cert_val)?;
-    if tag != 0x30 {
-        return None;
-    }
-    // 3. Opsiyonel [0] EXPLICIT version varsa geç
-    if let Some((0xa0, _, rest)) = parse_der_tlv(tbs_val) {
-        tbs_val = rest;
-    }
-    // 4. INTEGER serialNumber
-    let (tag, serial_bytes, _) = parse_der_tlv(tbs_val)?;
-    if tag != 0x02 || serial_bytes.is_empty() {
-        return None;
-    }
-    // Pozitif ASN.1 INTEGER için baştaki 0x00 işaret baytını ayıkla
-    let s_bytes = if serial_bytes.len() > 1 && serial_bytes[0] == 0 {
-        &serial_bytes[1..]
-    } else {
-        serial_bytes
-    };
-    let mut hex = String::with_capacity(s_bytes.len() * 2);
-    for b in s_bytes {
-        use std::fmt::Write;
-        let _ = write!(hex, "{:02x}", b);
-    }
-    Some(hex)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustls::pki_types::ServerName;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, ServerName};
     use std::io::Write;
+    use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_rustls::TlsConnector;
 
@@ -420,144 +161,6 @@ mod tests {
             cert_path: c,
             key_path: k,
         }
-    }
-
-    #[test]
-    fn loads_certificate_and_selects_by_sni() {
-        let d = temp_dir("sni");
-        let a = make_cert(&d, "a", &["a.test", "www.a.test"]);
-        let b = make_cert(&d, "b", &["b.test"]);
-        let r = SniResolver::new();
-        let rep = r.replace(&[a, b]);
-        assert_eq!(rep.loaded, 2);
-        assert!(rep.skipped.is_empty());
-        let ca = r.lookup(Some("a.test")).unwrap();
-        let cb = r.lookup(Some("B.TEST")).unwrap();
-        let alias = r.lookup(Some("www.a.test")).unwrap();
-        assert!(Arc::ptr_eq(&ca, &alias));
-        assert!(!Arc::ptr_eq(&ca, &cb));
-        // eşleşmeyen / SNI'siz -> ilk yüklenen (a)
-        assert!(Arc::ptr_eq(&r.lookup(Some("yok.test")).unwrap(), &ca));
-        assert!(Arc::ptr_eq(&r.lookup(None).unwrap(), &ca));
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn broken_or_missing_files_are_skipped_without_panic() {
-        let d = temp_dir("bad");
-        let good = make_cert(&d, "good", &["good.test"]);
-        let missing = CertSource {
-            label: "missing".into(),
-            names: vec!["missing.test".into()],
-            cert_path: d.join("yok.pem"),
-            key_path: d.join("yok.key"),
-        };
-        let garbage = {
-            let c = d.join("g.pem");
-            let k = d.join("g.key");
-            std::fs::File::create(&c).unwrap().write_all(b"bu pem degil").unwrap();
-            std::fs::File::create(&k).unwrap().write_all(b"bu da degil").unwrap();
-            CertSource {
-                label: "garbage".into(),
-                names: vec!["garbage.test".into()],
-                cert_path: c,
-                key_path: k,
-            }
-        };
-        // anahtar sertifikaya uymuyor
-        let other = make_cert(&d, "other", &["other.test"]);
-        let mismatch = CertSource {
-            label: "mismatch".into(),
-            names: vec!["mismatch.test".into()],
-            cert_path: good.cert_path.clone(),
-            key_path: other.key_path.clone(),
-        };
-        let r = SniResolver::new();
-        let rep = r.replace(&[missing, garbage, mismatch, good]);
-        assert_eq!(rep.loaded, 1);
-        let labels: Vec<_> = rep.skipped.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(labels, ["missing", "garbage", "mismatch"]);
-        assert!(rep.skipped.iter().all(|s| !s.reason.is_empty()));
-        assert!(r.has_default());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn empty_table_has_no_default() {
-        let r = SniResolver::new();
-        assert!(!r.has_default());
-        assert!(r.lookup(Some("x.test")).is_none());
-    }
-
-    #[test]
-    fn reload_replaces_table() {
-        let d = temp_dir("reload");
-        let a = make_cert(&d, "a", &["a.test"]);
-        let r = SniResolver::new();
-        r.replace(std::slice::from_ref(&a));
-        let before = r.lookup(Some("a.test")).unwrap();
-        let a2 = make_cert(&d, "a", &["a.test"]); // aynı yola yeni sertifika
-        r.replace(&[a2]);
-        let after = r.lookup(Some("a.test")).unwrap();
-        assert!(!Arc::ptr_eq(&before, &after));
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[tokio::test]
-    async fn reload_reads_updated_files_from_disk_and_updates_serial() {
-        let d = temp_dir("reload_disk_serial");
-        let cert_source = make_cert(&d, "site", &["ornek1.test"]);
-        let resolver = Arc::new(SniResolver::new());
-        let rep1 = resolver.replace(std::slice::from_ref(&cert_source));
-        assert_eq!(rep1.loaded, 1);
-
-        let serial_before = resolver
-            .lookup_serial(Some("ornek1.test"))
-            .expect("ilk sertifika serisi okunabilmeli");
-        assert!(!serial_before.is_empty());
-
-        let acceptor = build_acceptor(Arc::clone(&resolver)).unwrap();
-
-        // 1. İlk sertifika ile canlı TLS el sıkışması
-        let leaf1 = CertificateDer::from_pem_file(&cert_source.cert_path).unwrap();
-        assert_tls_handshake_and_echo(
-            acceptor.clone(),
-            "ornek1.test",
-            &leaf1,
-            vec![b"http/1.1".to_vec()],
-            Some(b"http/1.1"),
-        )
-        .await;
-
-        // 2. Diskteki sertifika dosyasını yenile (certbot cert renewal simülasyonu)
-        let _updated_cert = make_cert(&d, "site", &["ornek1.test"]);
-        let leaf2 = CertificateDer::from_pem_file(&cert_source.cert_path).unwrap();
-        assert_ne!(leaf1.as_ref(), leaf2.as_ref(), "Yeni sertifika baytları farklı olmalı");
-
-        // 3. SniResolver::reload() çağrısı ile diskten güncelle
-        let rep2 = resolver.reload();
-        assert_eq!(rep2.loaded, 1);
-
-        let serial_after = resolver
-            .lookup_serial(Some("ornek1.test"))
-            .expect("yenilenen sertifika serisi okunabilmeli");
-        assert_ne!(
-            serial_before, serial_after,
-            "Yenileme sonrası sertifika seri numarası değişmiş olmalı (Önce: {}, Sonra: {})",
-            serial_before, serial_after
-        );
-
-        // 4. Dinleyiciyi yeniden başlatmadan YENİ sertifikanın sunulduğunu el sıkışmayla doğrula
-        assert_tls_handshake_and_echo(
-            acceptor,
-            "ornek1.test",
-            &leaf2,
-            vec![b"http/1.1".to_vec()],
-            Some(b"http/1.1"),
-        )
-        .await;
-
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[derive(Debug)]
@@ -645,6 +248,136 @@ mod tests {
         let (srv_alpn, srv_sni) = server_task.await.unwrap();
         assert_eq!(srv_alpn.as_deref(), expected_alpn);
         assert_eq!(srv_sni.as_deref(), Some(server_name));
+    }
+
+    #[test]
+    fn loads_certificate_and_selects_by_sni() {
+        let d = temp_dir("sni");
+        let a = make_cert(&d, "a", &["a.test", "www.a.test"]);
+        let b = make_cert(&d, "b", &["b.test"]);
+        let r = SniResolver::new();
+        let rep = r.replace(&[a, b]);
+        assert_eq!(rep.loaded, 2);
+        assert!(rep.skipped.is_empty());
+        let ca = r.lookup(Some("a.test")).unwrap();
+        let cb = r.lookup(Some("B.TEST")).unwrap();
+        let alias = r.lookup(Some("www.a.test")).unwrap();
+        assert!(Arc::ptr_eq(&ca, &alias));
+        assert!(!Arc::ptr_eq(&ca, &cb));
+        // eşleşmeyen / SNI'siz -> ilk yüklenen (a)
+        assert!(Arc::ptr_eq(&r.lookup(Some("yok.test")).unwrap(), &ca));
+        assert!(Arc::ptr_eq(&r.lookup(None).unwrap(), &ca));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn broken_or_missing_files_are_skipped_without_panic() {
+        let d = temp_dir("bad");
+        let good = make_cert(&d, "good", &["good.test"]);
+        let missing = CertSource {
+            label: "missing".into(),
+            names: vec!["missing.test".into()],
+            cert_path: d.join("yok.pem"),
+            key_path: d.join("yok.key"),
+        };
+        let garbage = {
+            let c = d.join("g.pem");
+            let k = d.join("g.key");
+            std::fs::File::create(&c).unwrap().write_all(b"bu pem degil").unwrap();
+            std::fs::File::create(&k).unwrap().write_all(b"bu da degil").unwrap();
+            CertSource {
+                label: "garbage".into(),
+                names: vec!["garbage.test".into()],
+                cert_path: c,
+                key_path: k,
+            }
+        };
+        // anahtar sertifikaya uymuyor
+        let other = make_cert(&d, "other", &["other.test"]);
+        let mismatch = CertSource {
+            label: "mismatch".into(),
+            names: vec!["mismatch.test".into()],
+            cert_path: good.cert_path.clone(),
+            key_path: other.key_path.clone(),
+        };
+        let r = SniResolver::new();
+        let rep = r.replace(&[missing, garbage, mismatch, good]);
+        assert_eq!(rep.loaded, 1);
+        let labels: Vec<_> = rep.skipped.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["missing", "garbage", "mismatch"]);
+        assert!(rep.skipped.iter().all(|s| !s.reason.is_empty()));
+        assert!(r.has_default());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn empty_table_has_no_default() {
+        let r = SniResolver::new();
+        assert!(!r.has_default());
+        assert!(r.lookup(Some("x.test")).is_none());
+    }
+
+    #[test]
+    fn reload_replaces_table() {
+        let d = temp_dir("reload");
+        let a = make_cert(&d, "a", &["a.test"]);
+        let r = SniResolver::new();
+        r.replace(std::slice::from_ref(&a));
+        let before = r.lookup(Some("a.test")).unwrap();
+        let a2 = make_cert(&d, "a", &["a.test"]);
+        r.replace(&[a2]);
+        let after = r.lookup(Some("a.test")).unwrap();
+        assert!(!Arc::ptr_eq(&before, &after));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn reload_reads_updated_files_from_disk_and_updates_serial() {
+        let d = temp_dir("reload_disk_serial");
+        let cert_source = make_cert(&d, "site", &["ornek1.test"]);
+        let resolver = Arc::new(SniResolver::new());
+        let rep1 = resolver.replace(std::slice::from_ref(&cert_source));
+        assert_eq!(rep1.loaded, 1);
+
+        let serial_before = resolver
+            .lookup_serial(Some("ornek1.test"))
+            .expect("ilk sertifika serisi okunabilmeli");
+        assert!(!serial_before.is_empty());
+
+        let acceptor = build_acceptor(Arc::clone(&resolver)).unwrap();
+
+        let leaf1 = CertificateDer::from_pem_file(&cert_source.cert_path).unwrap();
+        assert_tls_handshake_and_echo(
+            acceptor.clone(),
+            "ornek1.test",
+            &leaf1,
+            vec![b"http/1.1".to_vec()],
+            Some(b"http/1.1"),
+        )
+        .await;
+
+        let _updated_cert = make_cert(&d, "site", &["ornek1.test"]);
+        let leaf2 = CertificateDer::from_pem_file(&cert_source.cert_path).unwrap();
+        assert_ne!(leaf1.as_ref(), leaf2.as_ref());
+
+        let rep2 = resolver.reload();
+        assert_eq!(rep2.loaded, 1);
+
+        let serial_after = resolver
+            .lookup_serial(Some("ornek1.test"))
+            .expect("yenilenen sertifika serisi okunabilmeli");
+        assert_ne!(serial_before, serial_after);
+
+        assert_tls_handshake_and_echo(
+            acceptor,
+            "ornek1.test",
+            &leaf2,
+            vec![b"http/1.1".to_vec()],
+            Some(b"http/1.1"),
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[tokio::test]
@@ -763,8 +496,8 @@ mod tests {
         let d = temp_dir("alpn_single_h2");
         let panel = make_cert(&d, "panel", &["localhost"]);
         let leaf = CertificateDer::from_pem_file(&panel.cert_path).unwrap();
-        let acceptor = build_single_cert_acceptor_with_alpn(&panel.cert_path, &panel.key_path, parsed)
-            .unwrap();
+        let acceptor =
+            build_single_cert_acceptor_with_alpn(&panel.cert_path, &panel.key_path, parsed).unwrap();
 
         assert_tls_handshake_and_echo(
             acceptor,
@@ -787,6 +520,60 @@ mod tests {
         let acceptor = build_acceptor(resolver).unwrap();
 
         assert_tls_handshake_and_echo(acceptor, "a.test", &leaf_a, Vec::new(), None).await;
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn listener_tls_builder_with_wildcard_sni_and_resumption() {
+        let d = temp_dir("listener_wildcard");
+        let wild = make_cert(&d, "wild", &["*.example.com", "example.com"]);
+        let leaf_wild = CertificateDer::from_pem_file(&wild.cert_path).unwrap();
+
+        let resolver = Arc::new(SniResolver::new());
+        resolver.replace(&[wild]);
+
+        let listener_acceptor = ListenerTlsBuilder::new("main_443")
+            .with_resolver(Arc::clone(&resolver))
+            .with_min_version(TlsVersion::Tls12)
+            .with_max_version(TlsVersion::Tls13)
+            .with_alpn(AlpnConfig::h2_and_http11())
+            .with_session_config(TlsSessionConfig::new().with_capacity(1024))
+            .build()
+            .expect("ListenerTlsAcceptor derlenemedi");
+
+        assert_eq!(listener_acceptor.name(), "main_443");
+        assert_eq!(listener_acceptor.session_metrics().hits(), 0);
+
+        // Alt alan adı (*.example.com) üzerinden başarılı el sıkışma
+        assert_tls_handshake_and_echo(
+            listener_acceptor.tls_acceptor().clone(),
+            "api.example.com",
+            &leaf_wild,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            Some(b"h2"),
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn acme_cert_expiry_and_validity_extraction() {
+        let d = temp_dir("acme_expiry");
+        let cert = make_cert(&d, "site", &["example.test"]);
+        let der = CertificateDer::from_pem_file(&cert.cert_path).unwrap();
+
+        let validity = extract_cert_validity(der.as_ref());
+        assert!(validity.is_some(), "X.509 geçerlilik tarihleri ayrıştırılabilmeli");
+        let (nb, na) = validity.unwrap();
+        assert!(na > nb, "Bitiş tarihi başlangıçtan sonra olmalı");
+
+        let days_left = days_until_cert_expiry(der.as_ref());
+        assert!(days_left.is_some());
+        // rcgen self-signed sertifikalar genelde 1 yıl geçerlidir (>= 300 gün)
+        assert!(days_left.unwrap() > 0, "Yeni oluşturulan sertifikanın süresi geçerli olmalı");
+        assert!(!is_cert_expired(der.as_ref()));
+
         let _ = std::fs::remove_dir_all(&d);
     }
 }

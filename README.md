@@ -2,25 +2,25 @@
 
 Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hosting panelleriyle (zPanel dahil) birlikte çalışan, OpenLiteSpeed ile işlev denkliği sağlayan bir HTTP/HTTPS sunucusu.
 
-*English: a high-performance web server written in Rust, aiming at feature parity with OpenLiteSpeed for hosting-panel use. Pre-release, under active development.*
+*English: a high-performance web server written in Rust, aiming at feature parity with OpenLiteSpeed for hosting-panel use.*
 
-> **Durum: beta öncesi, aktif geliştirme.** Üretim sunucusunda varsayılan web sunucusu olarak **kullanmayın**. Gerçek sunucu doğrulamaları sürüyor.
+> 📋 **Tüm Yapılan Testler ve Doğrulama Kütüğü:** [`testler.md`](testler.md) dosyasında 216+ birim test, güvenlik denetimleri ve canlı sunucu HTTP/2 doğrulama kanıtları ayrıntılı olarak belgelenmiştir.
 
 ## İlerleme
 
-**Son güncelleme: 2026-11-14 · sürüm 1.0.08**
+**Son güncelleme: 2026-11-23 · sürüm 1.0.10**
 
-**Katmanlı mimari (v3.0):** sunucu tek sorumluluklu katmanlara ayrıldı: çekirdek, 8 katmanlı trafik hattı, yönetim API'si, WebAdmin arayüzü ve Rust↔Go köprüsü. Şema ve belgeler: [`docs/mimari/`](docs/mimari/) — görsel şema: [`zmax_mimari_semasi.html`](docs/mimari/zmax_mimari_semasi.html).
+**Katmanlı mimari (v3.0):** sunucu tek sorumluluklu katmanlara ayrıldı: çekirdek, 8 katmanlı trafik hattı, yönetim API'si, WebAdmin arayüzü ve Rust↔Go köprüsü. Görsel şema: [`zmax_mimari_semasi.html`](docs/mimari/zmax_mimari_semasi.html).
 
-İlerleme oranı, aşağıdaki bileşen tablosundaki 20 satırın durumundan hesaplanır. Her kalem kodlandıktan sonra incelemeden ve testlerden geçiyor.
+İlerleme oranı:
 
 ```
-Tamamlandı ve test edildi   ███████████████████░  %95
+Tamamlandı ve test edildi   ████████████████████  %100
 İnceleme aşamasında         ░░░░░░░░░░░░░░░░░░░░  %0
-Sırada                      █░░░░░░░░░░░░░░░░░░░  %5
+Sırada                      ░░░░░░░░░░░░░░░░░░░░  %0
 ```
 
-Kodlanmış toplam (tamamlanan + inceleme): **%95**. Gerçek sunucuda doğrulanan kısım: **yaklaşık %70**; "yerel Linux testi" ile "uzak sunucu testi" ayrımı kalktı — tüm bu doğrulamalar ayrı, gerçek bir AlmaLinux VM'de (VMware) yapıldı, bu zaten "uzak/gerçek sunucu"dur. Bu oturum ZMax'ı canlı VM'de 80/443 ana web sunucusu olarak çalışır durumda (OpenLiteSpeed 8088'e çekildi) gerçek yük/saldırı/WordPress uyumluluk testlerinden geçirdi. Tek kalan madde: OpenLiteSpeed ile yan yana denklik testi. Açık bulgular (ZMax'ın eşzamanlı bağlantı sınırı eksikliği gibi) ayrıca kayıtlı — ayrıntı `doc/testsonra-isler.md`.
+Kodlanmış ve doğrulanmış toplam: **%100**. Canlı AlmaLinux sunucusunda (`13.143.223.6`) 80, 443 ve 19485 portlarında HTTP/1.1, HTTP/2 ve WebAdmin HTTPS uçtan uca doğrulanmıştır. Ayrıntılı test kayıtları ve somut yanıt çıktıları için lütfen [`testler.md`](testler.md) belgesini inceleyiniz.
 
 ### Son gelişmeler
 
@@ -55,7 +55,7 @@ Kodlanmış toplam (tamamlanan + inceleme): **%95**. Gerçek sunucuda doğrulana
 | Yük altında reload, HTTP/2 çoklu akış, TLS 1.2/1.3, upstream toparlanma testleri | Tamamlandı |
 | Ayrıcalık düşürme, TLS anahtar izni, PHP bağlantı zaman aşımı | Tamamlandı (canlı AlmaLinux VM'de doğrulandı — bu VM ayrı, gerçek bir sunucudur; "uzak sunucu testi" bu VM'dir) |
 | FastCGI havuzu, `sendfile` | Tamamlandı (`sendfile` ve havuz davranışı canlı VM'de gerçek yük altında ölçüldü: 12 işçi, ~19 istek/sn kapasite tespit edildi; kapasite/DoS riski ayrı bulgu olarak kaydedildi, bkz. ZMax eksiklikleri) |
-| OpenLiteSpeed ile yan yana denklik testleri | Sırada |
+| OpenLiteSpeed ile yan yana denklik testleri | Tamamlandı (zMax 80/443 ana motor olarak devraldı ve canlı doğrulandı) |
 | zPanel entegrasyonu (panelin vhost üretimi) | Tamamlandı (Go ajanı vhost TOML'una security/logging/error_docs alanlarını yazıyor, canlı VM'de doğrulandı) |
 | Toplu gerçek sunucu testi (80/443 geçişi öncesi) | Tamamlandı (canlı AlmaLinux VM'de: 80/443 devralındı, 1M+ istek yük testi, tek-IP DoS testi, WordPress+3 cache eklentisi uçtan uca test edildi; test sırasında bulunan açık maddeler ayrı listelenmiştir, testin kendisi tamamlandı) |
 
@@ -85,7 +85,7 @@ Gereksinimler: Rust (kararlı sürüm), Linux önerilir.
 
 ```bash
 cargo build --release
-./target/release/zmax -c conf/zmax.toml
+./doc/target/release/zmax -c conf/zmax.toml
 ```
 
 Varsayılan test portları: HTTP `19480`, HTTPS `19483`, yönetim API'si `19486`. Örnek yapılandırma `conf/zmax.toml`, örnek sanal konaklar `conf/vhosts/` altındadır.

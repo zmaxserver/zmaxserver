@@ -1,0 +1,15 @@
+[package]
+name = "zmax-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = "1.6"
+dashmap = "5.5"
+tokio = { version = "1.38", features = ["sync", "time", "fs", "io-util"] }
+moka = { version = "0.12", features = ["future"] }
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["full"] }
+

@@ -1,0 +1,71 @@
+From aaec61ca33628120aeaea3de370100a2033f1a2c Mon Sep 17 00:00:00 2001
+From: webtasarimofisim <webtasarimofisim@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 10:16:04 +0300
+Subject: [PATCH 3/8] [vm-yukle] status ram_mb gercek RSS; reddedilen reload'da
+ gercek vhost sayisi
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ crates/zmax-bin/src/api/routes/system.rs           | 12 +++++++++++-
+ crates/zmax-bin/src/api/services/config_service.rs |  5 ++++-
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/crates/zmax-bin/src/api/routes/system.rs b/crates/zmax-bin/src/api/routes/system.rs
+index fc5343a..dc2d5bc 100644
+--- a/crates/zmax-bin/src/api/routes/system.rs
++++ b/crates/zmax-bin/src/api/routes/system.rs
+@@ -108,6 +108,15 @@ where
+     Ok(false)
+ }
+ 
++/// Süreç yerleşik bellek kullanımı (MB); Linux dışında veya okunamazsa 0.
++fn rss_mb() -> u64 {
++    std::fs::read_to_string("/proc/self/statm")
++        .ok()
++        .and_then(|t| t.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
++        .map(|pages| pages * 4096 / (1024 * 1024))
++        .unwrap_or(0)
++}
++
+ pub(super) async fn status<S>(
+     socket: &mut S,
+     req: &ParsedHttpRequest,
+@@ -136,7 +145,7 @@ where
+         };
+         let cfg = &rt.config;
+         let json = format!(
+-            r#"{{"ok":true,"running":true,"engine":"zmax","version":"{}","pid":{},"uptime_seconds":{},"total_requests":{},"cache_hits":{},"cache_misses":{},"workers":{},"ram_mb":12,"vhosts_loaded":{},"active_sites":{},"modules_loaded":{},"banned_count":{},"waf_events_total":{},"waf_blocked_24h":{},"waf":{{"events_total":{},"blocked_24h":{},"recent_count":{}}},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"cache":{{"enabled":{},"memory_cache_mb":{},"default_ttl_seconds":{},"disk_enabled":{}}},"security":{{"rate_limit_enabled":{},"rate_limit_per_minute":{},"keep_alive_timeout_sec":{},"slowloris_header_timeout_sec":{},"max_body_size_mb":{},"waf_events_total":{},"waf_blocked_24h":{}}},"vhosts_dir":"{}","config_path":"{}"}}"#,
++            r#"{{"ok":true,"running":true,"engine":"zmax","version":"{}","pid":{},"uptime_seconds":{},"total_requests":{},"cache_hits":{},"cache_misses":{},"workers":{},"ram_mb":{},"vhosts_loaded":{},"active_sites":{},"modules_loaded":{},"banned_count":{},"waf_events_total":{},"waf_blocked_24h":{},"waf":{{"events_total":{},"blocked_24h":{},"recent_count":{}}},"ports":{{"http":{},"https":{},"admin":{},"api":{}}},"listeners":{{"http":"{}:{}","https":"{}:{}","admin":"{}:{}","api":"{}:{}"}},"cache":{{"enabled":{},"memory_cache_mb":{},"default_ttl_seconds":{},"disk_enabled":{}}},"security":{{"rate_limit_enabled":{},"rate_limit_per_minute":{},"keep_alive_timeout_sec":{},"slowloris_header_timeout_sec":{},"max_body_size_mb":{},"waf_events_total":{},"waf_blocked_24h":{}}},"vhosts_dir":"{}","config_path":"{}"}}"#,
+             env!("ZMAX_VERSION"),
+             std::process::id(),
+             uptime_secs,
+@@ -144,6 +153,7 @@ where
+             hits,
+             misses,
+             workers,
++            rss_mb(),
+             rt.vhosts.len(),
+             rt.vhosts.len(),
+             rt.modules.len(),
+diff --git a/crates/zmax-bin/src/api/services/config_service.rs b/crates/zmax-bin/src/api/services/config_service.rs
+index c6fd699..aa4cc30 100644
+--- a/crates/zmax-bin/src/api/services/config_service.rs
++++ b/crates/zmax-bin/src/api/services/config_service.rs
+@@ -27,10 +27,13 @@ where
+             Err(e) => {
+                 super::super::audit::kayit(state, "api", "reload", "tum-yapilandirma", false).await;
+                 crate::api::bridge::emit("config_rejected", &format!(r#"{{"error":"{}"}}"#, json_escape(&e)));
++                // Reddedilen yenilemede sunucu eski yapılandırmada kalır: gerçek yüklü vhost sayısı yazılır.
++                let aktif_vhost = state.runtime.read().await.vhosts.len();
+                 let json = format!(
+-                    r#"{{"ok":false,"error":"{}","generation":{},"vhosts_loaded":0,"errors":["{}"]}}"#,
++                    r#"{{"ok":false,"error":"{}","generation":{},"vhosts_loaded":{},"errors":["{}"]}}"#,
+                     json_escape(&e),
+                     crate::core::state::CONFIG_GENERATION.load(std::sync::atomic::Ordering::SeqCst),
++                    aktif_vhost,
+                     json_escape(&e)
+                 );
+                 send_json_response(socket, 500, "Internal Server Error", &cors_origin, &json)
+-- 
+2.55.0.windows.3
+

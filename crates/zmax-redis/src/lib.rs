@@ -44,7 +44,7 @@ fn default_reconnect_backoff_ms() -> u64 {
     500
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RedisConfig {
     #[serde(default = "default_redis_host")]
@@ -69,6 +69,24 @@ pub struct RedisConfig {
     pub channel_prefix: String,
     #[serde(default = "default_reconnect_backoff_ms")]
     pub reconnect_backoff_ms: u64,
+}
+
+impl std::fmt::Debug for RedisConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("addr", &self.addr)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "***MASKELENDI***"))
+            .field("database", &self.database)
+            .field("db", &self.db)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("pubsub_channel", &self.pubsub_channel)
+            .field("channel_prefix", &self.channel_prefix)
+            .field("reconnect_backoff_ms", &self.reconnect_backoff_ms)
+            .finish()
+    }
 }
 
 impl Default for RedisConfig {

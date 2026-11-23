@@ -4,8 +4,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// sanitizeDomain yol gezinme (path traversal) ve zararlı karakterleri engeller (ZMX-010)
+func sanitizeDomain(domain string) (string, error) {
+	clean := strings.TrimSpace(domain)
+	if clean == "" || strings.Contains(clean, "/") || strings.Contains(clean, "\\") || strings.Contains(clean, "..") || strings.ContainsRune(clean, 0) {
+		return "", fmt.Errorf("lifecycle: gecersiz domain adi veya guvensiz yol karakteri")
+	}
+	for _, r := range clean {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_') {
+			return "", fmt.Errorf("lifecycle: guvensiz karakter tespit edildi: %c", r)
+		}
+	}
+	return clean, nil
+}
 
 // AtomicVHostWriter vHost TOML dosyalarını güvenli ve atomik yazan bileşen (B4)
 type AtomicVHostWriter struct {
@@ -44,8 +59,12 @@ func (w *AtomicVHostWriter) ReleaseLock(lock *os.File) {
 
 // WriteAtomic Geçici dosyaya yazar, fsync eder ve atomik isim değişikliği (rename) yapar
 func (w *AtomicVHostWriter) WriteAtomic(domain string, content []byte) error {
-	targetPath := filepath.Join(w.vhostsDir, domain+".toml")
-	tmpPath := filepath.Join(w.vhostsDir, fmt.Sprintf(".%s.tmp.%d", domain, time.Now().UnixNano()))
+	safeDomain, err := sanitizeDomain(domain)
+	if err != nil {
+		return err
+	}
+	targetPath := filepath.Join(w.vhostsDir, safeDomain+".toml")
+	tmpPath := filepath.Join(w.vhostsDir, fmt.Sprintf(".%s.tmp.%d", safeDomain, time.Now().UnixNano()))
 
 	// 1. Geçici dosyayı oluştur
 	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -79,12 +98,16 @@ func (w *AtomicVHostWriter) WriteAtomic(domain string, content []byte) error {
 
 // Backup mevcut TOML dosyasını bir önceki sürüme yedekler (.bak)
 func (w *AtomicVHostWriter) Backup(domain string) (string, error) {
-	src := filepath.Join(w.vhostsDir, domain+".toml")
+	safeDomain, err := sanitizeDomain(domain)
+	if err != nil {
+		return "", err
+	}
+	src := filepath.Join(w.vhostsDir, safeDomain+".toml")
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return "", nil // İlk defa oluşturuluyorsa yedek yok
 	}
 
-	bak := filepath.Join(w.vhostsDir, fmt.Sprintf(".%s.prev.bak", domain))
+	bak := filepath.Join(w.vhostsDir, fmt.Sprintf(".%s.prev.bak", safeDomain))
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return "", err
@@ -97,11 +120,24 @@ func (w *AtomicVHostWriter) Backup(domain string) (string, error) {
 
 // Rollback hata durumunda yedeği geri yükler
 func (w *AtomicVHostWriter) Rollback(domain, backupPath string) error {
-	target := filepath.Join(w.vhostsDir, domain+".toml")
+	safeDomain, err := sanitizeDomain(domain)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(w.vhostsDir, safeDomain+".toml")
 	if backupPath == "" {
 		// Öncesinde dosya yoktu, yeni oluşturulan hatalı dosyayı kaldır
-		return os.Remove(target)
+		if _, err := os.Stat(target); err == nil {
+			return os.Remove(target)
+		}
+		return nil
 	}
-	return os.Rename(backupPath, target)
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return fmt.Errorf("lifecycle: geri yuklenecek yedek dosya bulunamadi: %s", backupPath)
+	}
+	if err := os.Rename(backupPath, target); err != nil {
+		return fmt.Errorf("lifecycle: yedekten geri yukleme basarisiz: %w", err)
+	}
+	return nil
 }
 

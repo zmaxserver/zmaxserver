@@ -37,6 +37,26 @@
                         <span>{{ t('nav_overview') }}</span>
                     </div>
                 </li>
+                <li class="nav-item" :class="{ active: currentTab === 'server_config' }" @click="selectTab('server_config')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                        </svg>
+                        <span>{{ t('nav_server_config') || 'Sunucu Ayarları' }}</span>
+                    </div>
+                    <span class="nav-badge nav-badge-orange">ZLS</span>
+                </li>
+                <li class="nav-item" :class="{ active: currentTab === 'listeners' }" @click="selectTab('listeners')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                        </svg>
+                        <span>{{ t('nav_listeners') || 'Dinleyiciler (Portlar)' }}</span>
+                    </div>
+                </li>
             </ul>
 
             <div class="nav-category">{{ t('nav_hosting') }}</div>
@@ -49,6 +69,15 @@
                         <span>{{ t('nav_vhosts') }}</span>
                     </div>
                     <span class="nav-badge">{{ vhosts.length }}</span>
+                </li>
+                <li class="nav-item" :class="{ active: currentTab === 'templates' }" @click="selectTab('templates')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        <span>{{ t('nav_templates') || 'VHost Şablonları' }}</span>
+                    </div>
                 </li>
                 <li class="nav-item" :class="{ active: currentTab === 'cache' }" @click="selectTab('cache')">
                     <div class="nav-item-content">
@@ -75,6 +104,16 @@
 
             <div class="nav-category">{{ t('nav_system') }}</div>
             <ul class="nav-menu">
+                <li class="nav-item" :class="{ active: currentTab === 'livestats' }" @click="selectTab('livestats')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        <span>{{ t('nav_livestats') || 'Canlı Trafik & Havuz' }}</span>
+                    </div>
+                    <span class="status-dot status-dot-active"></span>
+                </li>
                 <li class="nav-item" :class="{ active: currentTab === 'modules' }" @click="selectTab('modules')">
                     <div class="nav-item-content">
                         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
@@ -144,6 +183,16 @@
                         </option>
                     </select>
 
+                    <!-- Graceful Reload (Kesintisiz Yeniden Yükleme) Butonu -->
+                    <button type="button" class="btn-zmax btn-green-zmax btn-sm-compact d-flex align-items-center gap-1" :class="{ 'btn-orange': reloadPending }" :disabled="reloadInProgress" @click="triggerGracefulReload" :title="t('btn_graceful_reload_title') || 'Yeniden Yükle (Graceful Reload)'">
+                        <svg class="icon icon-sm" :class="{ 'spin-anim': reloadInProgress }" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <polyline points="1 20 1 14 7 14"></polyline>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                        </svg>
+                        <span class="d-none d-sm-inline">{{ reloadInProgress ? (t('btn_reloading') || 'Yükleniyor...') : (t('btn_graceful_reload') || 'Graceful Reload') }}</span>
+                    </button>
+
                     <div class="system-load d-none d-xl-flex">
                         <span class="status-dot"></span>
                         {{ t('system_load') }}: 0.00 · 0.00 · 0.00
@@ -159,12 +208,6 @@
                         <span class="status-dot" :class="hasActiveToken ? 'status-dot-active' : 'status-dot-warning'"></span>
                     </button>
 
-                    <div class="user-pill d-none d-sm-flex" role="button" @click="openAuthModal" style="cursor: pointer;" :title="t('auth_modal_title')">
-                        <svg class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle>
-                        </svg>
-                        <span>{{ t('admin_user') }}</span>
-                    </div>
                 </div>
             </header>
 
@@ -184,9 +227,44 @@
                         :hit-rate="hitRate"
                         :formatted-uptime="formattedUptime"
                         :t="t"
-                        @fetch-status="fetchStatus"
-                        @purge-all-cache="fetchStatus"
+                        @fetch-status="refreshNow"
+                        @purge-all-cache="purgeAllCache"
                     ></view-dashboard>
+
+                    <!-- SUNUCU YAPILANDIRMASI (SERVER CONFIGURATION - OLS DENKLİĞİ) -->
+                    <view-server-config
+                        v-if="currentTab === 'server_config'"
+                        :stats="stats"
+                        :t="t"
+                        @show-notice="showNotice"
+                        @config-changed="onConfigChanged"
+                    ></view-server-config>
+
+                    <!-- DİNLEYİCİLER & AĞ PORTLARI (LISTENERS - OLS DENKLİĞİ) -->
+                    <view-listeners
+                        v-if="currentTab === 'listeners'"
+                        :vhosts="vhosts"
+                        :t="t"
+                        @show-notice="showNotice"
+                        @config-changed="onConfigChanged"
+                    ></view-listeners>
+
+                    <!-- VHOST ŞABLONLARI (TEMPLATES - OLS DENKLİĞİ) -->
+                    <view-templates
+                        v-if="currentTab === 'templates'"
+                        :vhosts="vhosts"
+                        :t="t"
+                        @show-notice="showNotice"
+                        @config-changed="onConfigChanged"
+                    ></view-templates>
+
+                    <!-- CANLI TRAFİK & HAVUZ İZLEME (LIVESTATS - OLS DENKLİĞİ) -->
+                    <view-livestats
+                        v-if="currentTab === 'livestats'"
+                        :stats="stats"
+                        :vhosts="vhosts"
+                        :t="t"
+                    ></view-livestats>
 
                     <!-- U5: SANAL KONAKLAR (VHOSTS) -->
                     <view-vhosts
@@ -194,9 +272,10 @@
                         :vhosts="vhosts"
                         :filtered-vhosts="filteredVhosts"
                         :t="t"
-                        @vhost-saved="fetchStatus"
+                        @vhost-saved="onVhostSaved"
                         @vhost-deleted="onVhostDeleted"
                         @show-notice="showNotice"
+                        @config-changed="onConfigChanged"
                     ></view-vhosts>
 
                     <!-- U6: ÖNBELLEK YÖNETİCİSİ (CACHE) -->
@@ -277,7 +356,7 @@
                         </div>
 
                         <!-- Hata Uyarısı -->
-                        <div v-if="authError" class="p-2 mb-3 rounded small d-flex align-items-center gap-2" style="background: rgba(255, 61, 113, 0.15); border: 1px solid var(--red); color: var(--red);">
+                        <div v-if="authError" class="p-2 mb-3 rounded small d-flex align-items-center gap-2" style="background: var(--red-bg); border: 1px solid var(--red); color: var(--red);">
                             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                                 <circle cx="12" cy="12" r="10"></circle>
                                 <line x1="12" y1="8" x2="12" y2="12"></line>
@@ -345,7 +424,7 @@
             <!-- Sabit Alt Bilgi (Fixed Footer) -->
             <footer class="app-footer">
                 <div class="footer-left">
-                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v1.0.01</strong> <span class="d-none d-md-inline">({{ t('footer_enterprise') }})</span></span>
+                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v{{ stats.version || '1.0.09' }}</strong></span>
                 </div>
                 <div class="footer-right">
                     <span class="footer-badge d-none d-lg-inline-flex">{{ t('footer_engine') }}</span>
@@ -362,6 +441,10 @@
     <script src="js/i18n.js"></script>
     <script src="js/api_client.js"></script>
     <script src="js/views/dashboard.js"></script>
+    <script src="js/views/server_config.js"></script>
+    <script src="js/views/listeners.js"></script>
+    <script src="js/views/templates.js"></script>
+    <script src="js/views/livestats.js"></script>
     <script src="js/views/vhosts.js"></script>
     <script src="js/views/cache_waf.js"></script>
     <script src="js/views/modules.js"></script>

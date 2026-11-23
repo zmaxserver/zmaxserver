@@ -1,0 +1,10 @@
+[package]
+name = "zmax-rewrite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex = "1.10"
+dashmap = "5.5"
+

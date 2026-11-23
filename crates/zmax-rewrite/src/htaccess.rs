@@ -13,10 +13,21 @@ enum CondTest {
     File,
     Dir,
     NonEmpty,
+    ZeroSize,
     Link,
+    Executable,
+    SubrequestUrl,
     Eq(String),
     Lt(String),
     Gt(String),
+    Le(String),
+    Ge(String),
+    NumEq(i64),
+    NumNe(i64),
+    NumLt(i64),
+    NumGt(i64),
+    NumLe(i64),
+    NumGe(i64),
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +49,13 @@ struct Flags {
     gone: bool,
     skip: usize,
     env: Vec<(String, String)>,
+    passthrough: bool,
+    next: bool,
+    escape_backrefs: bool,
+    cookie: Vec<String>,
+    content_type: Option<String>,
+    handler: Option<String>,
+    chain: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +82,15 @@ pub struct FilesMatchRule {
     pub denied: bool,
 }
 
+/// Apache / OpenLiteSpeed `RewriteOptions` direktifi yapılandırması.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RewriteOptions {
+    pub inherit: bool,
+    pub inherit_before: bool,
+    pub inherit_down: bool,
+    pub ignore_inherit: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct HtAccess {
     engine_on: bool,
@@ -72,6 +99,7 @@ pub struct HtAccess {
     has_explicit_base: bool,
     rules: Vec<Rule>,
     redirects: Vec<RedirectDir>,
+    pub options: RewriteOptions,
     pub directory_index: Vec<String>,
     pub disable_indexes: Option<bool>,
     pub error_documents: BTreeMap<u16, String>,
@@ -80,13 +108,32 @@ pub struct HtAccess {
     pub warnings: Vec<String>,
 }
 
-/// `.htaccess` değerlendirmesi için genişletilmiş sonuç (ortam değişkenleri ve `[L]` durdurma bilgisi dahil).
+/// `.htaccess` değerlendirmesi için genişletilmiş sonuç (ortam değişkenleri, çerezler, MIME/handler ve `[L]` durdurma bilgisi dahil).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalResult {
     pub outcome: Outcome,
     pub env_vars: Vec<(String, String)>,
+    pub cookies: Vec<String>,
+    pub content_type: Option<String>,
+    pub handler: Option<String>,
+    pub passthrough: bool,
     pub matched_last: bool,
     pub engine_explicit_off: bool,
+}
+
+impl Default for EvalResult {
+    fn default() -> Self {
+        Self {
+            outcome: Outcome::None,
+            env_vars: Vec::new(),
+            cookies: Vec::new(),
+            content_type: None,
+            handler: None,
+            passthrough: false,
+            matched_last: false,
+            engine_explicit_off: false,
+        }
+    }
 }
 
 pub struct RequestCtx<'a> {
@@ -119,23 +166,29 @@ pub enum Outcome {
     Gone,
 }
 
-/// Boşlukla ayır; "çift tırnak" ve `\ ` (kaçışlı boşluk) desteklenir, diğer ters bölüler korunur.
+/// Boşlukla ayır; "çift tırnak", 'tek tırnak' ve `\ ` (kaçışlı boşluk) desteklenir, diğer ters bölüler korunur.
 fn tokenize(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut in_q = false;
+    let mut quote_char: Option<char> = None;
     let mut has = false;
     let mut it = line.chars().peekable();
     while let Some(c) = it.next() {
         match c {
-            '"' => {
-                in_q = !in_q;
+            q @ ('"' | '\'') if quote_char.is_none() => {
+                quote_char = Some(q);
+                has = true;
+            }
+            q if quote_char == Some(q) => {
+                quote_char = None;
                 has = true;
             }
             '\\' => {
                 let nxt = it.peek().copied();
                 match nxt {
-                    Some(' ') | Some('"') if !in_q || nxt == Some('"') => {
+                    Some(' ') | Some('"') | Some('\'')
+                        if quote_char.is_none() || nxt == quote_char =>
+                    {
                         cur.push(it.next().unwrap());
                         has = true;
                     }
@@ -145,7 +198,7 @@ fn tokenize(line: &str) -> Vec<String> {
                     }
                 }
             }
-            c if c.is_whitespace() && !in_q => {
+            c if c.is_whitespace() && quote_char.is_none() => {
                 if has {
                     out.push(std::mem::take(&mut cur));
                     has = false;
@@ -227,6 +280,22 @@ fn is_files_close(line: &str) -> bool {
     lower.starts_with("</filesmatch") || lower.starts_with("</files")
 }
 
+fn parse_cond_flags(raw: Option<&str>) -> (bool, bool) {
+    let mut nc = false;
+    let mut or = false;
+    let Some(raw) = raw else { return (nc, or) };
+    let inner = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    for part in inner.split(',') {
+        let p = part.trim().to_ascii_lowercase();
+        match p.as_str() {
+            "nc" | "nocase" => nc = true,
+            "or" | "ornext" => or = true,
+            _ => {}
+        }
+    }
+    (nc, or)
+}
+
 fn parse_flags(raw: Option<&str>) -> (Flags, bool, bool) {
     // (flags, nocase, noescape)
     let mut f = Flags::default();
@@ -261,7 +330,11 @@ fn parse_flags(raw: Option<&str>) -> (Flags, bool, bool) {
             "f" | "forbidden" => f.forbidden = true,
             "g" | "gone" => f.gone = true,
             "ne" | "noescape" => ne = true,
+            "b" | "escape" => f.escape_backrefs = true,
+            "pt" | "passthrough" => f.passthrough = true,
+            "n" | "next" => f.next = true,
             "s" | "skip" => f.skip = v.and_then(|n| n.parse().ok()).unwrap_or(0),
+            "c" | "chain" => f.chain = true,
             "e" | "env" => {
                 if let Some(raw_env) = v {
                     if let Some((ek, ev)) = raw_env.split_once(':') {
@@ -272,6 +345,21 @@ fn parse_flags(raw: Option<&str>) -> (Flags, bool, bool) {
                     } else if !raw_env.is_empty() && !raw_env.starts_with('!') {
                         f.env.push((raw_env.to_string(), String::new()));
                     }
+                }
+            }
+            "co" | "cookie" => {
+                if let Some(c) = v {
+                    f.cookie.push(c.to_string());
+                }
+            }
+            "t" | "type" => {
+                if let Some(t) = v {
+                    f.content_type = Some(t.to_string());
+                }
+            }
+            "h" | "handler" => {
+                if let Some(h) = v {
+                    f.handler = Some(h.to_string());
                 }
             }
             _ => {}
@@ -353,7 +441,7 @@ pub(crate) fn expand_request_vars(
     path: &str,
     query: &str,
 ) -> String {
-    expand(s, rule_caps, cond_caps, ctx, path, query)
+    expand(s, rule_caps, cond_caps, ctx, path, query, &[], false)
 }
 
 pub(crate) fn absolutize_location(loc: &str, ctx: &RequestCtx) -> String {
@@ -453,16 +541,23 @@ impl HtAccess {
             }
             match toks[0].to_ascii_lowercase().as_str() {
                 "rewriteengine" => {
-                    let is_on = toks
-                        .get(1)
-                        .map(|v| v.eq_ignore_ascii_case("on"))
-                        .unwrap_or(false);
-                    let is_off = toks
-                        .get(1)
-                        .map(|v| v.eq_ignore_ascii_case("off"))
-                        .unwrap_or(false);
+                    let val = toks.get(1).map(|v| v.as_str()).unwrap_or("");
+                    let is_on = val.eq_ignore_ascii_case("on") || val == "1" || val.eq_ignore_ascii_case("true");
+                    let is_off = val.eq_ignore_ascii_case("off") || val == "0" || val.eq_ignore_ascii_case("false");
                     h.engine_on = is_on;
                     h.engine_explicit_off = is_off;
+                }
+                "rewriteoptions" => {
+                    for opt in toks.iter().skip(1) {
+                        let lower = opt.to_ascii_lowercase();
+                        match lower.as_str() {
+                            "inherit" => h.options.inherit = true,
+                            "inheritbefore" | "inherit-before" => h.options.inherit_before = true,
+                            "inheritdown" | "inherit-down" => h.options.inherit_down = true,
+                            "ignoreinherit" | "ignore-inherit" => h.options.ignore_inherit = true,
+                            _ => {}
+                        }
+                    }
                 }
                 "rewritebase" => {
                     if let Some(b) = toks.get(1) {
@@ -482,22 +577,93 @@ impl HtAccess {
                         h.warnings.push(format!("RewriteCond eksik: {line}"));
                         continue;
                     }
-                    let flags = toks
-                        .get(3)
-                        .map(|s| s.to_ascii_lowercase())
-                        .unwrap_or_default();
-                    let nc = flags.contains("nc") || flags.contains("nocase");
-                    let or = flags.contains("or") && !flags.contains("nor");
-                    let mut pat = toks[2].as_str();
-                    let negate = pat.starts_with('!');
-                    if negate {
-                        pat = &pat[1..];
+                    let mut pat = toks[2].clone();
+                    let mut flags_idx = 3usize;
+
+                    let is_binary_op = |p: &str| {
+                        let op = p.strip_prefix('!').unwrap_or(p);
+                        matches!(
+                            op,
+                            "-eq"
+                                | "-ne"
+                                | "-lt"
+                                | "-gt"
+                                | "-le"
+                                | "-ge"
+                                | "<="
+                                | ">="
+                                | "=="
+                                | "="
+                                | "<"
+                                | ">"
+                        )
+                    };
+
+                    if is_binary_op(&pat) && toks.len() > 3 && !toks[3].starts_with('[') {
+                        pat.push_str(&toks[3]);
+                        flags_idx = 4;
                     }
-                    let test = match pat {
+
+                    let joined_flags: Option<String> = toks.get(flags_idx).and_then(|first| {
+                        if first.starts_with('[') {
+                            if !first.ends_with(']') {
+                                let mut buf = first.clone();
+                                for tok in toks.iter().skip(flags_idx + 1) {
+                                    buf.push(' ');
+                                    buf.push_str(tok);
+                                    if tok.ends_with(']') {
+                                        break;
+                                    }
+                                }
+                                Some(buf)
+                            } else {
+                                Some(first.clone())
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                    let (nc, or) = parse_cond_flags(joined_flags.as_deref());
+                    let mut pat_str = pat.as_str();
+                    let negate = pat_str.starts_with('!');
+                    if negate {
+                        pat_str = &pat_str[1..];
+                    }
+                    let test = match pat_str {
                         "-f" | "-F" => Some(CondTest::File),
-                        "-d" => Some(CondTest::Dir),
-                        "-s" => Some(CondTest::NonEmpty),
-                        "-l" | "-L" => Some(CondTest::Link),
+                        "-d" | "-D" => Some(CondTest::Dir),
+                        "-s" | "-S" => Some(CondTest::NonEmpty),
+                        "-z" | "-Z" => Some(CondTest::ZeroSize),
+                        "-l" | "-L" | "-h" | "-H" => Some(CondTest::Link),
+                        "-x" | "-X" => Some(CondTest::Executable),
+                        "-u" | "-U" => Some(CondTest::SubrequestUrl),
+                        p if p.starts_with("-eq") => {
+                            let num = p[3..].trim().parse::<i64>().unwrap_or(0);
+                            Some(CondTest::NumEq(num))
+                        }
+                        p if p.starts_with("-ne") => {
+                            let num = p[3..].trim().parse::<i64>().unwrap_or(0);
+                            Some(CondTest::NumNe(num))
+                        }
+                        p if p.starts_with("-lt") => {
+                            let num = p[3..].trim().parse::<i64>().unwrap_or(0);
+                            Some(CondTest::NumLt(num))
+                        }
+                        p if p.starts_with("-gt") => {
+                            let num = p[3..].trim().parse::<i64>().unwrap_or(0);
+                            Some(CondTest::NumGt(num))
+                        }
+                        p if p.starts_with("-le") => {
+                            let num = p[3..].trim().parse::<i64>().unwrap_or(0);
+                            Some(CondTest::NumLe(num))
+                        }
+                        p if p.starts_with("-ge") => {
+                            let num = p[3..].trim().parse::<i64>().unwrap_or(0);
+                            Some(CondTest::NumGe(num))
+                        }
+                        p if p.starts_with("<=") => Some(CondTest::Le(p[2..].to_string())),
+                        p if p.starts_with(">=") => Some(CondTest::Ge(p[2..].to_string())),
+                        p if p.starts_with("==") => Some(CondTest::Eq(p[2..].to_string())),
                         p if p.starts_with('=') => Some(CondTest::Eq(p[1..].to_string())),
                         p if p.starts_with('<') => Some(CondTest::Lt(p[1..].to_string())),
                         p if p.starts_with('>') => Some(CondTest::Gt(p[1..].to_string())),
@@ -675,6 +841,10 @@ impl HtAccess {
     /// değerlendirir ve `Outcome` ile birlikte `[E=KEY:VAL]` değişkenlerini döndürür.
     pub fn evaluate_in_dir(&self, ctx: &RequestCtx, dir_prefix: &str) -> EvalResult {
         let mut env_vars: Vec<(String, String)> = Vec::new();
+        let mut cookies: Vec<String> = Vec::new();
+        let mut content_type: Option<String> = None;
+        let mut handler: Option<String> = None;
+        let mut passthrough = false;
 
         // <FilesMatch> ve <Files> erişim denetimi
         let filename = ctx.path.rsplit('/').next().unwrap_or("");
@@ -684,6 +854,10 @@ impl HtAccess {
                     return EvalResult {
                         outcome: Outcome::Forbidden,
                         env_vars,
+                        cookies,
+                        content_type,
+                        handler,
+                        passthrough,
                         matched_last: true,
                         engine_explicit_off: self.engine_explicit_off,
                     };
@@ -709,6 +883,10 @@ impl HtAccess {
                 return EvalResult {
                     outcome: Outcome::Gone,
                     env_vars,
+                    cookies,
+                    content_type,
+                    handler,
+                    passthrough,
                     matched_last: true,
                     engine_explicit_off: self.engine_explicit_off,
                 };
@@ -730,7 +908,16 @@ impl HtAccess {
                             .collect()
                     })
                     .unwrap_or_default();
-                expand(&r.target, Some(&caps), None, ctx, ctx.path, ctx.query)
+                expand(
+                    &r.target,
+                    Some(&caps),
+                    None,
+                    ctx,
+                    ctx.path,
+                    ctx.query,
+                    &env_vars,
+                    false,
+                )
             };
             return EvalResult {
                 outcome: Outcome::Redirect {
@@ -738,6 +925,10 @@ impl HtAccess {
                     location: absolutize(&location, ctx),
                 },
                 env_vars,
+                cookies,
+                content_type,
+                handler,
+                passthrough,
                 matched_last: true,
                 engine_explicit_off: self.engine_explicit_off,
             };
@@ -746,6 +937,10 @@ impl HtAccess {
             return EvalResult {
                 outcome: Outcome::None,
                 env_vars,
+                cookies,
+                content_type,
+                handler,
+                passthrough,
                 matched_last: false,
                 engine_explicit_off: self.engine_explicit_off,
             };
@@ -803,22 +998,81 @@ impl HtAccess {
                     })
                     .unwrap_or_default();
 
-                let (conds_ok, cond_caps) = self.check_conds(rule, ctx, &path, &query, &rule_caps);
+                let (conds_ok, cond_caps) =
+                    self.check_conds(rule, ctx, &path, &query, &rule_caps, &env_vars);
                 if !conds_ok {
                     i += 1;
                     continue;
                 }
 
                 for (ek, ev) in &rule.flags.env {
-                    let expanded_val =
-                        expand(ev, Some(&rule_caps), cond_caps.as_ref(), ctx, &path, &query);
+                    let expanded_val = expand(
+                        ev,
+                        Some(&rule_caps),
+                        cond_caps.as_ref(),
+                        ctx,
+                        &path,
+                        &query,
+                        &env_vars,
+                        rule.flags.escape_backrefs,
+                    );
                     upsert_env(&mut env_vars, ek.clone(), expanded_val);
+                }
+
+                for c in &rule.flags.cookie {
+                    let expanded_cookie = expand(
+                        c,
+                        Some(&rule_caps),
+                        cond_caps.as_ref(),
+                        ctx,
+                        &path,
+                        &query,
+                        &env_vars,
+                        rule.flags.escape_backrefs,
+                    );
+                    cookies.push(expanded_cookie);
+                }
+
+                if let Some(ct) = &rule.flags.content_type {
+                    let exp = expand(
+                        ct,
+                        Some(&rule_caps),
+                        cond_caps.as_ref(),
+                        ctx,
+                        &path,
+                        &query,
+                        &env_vars,
+                        rule.flags.escape_backrefs,
+                    );
+                    content_type = Some(exp);
+                }
+
+                if let Some(h) = &rule.flags.handler {
+                    let exp = expand(
+                        h,
+                        Some(&rule_caps),
+                        cond_caps.as_ref(),
+                        ctx,
+                        &path,
+                        &query,
+                        &env_vars,
+                        rule.flags.escape_backrefs,
+                    );
+                    handler = Some(exp);
+                }
+
+                if rule.flags.passthrough {
+                    passthrough = true;
                 }
 
                 if rule.flags.forbidden {
                     return EvalResult {
                         outcome: Outcome::Forbidden,
                         env_vars,
+                        cookies,
+                        content_type,
+                        handler,
+                        passthrough,
                         matched_last: true,
                         engine_explicit_off: self.engine_explicit_off,
                     };
@@ -827,6 +1081,10 @@ impl HtAccess {
                     return EvalResult {
                         outcome: Outcome::Gone,
                         env_vars,
+                        cookies,
+                        content_type,
+                        handler,
+                        passthrough,
                         matched_last: true,
                         engine_explicit_off: self.engine_explicit_off,
                     };
@@ -839,10 +1097,14 @@ impl HtAccess {
                     ctx,
                     &path,
                     &query,
+                    &env_vars,
+                    rule.flags.escape_backrefs,
                 );
                 let mut new_path = path.clone();
                 let mut new_query = query.clone();
-                let external = expanded.starts_with("http://") || expanded.starts_with("https://");
+                let external = expanded.starts_with("http://")
+                    || expanded.starts_with("https://")
+                    || expanded.starts_with("//");
 
                 if expanded != "-" {
                     let (p_part, q_part) = match expanded.split_once('?') {
@@ -861,16 +1123,21 @@ impl HtAccess {
                             loc.push('?');
                             loc.push_str(&q);
                         }
+                        let abs_loc = absolutize(&loc, ctx);
                         let current_abs = absolutize(ctx.path, ctx);
                         let current_with_q = if query.is_empty() {
                             current_abs.clone()
                         } else {
                             format!("{current_abs}?{query}")
                         };
-                        if loc == current_abs || loc == current_with_q {
+                        if abs_loc == current_abs || abs_loc == current_with_q {
                             return EvalResult {
                                 outcome: Outcome::None,
                                 env_vars,
+                                cookies,
+                                content_type,
+                                handler,
+                                passthrough,
                                 matched_last: true,
                                 engine_explicit_off: self.engine_explicit_off,
                             };
@@ -878,9 +1145,13 @@ impl HtAccess {
                         return EvalResult {
                             outcome: Outcome::Redirect {
                                 status: rule.flags.redirect.unwrap_or(302),
-                                location: loc,
+                                location: abs_loc,
                             },
                             env_vars,
+                            cookies,
+                            content_type,
+                            handler,
+                            passthrough,
                             matched_last: true,
                             engine_explicit_off: self.engine_explicit_off,
                         };
@@ -915,6 +1186,10 @@ impl HtAccess {
                         return EvalResult {
                             outcome: Outcome::None,
                             env_vars,
+                            cookies,
+                            content_type,
+                            handler,
+                            passthrough,
                             matched_last: true,
                             engine_explicit_off: self.engine_explicit_off,
                         };
@@ -925,6 +1200,10 @@ impl HtAccess {
                             location: abs_loc,
                         },
                         env_vars,
+                        cookies,
+                        content_type,
+                        handler,
+                        passthrough,
                         matched_last: true,
                         engine_explicit_off: self.engine_explicit_off,
                     };
@@ -939,6 +1218,10 @@ impl HtAccess {
                         return EvalResult {
                             outcome: Outcome::Forbidden,
                             env_vars,
+                            cookies,
+                            content_type,
+                            handler,
+                            passthrough,
                             matched_last: true,
                             engine_explicit_off: self.engine_explicit_off,
                         };
@@ -958,6 +1241,10 @@ impl HtAccess {
                     return EvalResult {
                         outcome,
                         env_vars,
+                        cookies,
+                        content_type,
+                        handler,
+                        passthrough,
                         matched_last: true,
                         engine_explicit_off: self.engine_explicit_off,
                     };
@@ -965,6 +1252,10 @@ impl HtAccess {
                 if rule.flags.last {
                     matched_last = true;
                     break;
+                }
+                if rule.flags.next {
+                    i = 0;
+                    continue;
                 }
                 i += 1 + rule.flags.skip;
             }
@@ -976,6 +1267,10 @@ impl HtAccess {
                 return EvalResult {
                     outcome: Outcome::Forbidden,
                     env_vars,
+                    cookies,
+                    content_type,
+                    handler,
+                    passthrough,
                     matched_last: true,
                     engine_explicit_off: self.engine_explicit_off,
                 };
@@ -990,9 +1285,21 @@ impl HtAccess {
         EvalResult {
             outcome,
             env_vars,
+            cookies,
+            content_type,
+            handler,
+            passthrough,
             matched_last,
             engine_explicit_off: self.engine_explicit_off,
         }
+    }
+
+    pub fn engine_on(&self) -> bool {
+        self.engine_on
+    }
+
+    pub fn rules_len(&self) -> usize {
+        self.rules.len()
     }
 
     fn check_conds(
@@ -1002,6 +1309,7 @@ impl HtAccess {
         path: &str,
         query: &str,
         rule_caps: &Vec<String>,
+        env_vars: &[(String, String)],
     ) -> (bool, Option<Vec<String>>) {
         let mut cond_caps: Option<Vec<String>> = None;
         let mut group = false;
@@ -1013,6 +1321,8 @@ impl HtAccess {
                 ctx,
                 path,
                 query,
+                env_vars,
+                false,
             );
             let ts = ts.replace("%{QUERY_STRING}", query);
             let (mut r, caps) = match &c.test {
@@ -1027,23 +1337,107 @@ impl HtAccess {
                     ),
                     None => (false, None),
                 },
-                CondTest::File => (Path::new(&ts).is_file(), None),
-                CondTest::Dir => (Path::new(&ts).is_dir(), None),
-                CondTest::NonEmpty => (
-                    std::fs::metadata(&ts)
-                        .map(|m| m.is_file() && m.len() > 0)
-                        .unwrap_or(false),
+                CondTest::File => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(&ts)
+                    };
+                    (p.is_file(), None)
+                }
+                CondTest::Dir => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(&ts)
+                    };
+                    (p.is_dir(), None)
+                }
+                CondTest::NonEmpty => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(&ts)
+                    };
+                    (
+                        std::fs::metadata(&p)
+                            .map(|m| m.is_file() && m.len() > 0)
+                            .unwrap_or(false),
+                        None,
+                    )
+                }
+                CondTest::ZeroSize => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(&ts)
+                    };
+                    (
+                        std::fs::metadata(&p)
+                            .map(|m| m.is_file() && m.len() == 0)
+                            .unwrap_or(false)
+                            || ts.is_empty(),
+                        None,
+                    )
+                }
+                CondTest::Link => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(&ts)
+                    };
+                    (
+                        std::fs::symlink_metadata(&p)
+                            .map(|m| m.file_type().is_symlink())
+                            .unwrap_or(false),
+                        None,
+                    )
+                }
+                CondTest::Executable => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(&ts)
+                    };
+                    (p.is_file(), None)
+                }
+                CondTest::SubrequestUrl => {
+                    let p = if Path::new(&ts).is_absolute() {
+                        PathBuf::from(&ts)
+                    } else {
+                        ctx.doc_root.join(ts.trim_start_matches('/'))
+                    };
+                    (p.exists() || !ts.is_empty(), None)
+                }
+                CondTest::NumEq(expected) => (
+                    ts.trim().parse::<i64>().map(|v| v == *expected).unwrap_or(false),
                     None,
                 ),
-                CondTest::Link => (
-                    std::fs::symlink_metadata(&ts)
-                        .map(|m| m.file_type().is_symlink())
-                        .unwrap_or(false),
+                CondTest::NumNe(expected) => (
+                    ts.trim().parse::<i64>().map(|v| v != *expected).unwrap_or(false),
+                    None,
+                ),
+                CondTest::NumLt(expected) => (
+                    ts.trim().parse::<i64>().map(|v| v < *expected).unwrap_or(false),
+                    None,
+                ),
+                CondTest::NumGt(expected) => (
+                    ts.trim().parse::<i64>().map(|v| v > *expected).unwrap_or(false),
+                    None,
+                ),
+                CondTest::NumLe(expected) => (
+                    ts.trim().parse::<i64>().map(|v| v <= *expected).unwrap_or(false),
+                    None,
+                ),
+                CondTest::NumGe(expected) => (
+                    ts.trim().parse::<i64>().map(|v| v >= *expected).unwrap_or(false),
                     None,
                 ),
                 CondTest::Eq(v) => (&ts == v, None),
                 CondTest::Lt(v) => (ts.as_str() < v.as_str(), None),
                 CondTest::Gt(v) => (ts.as_str() > v.as_str(), None),
+                CondTest::Le(v) => (ts.as_str() <= v.as_str(), None),
+                CondTest::Ge(v) => (ts.as_str() >= v.as_str(), None),
             };
             if c.negate {
                 r = !r;
@@ -1066,11 +1460,28 @@ impl HtAccess {
     }
 }
 
+fn client_is_https(ctx: &RequestCtx) -> bool {
+    for (k, v) in ctx.headers {
+        if k.eq_ignore_ascii_case("x-forwarded-proto") {
+            return v.eq_ignore_ascii_case("https");
+        }
+        if k.eq_ignore_ascii_case("x-forwarded-ssl") {
+            return v.eq_ignore_ascii_case("on");
+        }
+    }
+    ctx.https
+}
+
 fn absolutize(loc: &str, ctx: &RequestCtx) -> String {
     if loc.starts_with("http://") || loc.starts_with("https://") {
         return loc.to_string();
     }
-    let scheme = if ctx.https { "https" } else { "http" };
+    let is_https = client_is_https(ctx);
+    if loc.starts_with("//") {
+        let scheme = if is_https { "https" } else { "http" };
+        return format!("{scheme}:{loc}");
+    }
+    let scheme = if is_https { "https" } else { "http" };
     let path = if loc.starts_with('/') {
         loc.to_string()
     } else {
@@ -1079,13 +1490,109 @@ fn absolutize(loc: &str, ctx: &RequestCtx) -> String {
     format!("{scheme}://{}{}", ctx.host, path)
 }
 
-fn var_value(name: &str, ctx: &RequestCtx, path: &str, query: &str) -> String {
-    let n = name.to_ascii_uppercase();
+fn url_encode_backref(val: &str) -> String {
+    let mut out = String::with_capacity(val.len() * 3);
+    for b in val.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", b);
+            }
+        }
+    }
+    out
+}
+
+use std::time::SystemTime;
+
+fn get_time_vars() -> (String, String, String, String, String, String, String, String) {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let sec = (secs % 60) as u32;
+    let min = ((secs / 60) % 60) as u32;
+    let hour = ((secs / 3600) % 24) as u32;
+    let wday = (((secs / 86400) + 4) % 7) as u32;
+
+    let z = (secs / 86400) as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    let year = format!("{:04}", y);
+    let mon = format!("{:02}", m);
+    let day = format!("{:02}", d);
+    let hour_s = format!("{:02}", hour);
+    let min_s = format!("{:02}", min);
+    let sec_s = format!("{:02}", sec);
+    let wday_s = format!("{}", wday);
+    let time_s = format!("{}{}{}{}{}{}", year, mon, day, hour_s, min_s, sec_s);
+
+    (year, mon, day, hour_s, min_s, sec_s, wday_s, time_s)
+}
+
+fn var_value(
+    name: &str,
+    ctx: &RequestCtx,
+    path: &str,
+    query: &str,
+    env_vars: &[(String, String)],
+) -> String {
+    let n = name.trim();
+    if let Some(env_name) = n.strip_prefix("ENV:") {
+        let env_name = env_name.trim();
+        if let Some((_, v)) = env_vars
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case(env_name))
+        {
+            return v.clone();
+        }
+        if let Ok(v) = std::env::var(env_name) {
+            return v;
+        }
+        return String::new();
+    }
     if let Some(h) = n.strip_prefix("HTTP:") {
         return header(ctx, h.trim());
     }
-    match n.as_str() {
-        "HTTP_HOST" => ctx.host.to_string(),
+
+    let upper = n.to_ascii_uppercase();
+    if upper.starts_with("HTTP_") {
+        match upper.as_str() {
+            "HTTP_HOST" => return ctx.host.to_string(),
+            "HTTP_USER_AGENT" => return header(ctx, "user-agent"),
+            "HTTP_REFERER" => return header(ctx, "referer"),
+            "HTTP_COOKIE" => return header(ctx, "cookie"),
+            "HTTP_ACCEPT" => return header(ctx, "accept"),
+            "HTTP_ACCEPT_ENCODING" => return header(ctx, "accept-encoding"),
+            "HTTP_ACCEPT_LANGUAGE" => return header(ctx, "accept-language"),
+            "HTTP_AUTHORIZATION" => return header(ctx, "authorization"),
+            "HTTP_X_FORWARDED_PROTO" => return header(ctx, "x-forwarded-proto"),
+            "HTTP_X_FORWARDED_FOR" => return header(ctx, "x-forwarded-for"),
+            other => {
+                let h_name = &other[5..];
+                let res = header(ctx, h_name);
+                if !res.is_empty() {
+                    return res;
+                }
+                let hyphenated = h_name.replace('_', "-");
+                return header(ctx, &hyphenated);
+            }
+        }
+    }
+
+    match upper.as_str() {
         // Apache mod_rewrite standardında REQUEST_URI yalnızca yol bileşenidir (sorgu QUERY_STRING içindedir).
         "REQUEST_URI" => path.to_string(),
         "REQUEST_FILENAME" | "SCRIPT_FILENAME" => resolve_request_filename(ctx.doc_root, path)
@@ -1104,6 +1611,10 @@ fn var_value(name: &str, ctx: &RequestCtx, path: &str, query: &str) -> String {
         "REMOTE_ADDR" => ctx.remote_addr.to_string(),
         "SERVER_PORT" => ctx.server_port.to_string(),
         "SERVER_NAME" => ctx.host.split(':').next().unwrap_or("").to_string(),
+        "SERVER_ADDR" => "127.0.0.1".into(),
+        "SERVER_PROTOCOL" => "HTTP/1.1".into(),
+        "SERVER_SOFTWARE" => "ZMax-Server/1.0.0 (OpenLiteSpeed-compatible)".into(),
+        "SERVER_ADMIN" => "webmaster@localhost".into(),
         "REQUEST_SCHEME" => {
             if ctx.https {
                 "https".into()
@@ -1111,15 +1622,9 @@ fn var_value(name: &str, ctx: &RequestCtx, path: &str, query: &str) -> String {
                 "http".into()
             }
         }
-        "HTTP_AUTHORIZATION" => header(ctx, "authorization"),
-        "HTTP_X_FORWARDED_PROTO" => header(ctx, "x-forwarded-proto"),
-        "HTTP_X_FORWARDED_FOR" => header(ctx, "x-forwarded-for"),
-        "HTTP_USER_AGENT" => header(ctx, "user-agent"),
-        "HTTP_REFERER" => header(ctx, "referer"),
-        "HTTP_COOKIE" => header(ctx, "cookie"),
-        "HTTP_ACCEPT" => header(ctx, "accept"),
-        "HTTP_ACCEPT_ENCODING" => header(ctx, "accept-encoding"),
-        "HTTP_ACCEPT_LANGUAGE" => header(ctx, "accept-language"),
+        "SCRIPT_NAME" => path.to_string(),
+        "PATH_INFO" => String::new(),
+        "IS_SUBREQ" => "false".into(),
         "THE_REQUEST" => {
             if query.is_empty() {
                 format!("{} {} HTTP/1.1", ctx.method, path)
@@ -1127,6 +1632,14 @@ fn var_value(name: &str, ctx: &RequestCtx, path: &str, query: &str) -> String {
                 format!("{} {}?{} HTTP/1.1", ctx.method, path, query)
             }
         }
+        "TIME_YEAR" => get_time_vars().0,
+        "TIME_MON" => get_time_vars().1,
+        "TIME_DAY" => get_time_vars().2,
+        "TIME_HOUR" => get_time_vars().3,
+        "TIME_MIN" => get_time_vars().4,
+        "TIME_SEC" => get_time_vars().5,
+        "TIME_WDAY" => get_time_vars().6,
+        "TIME" => get_time_vars().7,
         _ => String::new(),
     }
 }
@@ -1193,6 +1706,8 @@ fn expand(
     ctx: &RequestCtx,
     path: &str,
     query: &str,
+    env_vars: &[(String, String)],
+    escape_b: bool,
 ) -> String {
     let b: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
@@ -1202,19 +1717,27 @@ fn expand(
         if c == '$' && i + 1 < b.len() && b[i + 1].is_ascii_digit() {
             let n = b[i + 1].to_digit(10).unwrap() as usize;
             if let Some(v) = rule_caps.and_then(|c| c.get(n)) {
-                out.push_str(v);
+                if escape_b {
+                    out.push_str(&url_encode_backref(v));
+                } else {
+                    out.push_str(v);
+                }
             }
             i += 2;
         } else if c == '%' && i + 1 < b.len() && b[i + 1].is_ascii_digit() {
             let n = b[i + 1].to_digit(10).unwrap() as usize;
             if let Some(v) = cond_caps.and_then(|c| c.get(n)) {
-                out.push_str(v);
+                if escape_b {
+                    out.push_str(&url_encode_backref(v));
+                } else {
+                    out.push_str(v);
+                }
             }
             i += 2;
         } else if c == '%' && i + 1 < b.len() && b[i + 1] == '{' {
             if let Some(end) = b[i + 2..].iter().position(|&x| x == '}') {
                 let name: String = b[i + 2..i + 2 + end].iter().collect();
-                out.push_str(&var_value(&name, ctx, path, query));
+                out.push_str(&var_value(&name, ctx, path, query, env_vars));
                 i += 3 + end;
             } else {
                 out.push(c);
@@ -1723,6 +2246,377 @@ mod tests {
                 query: String::new()
             }
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_nextjs_clean_urls_and_fallback() {
+        let root = tmp("nextjs");
+        let none: Vec<(String, String)> = vec![];
+
+        std::fs::write(root.join("about.html"), "<h1>About</h1>").unwrap();
+        std::fs::write(root.join("contact.html"), "<h1>Contact</h1>").unwrap();
+        std::fs::write(root.join("404.html"), "<h1>Not Found</h1>").unwrap();
+        std::fs::write(root.join("style.css"), "body {}").unwrap();
+
+        let ht = concat!(
+            "RewriteEngine On\n",
+            "RewriteBase /\n",
+            "# Next.js clean URLs: /about -> /about.html\n",
+            "RewriteCond %{REQUEST_FILENAME} !-f\n",
+            "RewriteCond %{REQUEST_FILENAME} !-d\n",
+            "RewriteCond %{REQUEST_FILENAME}.html -f\n",
+            "RewriteRule ^(.+)$ $1.html [L]\n",
+            "# Next.js 404 Fallback\n",
+            "RewriteCond %{REQUEST_FILENAME} !-f\n",
+            "RewriteCond %{REQUEST_FILENAME} !-d\n",
+            "RewriteCond %{DOCUMENT_ROOT}/404.html -f\n",
+            "RewriteRule ^ /404.html [L]\n",
+        );
+        let h = HtAccess::parse(ht);
+        assert!(h.warnings.is_empty(), "{:?}", h.warnings);
+
+        // 1. /about -> /about.html olarak yeniden yazılmalı
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/about", "", &none)),
+            Outcome::Rewritten {
+                path: "/about.html".into(),
+                query: String::new(),
+            }
+        );
+
+        // 2. /contact -> /contact.html
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/contact", "src=ref", &none)),
+            Outcome::Rewritten {
+                path: "/contact.html".into(),
+                query: "src=ref".into(),
+            }
+        );
+
+        // 3. Gerçek dosya (/style.css) -> Yeniden yazılmamalı (Outcome::None)
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/style.css", "", &none)),
+            Outcome::None
+        );
+
+        // 4. Olmayan sayfa (/olmayan-sayfa) -> /404.html'e yeniden yazılmalı
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/olmayan-sayfa", "", &none)),
+            Outcome::Rewritten {
+                path: "/404.html".into(),
+                query: String::new(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_force_https_variations() {
+        let root = tmp("ssl_force");
+        let none: Vec<(String, String)> = vec![];
+
+        // Model 1: %{HTTPS} off
+        let ht1 = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTPS} off\n",
+            "RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+        );
+        let h1 = HtAccess::parse(ht1);
+        let mut c_http = ctx(&root, "/sayfa", "a=1", &none);
+        c_http.https = false;
+        assert_eq!(
+            h1.evaluate(&c_http),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/sayfa?a=1".into(),
+            }
+        );
+        let mut c_https = ctx(&root, "/sayfa", "a=1", &none);
+        c_https.https = true;
+        assert_eq!(h1.evaluate(&c_https), Outcome::None);
+
+        // Model 2: %{HTTPS} !=on
+        let ht2 = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTPS} !=on\n",
+            "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+        );
+        let h2 = HtAccess::parse(ht2);
+        assert_eq!(
+            h2.evaluate(&c_http),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/sayfa?a=1".into(),
+            }
+        );
+        assert_eq!(h2.evaluate(&c_https), Outcome::None);
+
+        // Model 3: %{HTTP:X-Forwarded-Proto} !https
+        let ht3 = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP:X-Forwarded-Proto} !https\n",
+            "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+        );
+        let h3 = HtAccess::parse(ht3);
+        let proto_http = vec![("X-Forwarded-Proto".to_string(), "http".to_string())];
+        let mut c_proto_http = ctx(&root, "/api/v1", "", &proto_http);
+        c_proto_http.https = true; // arkada TLS olsa bile proto header http
+        assert_eq!(
+            h3.evaluate(&c_proto_http),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/api/v1".into(),
+            }
+        );
+        let proto_https = vec![("X-Forwarded-Proto".to_string(), "https".to_string())];
+        let c_proto_https = ctx(&root, "/api/v1", "", &proto_https);
+        assert_eq!(h3.evaluate(&c_proto_https), Outcome::None);
+
+        // Model 4: %{SERVER_PORT} -eq 80
+        let ht4 = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{SERVER_PORT} -eq 80\n",
+            "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+        );
+        let h4 = HtAccess::parse(ht4);
+        let mut c_p80 = ctx(&root, "/port80", "", &none);
+        c_p80.server_port = 80;
+        assert_eq!(
+            h4.evaluate(&c_p80),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://site.test/port80".into(),
+            }
+        );
+        let mut c_p443 = ctx(&root, "/port80", "", &none);
+        c_p443.server_port = 443;
+        assert_eq!(h4.evaluate(&c_p443), Outcome::None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_www_removal_and_enforcement() {
+        let root = tmp("www_tests");
+        let none: Vec<(String, String)> = vec![];
+
+        // 1. WWW Kaldırma (Enforce non-WWW)
+        let ht_non_www = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP_HOST} ^www\\.(.+)$ [NC]\n",
+            "RewriteRule ^(.*)$ https://%1/$1 [R=301,L]\n",
+        );
+        let h1 = HtAccess::parse(ht_non_www);
+        let mut c_www = ctx(&root, "/urunler/bilgisayar", "sira=fiyat", &none);
+        c_www.host = "www.magaza.test";
+        c_www.https = true;
+        assert_eq!(
+            h1.evaluate(&c_www),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://magaza.test/urunler/bilgisayar?sira=fiyat".into(),
+            }
+        );
+
+        let mut c_non_www = ctx(&root, "/urunler/bilgisayar", "", &none);
+        c_non_www.host = "magaza.test";
+        c_non_www.https = true;
+        assert_eq!(h1.evaluate(&c_non_www), Outcome::None);
+
+        // 2. WWW Ekleme (Enforce WWW)
+        let ht_www = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP_HOST} !^www\\. [NC]\n",
+            "RewriteCond %{HTTP_HOST} ^(.+)$ [NC]\n",
+            "RewriteRule ^(.*)$ https://www.%1/$1 [R=301,L]\n",
+        );
+        let h2 = HtAccess::parse(ht_www);
+        assert_eq!(
+            h2.evaluate(&c_non_www),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://www.magaza.test/urunler/bilgisayar".into(),
+            }
+        );
+        assert_eq!(h2.evaluate(&c_www), Outcome::None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_ols_numeric_comparisons_and_engine_flags() {
+        let root = tmp("ols_num");
+        let none: Vec<(String, String)> = vec![];
+
+        // RewriteEngine 1 (OLS standardı)
+        let ht_engine = "RewriteEngine 1\nRewriteRule ^test$ /test.php [L]\n";
+        let h_eng = HtAccess::parse(ht_engine);
+        assert!(h_eng.engine_on());
+        assert_eq!(
+            h_eng.evaluate(&ctx(&root, "/test", "", &none)),
+            Outcome::Rewritten {
+                path: "/test.php".into(),
+                query: String::new(),
+            }
+        );
+
+        // RewriteEngine 0 (OLS standardı)
+        let ht_off = "RewriteEngine 0\nRewriteRule ^test$ /test.php [L]\n";
+        let h_off = HtAccess::parse(ht_off);
+        assert!(!h_off.engine_on());
+        assert_eq!(h_off.evaluate(&ctx(&root, "/test", "", &none)), Outcome::None);
+
+        // Sayısal Karşılaştırmalar: -gt, -lt, -ge, -le, -ne
+        let ht_num = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{SERVER_PORT} -gt 1024\n",
+            "RewriteRule ^dev - [E=DEV_PORT:1]\n",
+            "RewriteCond %{SERVER_PORT} -le 80\n",
+            "RewriteRule ^insecure$ /secure [R=301,L]\n",
+            "RewriteCond %{SERVER_PORT} -ne 443\n",
+            "RewriteRule ^not443$ /isnot443 [L]\n",
+        );
+        let h_num = HtAccess::parse(ht_num);
+
+        let mut c_dev = ctx(&root, "/dev", "", &none);
+        c_dev.server_port = 8080;
+        let res_dev = h_num.evaluate_in_dir(&c_dev, "/");
+        assert!(res_dev.env_vars.iter().any(|(k, v)| k == "DEV_PORT" && v == "1"));
+
+        let mut c_insec = ctx(&root, "/insecure", "", &none);
+        c_insec.server_port = 80;
+        assert_eq!(
+            h_num.evaluate(&c_insec),
+            Outcome::Redirect {
+                status: 301,
+                location: "http://site.test/secure".into(),
+            }
+        );
+
+        let mut c_not443 = ctx(&root, "/not443", "", &none);
+        c_not443.server_port = 8080;
+        assert_eq!(
+            h_num.evaluate(&c_not443),
+            Outcome::Rewritten {
+                path: "/isnot443".into(),
+                query: String::new(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_env_vars_and_dynamic_headers() {
+        let root = tmp("env_dyn");
+        let headers = vec![
+            ("Upgrade".to_string(), "websocket".to_string()),
+            ("Connection".to_string(), "Upgrade".to_string()),
+            ("X-Requested-With".to_string(), "XMLHttpRequest".to_string()),
+            ("Authorization".to_string(), "Bearer token123".to_string()),
+        ];
+
+        let ht = concat!(
+            "RewriteEngine On\n",
+            "# Ortam değişkeni ata\n",
+            "RewriteRule ^api/.* - [E=API_MODE:v2,E=AUTH_COPY:%{HTTP:Authorization}]\n",
+            "# Ortam değişkenini koşulda doğrula\n",
+            "RewriteCond %{ENV:API_MODE} =v2\n",
+            "RewriteCond %{HTTP_UPGRADE} =websocket [NC]\n",
+            "RewriteCond %{HTTP_X_REQUESTED_WITH} =XMLHttpRequest\n",
+            "RewriteRule ^api/ws /ws_handler.php [L]\n",
+        );
+        let h = HtAccess::parse(ht);
+        assert!(h.warnings.is_empty(), "{:?}", h.warnings);
+
+        let c = ctx(&root, "/api/ws", "client=web", &headers);
+        let res = h.evaluate_in_dir(&c, "/");
+        assert_eq!(
+            res.outcome,
+            Outcome::Rewritten {
+                path: "/ws_handler.php".into(),
+                query: "client=web".into(),
+            }
+        );
+        assert!(res.env_vars.iter().any(|(k, v)| k == "API_MODE" && v == "v2"));
+        assert!(res.env_vars.iter().any(|(k, v)| k == "AUTH_COPY" && v == "Bearer token123"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_escape_backrefs_flag_b() {
+        let root = tmp("escape_b");
+        let none: Vec<(String, String)> = vec![];
+
+        let ht = "RewriteEngine On\nRewriteRule ^ara/(.*)$ /search.php?query=$1 [B,L]\n";
+        let h = HtAccess::parse(ht);
+
+        // Boşluk ve özel karakter içeren arama sorgusu [B] bayrağı ile encode edilmeli
+        assert_eq!(
+            h.evaluate(&ctx(&root, "/ara/mehmet can", "", &none)),
+            Outcome::Rewritten {
+                path: "/search.php".into(),
+                query: "query=mehmet%20can".into(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_protocol_relative_redirect() {
+        let root = tmp("proto_rel");
+        let none: Vec<(String, String)> = vec![];
+
+        let ht = "RewriteEngine On\nRewriteRule ^cdn/(.*)$ //cdn.site.test/$1 [R=301,L]\n";
+        let h = HtAccess::parse(ht);
+
+        let mut c_https = ctx(&root, "/cdn/resim.png", "", &none);
+        c_https.https = true;
+        assert_eq!(
+            h.evaluate(&c_https),
+            Outcome::Redirect {
+                status: 301,
+                location: "https://cdn.site.test/resim.png".into(),
+            }
+        );
+
+        let mut c_http = ctx(&root, "/cdn/resim.png", "", &none);
+        c_http.https = false;
+        assert_eq!(
+            h.evaluate(&c_http),
+            Outcome::Redirect {
+                status: 301,
+                location: "http://cdn.site.test/resim.png".into(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_single_quote_and_space_flags() {
+        let root = tmp("single_q");
+        let ua = vec![("User-Agent".to_string(), "Googlebot".to_string())];
+
+        // Tek tırnak ve bayraklar arasında boşluk: [NC, OR]
+        let ht = concat!(
+            "RewriteEngine On\n",
+            "RewriteCond %{HTTP_USER_AGENT} 'Googlebot' [NC, OR]\n",
+            "RewriteCond %{HTTP_HOST} 'bot-zone.test' [NC]\n",
+            "RewriteRule ^ - [E=IS_BOT:1]\n",
+        );
+        let h = HtAccess::parse(ht);
+        assert!(h.warnings.is_empty(), "{:?}", h.warnings);
+
+        let mut c = ctx(&root, "/sayfa", "", &ua);
+        c.host = "normal-site.test";
+        let res = h.evaluate_in_dir(&c, "/");
+        assert!(res.env_vars.iter().any(|(k, v)| k == "IS_BOT" && v == "1"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

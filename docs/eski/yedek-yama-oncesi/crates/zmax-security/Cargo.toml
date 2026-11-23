@@ -1,0 +1,14 @@
+[package]
+name = "zmax-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dashmap = "5.5"
+tokio = { version = "1.38", features = ["rt", "time", "sync"] }
+zmax-config = { path = "../zmax-config" }
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["full"] }
+

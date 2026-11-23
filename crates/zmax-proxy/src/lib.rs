@@ -2,6 +2,12 @@
 //! Node.js, Python WSGI/ASGI, Go backend ters proxy, tamponsuz akış (SSE `respBuffer 0`)
 //! ve WebSocket çift yönlü tünel motoru.
 
+pub mod context;
+pub mod pool;
+
+pub use context::*;
+pub use pool::*;
+
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -23,6 +29,10 @@ pub struct ProxyRewriteOptions<'a> {
     pub preserve_host: bool,
     /// `preserve_host == false` olduğunda kullanılacak hedef `Host` değeri.
     pub upstream_host: Option<&'a str>,
+    /// İsteğe bağlı URI ön eki kırpma.
+    pub strip_prefix: Option<&'a str>,
+    /// Özel istek başlık kuralları (HeaderAction::Add, Set, Remove).
+    pub custom_headers: &'a [HeaderAction],
 }
 
 impl Default for ProxyRewriteOptions<'_> {
@@ -30,6 +40,8 @@ impl Default for ProxyRewriteOptions<'_> {
         Self {
             preserve_host: true,
             upstream_host: None,
+            strip_prefix: None,
+            custom_headers: &[],
         }
     }
 }
@@ -72,6 +84,10 @@ pub struct ReverseProxy {
     https: bool,
     max_conns: usize,
     ws_idle_timeout: Duration,
+    pool: Option<ProxyConnectionPool>,
+    custom_request_headers: Vec<HeaderAction>,
+    custom_response_headers: Vec<HeaderAction>,
+    strip_prefix: Option<String>,
 }
 
 impl ReverseProxy {
@@ -87,6 +103,10 @@ impl ReverseProxy {
             https: false,
             max_conns: 0,
             ws_idle_timeout: DEFAULT_WS_IDLE_TIMEOUT,
+            pool: None,
+            custom_request_headers: Vec::new(),
+            custom_response_headers: Vec::new(),
+            strip_prefix: None,
         }
     }
 
@@ -150,6 +170,47 @@ impl ReverseProxy {
         self.resp_buffer
     }
 
+    pub fn with_pool(mut self, pool: ProxyConnectionPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    pub fn with_custom_header(mut self, action: HeaderAction) -> Self {
+        self.custom_request_headers.push(action);
+        self
+    }
+
+    pub fn with_custom_headers(mut self, actions: Vec<HeaderAction>) -> Self {
+        self.custom_request_headers.extend(actions);
+        self
+    }
+
+    pub fn with_custom_response_headers(mut self, actions: Vec<HeaderAction>) -> Self {
+        self.custom_response_headers.extend(actions);
+        self
+    }
+
+    pub fn with_strip_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.strip_prefix = Some(prefix.into());
+        self
+    }
+
+    pub fn pool(&self) -> Option<&ProxyConnectionPool> {
+        self.pool.as_ref()
+    }
+
+    pub fn custom_request_headers(&self) -> &[HeaderAction] {
+        &self.custom_request_headers
+    }
+
+    pub fn custom_response_headers(&self) -> &[HeaderAction] {
+        &self.custom_response_headers
+    }
+
+    pub fn strip_prefix(&self) -> Option<&str> {
+        self.strip_prefix.as_deref()
+    }
+
     fn rewrite_options(&self) -> ProxyRewriteOptions<'_> {
         ProxyRewriteOptions {
             preserve_host: self.preserve_host,
@@ -158,6 +219,8 @@ impl ReverseProxy {
             } else {
                 Some(self.upstream_addr.as_str())
             },
+            strip_prefix: self.strip_prefix.as_deref(),
+            custom_headers: &self.custom_request_headers,
         }
     }
 
@@ -209,6 +272,26 @@ impl ReverseProxy {
             read_http_response_with_reusability(upstream_stream, is_head, self.read_timeout)
                 .await?,
         )
+    }
+
+    /// Bağlantı havuzunu (`ProxyConnectionPool`) kullanarak isteği arka uca iletir;
+    /// bağlantıyı havuzdan alır ve işlem bitince keep-alive durumuna göre havuza iade eder.
+    pub async fn forward_http_pooled(
+        &self,
+        request_raw: &[u8],
+        client_ip: SocketAddr,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let pool = match &self.pool {
+            Some(p) => p.clone(),
+            None => ProxyConnectionPool::new(16, self.keep_alive_timeout, self.connect_timeout),
+        };
+
+        let mut pooled = pool.acquire(&self.upstream_addr).await?;
+        let (resp, reusable) = self
+            .forward_http_on_stream(&mut pooled, request_raw, client_ip)
+            .await?;
+        pooled.set_reusable(reusable);
+        Ok(resp)
     }
 
     /// Önceden alınmış (`UpstreamSocketPool`) bir `TcpStream` üzerinden isteği iletir ve yanıtı
@@ -1304,8 +1387,41 @@ fn build_rewritten_head_internal(
     keep_upstream_alive: bool,
 ) -> Vec<u8> {
     let method = req.method.unwrap_or("GET");
-    let path = req.path.unwrap_or("/");
+    let raw_path = req.path.unwrap_or("/");
     let ver = req.version.unwrap_or(1);
+
+    // OLS URI ön eki kırpma (strip_prefix)
+    let effective_path = if let Some(prefix) = options.strip_prefix {
+        let clean_p = prefix.trim();
+        let (p_only, q_opt) = match raw_path.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (raw_path, None),
+        };
+        let stripped = if p_only.starts_with(clean_p) {
+            &p_only[clean_p.len()..]
+        } else if let Some(no_slash) = clean_p.strip_suffix('/') {
+            if p_only == no_slash {
+                ""
+            } else {
+                p_only
+            }
+        } else {
+            p_only
+        };
+        let final_p = if stripped.starts_with('/') {
+            stripped.to_string()
+        } else {
+            format!("/{}", stripped)
+        };
+        if let Some(q) = q_opt {
+            format!("{}?{}", final_p, q)
+        } else {
+            final_p
+        }
+    } else {
+        raw_path.to_string()
+    };
+
     let is_ws_upgrade = req
         .headers
         .iter()
@@ -1328,7 +1444,7 @@ fn build_rewritten_head_internal(
     let mut forwarded_for_parts: Vec<String> = Vec::new();
 
     let mut out = Vec::with_capacity(512);
-    out.extend_from_slice(format!("{} {} HTTP/1.{}\r\n", method, path, ver).as_bytes());
+    out.extend_from_slice(format!("{} {} HTTP/1.{}\r\n", method, effective_path, ver).as_bytes());
 
     for h in req.headers.iter() {
         let n = h.name.to_ascii_lowercase();
@@ -1346,6 +1462,16 @@ fn build_rewritten_head_internal(
                     forwarded_for_parts.push(p.to_string());
                 }
             }
+            continue;
+        }
+
+        // Özel başlık manipülasyonu denetimi (Remove veya Set kuralları)
+        let is_custom_removed = options.custom_headers.iter().any(|act| match act {
+            HeaderAction::Remove { name } => name.eq_ignore_ascii_case(&n),
+            HeaderAction::Set { name, .. } => name.eq_ignore_ascii_case(&n),
+            _ => false,
+        });
+        if is_custom_removed {
             continue;
         }
 
@@ -1379,10 +1505,35 @@ fn build_rewritten_head_internal(
         out.extend_from_slice(b"\r\n");
     }
 
+    // Özel başlık ekleme ve ezme (Add & Set)
+    for act in options.custom_headers {
+        match act {
+            HeaderAction::Add { name, value } | HeaderAction::Set { name, value } => {
+                let n_lower = name.to_ascii_lowercase();
+                if matches!(
+                    n_lower.as_str(),
+                    "connection" | "upgrade" | "transfer-encoding" | "content-length" | "host"
+                ) {
+                    continue;
+                }
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(b": ");
+                out.extend_from_slice(value.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            HeaderAction::Remove { .. } => {}
+        }
+    }
+
     if !options.preserve_host {
         if let Some(up_host) = options.upstream_host {
             out.extend_from_slice(format!("Host: {}\r\n", up_host).as_bytes());
         }
+    } else if let Some(custom_host) = options.custom_headers.iter().find_map(|act| match act {
+        HeaderAction::Set { name, value } if name.eq_ignore_ascii_case("host") => Some(value.as_str()),
+        _ => None,
+    }) {
+        out.extend_from_slice(format!("Host: {}\r\n", custom_host).as_bytes());
     }
     if let Some(host_val) = orig_host {
         let clean_host = sanitize_header_value(host_val);
@@ -2343,6 +2494,8 @@ mod tests {
         let opts = ProxyRewriteOptions {
             preserve_host: false,
             upstream_host: Some("127.0.0.1:3000"),
+            strip_prefix: None,
+            custom_headers: &[],
         };
         let out =
             rewrite_request_head_with_options(head, "10.0.0.5".parse().unwrap(), false, &opts)
@@ -3240,5 +3393,125 @@ mod tests {
         server.shutdown().await.unwrap();
         let (a_to_b, _) = tunnel.await.unwrap().unwrap();
         assert_eq!(a_to_b, 5);
+    }
+
+    #[tokio::test]
+    async fn test_context_engine_full_lifecycle() {
+        let mut engine = ContextEngine::new();
+
+        // 1. Static Context
+        let mut static_rule = ContextRule::new_static("/assets", "/var/www/assets");
+        static_rule.headers = HeaderRuleSet::new().add_response_header("Cache-Control", "public, max-age=3600");
+        engine.add_rule(static_rule);
+
+        // 2. Proxy Context
+        let proxy_rule = ContextRule::new_proxy("/api", "http://127.0.0.1:4000")
+            .with_strip_prefix(true);
+        engine.add_rule(proxy_rule);
+
+        // 3. Redirect Context
+        let redir_rule = ContextRule::new_redirect("/legacy", 301, "https://example.com/v2")
+            .with_append_remainder(true);
+        engine.add_rule(redir_rule);
+
+        let client_ip: IpAddr = "192.168.1.10".parse().unwrap();
+
+        // Test static dispatch
+        match engine.dispatch("/assets/css/style.css", &client_ip) {
+            ContextDecision::Static { file_path, response_headers, .. } => {
+                assert!(file_path.ends_with(std::path::Path::new("css").join("style.css")));
+                assert!(response_headers.iter().any(|(k, v)| k == "Cache-Control" && v == "public, max-age=3600"));
+            }
+            other => panic!("Static karar bekleniyordu: {other:?}"),
+        }
+
+        // Test proxy dispatch with strip prefix
+        match engine.dispatch("/api/v1/users", &client_ip) {
+            ContextDecision::Proxy { upstream, rewritten_uri, .. } => {
+                assert_eq!(upstream, "127.0.0.1:4000");
+                assert_eq!(rewritten_uri, "/v1/users");
+            }
+            other => panic!("Proxy karar bekleniyordu: {other:?}"),
+        }
+
+        // Test redirect dispatch
+        match engine.dispatch("/legacy/page?ref=home", &client_ip) {
+            ContextDecision::Redirect { status_code, destination, .. } => {
+                assert_eq!(status_code, 301);
+                assert_eq!(destination, "https://example.com/v2/page?ref=home");
+            }
+            other => panic!("Redirect karar bekleniyordu: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_proxy_custom_headers_and_prefix_stripping() {
+        let custom_actions = vec![
+            HeaderAction::Set {
+                name: "X-Environment".to_string(),
+                value: "production".to_string(),
+            },
+            HeaderAction::Add {
+                name: "X-Trace-Id".to_string(),
+                value: "trace-12345".to_string(),
+            },
+            HeaderAction::Remove {
+                name: "User-Agent".to_string(),
+            },
+        ];
+
+        let opts = ProxyRewriteOptions {
+            preserve_host: true,
+            upstream_host: None,
+            strip_prefix: Some("/api/"),
+            custom_headers: &custom_actions,
+        };
+
+        let raw_req = b"GET /api/v1/status?param=true HTTP/1.1\r\nHost: myapp.com\r\nUser-Agent: test-agent\r\n\r\n";
+        let client_ip: IpAddr = "1.2.3.4".parse().unwrap();
+
+        let rewritten = rewrite_request_head_with_options(raw_req, client_ip, false, &opts).unwrap();
+        let s = String::from_utf8_lossy(&rewritten);
+
+        // Strip prefix kontrolü: istek satırı /v1/status?param=true olmalı
+        assert!(s.starts_with("GET /v1/status?param=true HTTP/1.1\r\n"));
+        // Remove kontrolü: User-Agent silinmeli
+        assert!(!s.contains("User-Agent: test-agent"));
+        // Set ve Add kontrolü
+        assert!(s.contains("X-Environment: production\r\n"));
+        assert!(s.contains("X-Trace-Id: trace-12345\r\n"));
+        // X-Forwarded-For & X-Real-IP kontrolü
+        assert!(s.contains("X-Real-IP: 1.2.3.4\r\n"));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_forward_http_pooled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n > 0 {
+                        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nHELLO";
+                        let _ = socket.write_all(resp).await;
+                    }
+                });
+            }
+        });
+
+        let proxy = ReverseProxy::new(&addr.to_string())
+            .with_timeouts(Duration::from_secs(2), Duration::from_secs(2))
+            .with_keep_alive_timeout(Duration::from_secs(5));
+
+        let client_addr: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        let req = b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+        let resp_bytes = proxy.forward_http_pooled(req, client_addr).await.expect("Pooled proxy istegi basarili olmali");
+        let resp_str = String::from_utf8_lossy(&resp_bytes);
+        assert!(resp_str.contains("200 OK"));
+        assert!(resp_str.ends_with("HELLO"));
     }
 }

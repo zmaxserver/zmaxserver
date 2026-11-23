@@ -1,0 +1,42 @@
+From 06af0db7703a00e92609cbc7e1bdd4cbc6c2d613 Mon Sep 17 00:00:00 2001
+From: webtasarimofisim <webtasarimofisim@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 09:52:49 +0300
+Subject: [PATCH 1/8] [vm-yukle] admin token gunluge yazilmaz; ban olayi
+ audit.log'a yazilir
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ crates/zmax-bin/src/api/auth.rs  | 4 ++--
+ crates/zmax-bin/src/api/guard.rs | 1 +
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/crates/zmax-bin/src/api/auth.rs b/crates/zmax-bin/src/api/auth.rs
+index 31c82b7..820fa89 100644
+--- a/crates/zmax-bin/src/api/auth.rs
++++ b/crates/zmax-bin/src/api/auth.rs
+@@ -151,8 +151,8 @@ pub fn compute_effective_auth(config: &ZMaxConfig) -> EffectiveAuthTokens {
+         if admin_token.is_empty() {
+             admin_token = generate_secure_token();
+             notices.push(format!(
+-                "[GUVENLIK] WebAdmin dinleyicisi loopback disi ({}) acildigi icin otomatik Admin token uretildi: {}",
+-                config.listeners.admin.address, admin_token
++                "[GUVENLIK] WebAdmin dinleyicisi loopback disi ({}) acildigi icin otomatik Admin token uretildi (degeri gunluge yazilmaz; kalici token icin zmax.toml [listeners.admin] token tanimlayin).",
++                config.listeners.admin.address
+             ));
+         } else {
+             notices.push(format!(
+diff --git a/crates/zmax-bin/src/api/guard.rs b/crates/zmax-bin/src/api/guard.rs
+index 603291e..df5c08c 100644
+--- a/crates/zmax-bin/src/api/guard.rs
++++ b/crates/zmax-bin/src/api/guard.rs
+@@ -71,6 +71,7 @@ pub async fn kaydet_basarisiz(state: &Arc<crate::core::state::ServerState>) {
+         basarisiz_sayac().remove(&ip);
+         state.ban_manager.ban(ip, "API ardisik hatali kimlik dogrulama", ban_sec);
+         crate::redis::publish_ban(redis.as_ref(), &ip.to_string(), ban_sec);
++        super::audit::kayit(state, "api", "ban", &ip.to_string(), true).await;
+     }
+ }
+ 
+-- 
+2.55.0.windows.3
+

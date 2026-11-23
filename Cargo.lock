@@ -1439,7 +1439,7 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zmax-bin"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "brotli",
  "bytes",
@@ -1451,6 +1451,7 @@ dependencies = [
  "mimalloc",
  "rcgen",
  "rustls",
+ "serde",
  "serde_json",
  "socket2 0.5.10",
  "tokio",
@@ -1479,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-cache"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1489,14 +1490,14 @@ dependencies = [
 
 [[package]]
 name = "zmax-compress"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "brotli",
 ]
 
 [[package]]
 name = "zmax-config"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1505,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-core"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "futures",
@@ -1518,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-fastcgi"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "tokio",
@@ -1527,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-header"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "http",
@@ -1535,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-httpparser"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "httparse",
@@ -1548,7 +1549,7 @@ version = "0.1.0"
 
 [[package]]
 name = "zmax-pool"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "tokio",
@@ -1556,17 +1557,18 @@ dependencies = [
 
 [[package]]
 name = "zmax-proxy"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "httparse",
+ "serde",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "zmax-redis"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "serde",
  "tokio",
@@ -1576,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-rewrite"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "dashmap",
  "regex",
@@ -1584,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-runtime"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "libc",
  "tokio",
@@ -1593,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-security"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "dashmap",
  "tokio",
@@ -1602,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-static"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "bytes",
  "libc",
@@ -1613,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "zmax-timeout"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -1621,9 +1623,10 @@ dependencies = [
 
 [[package]]
 name = "zmax-tls"
-version = "1.0.1"
+version = "1.0.9"
 dependencies = [
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pki-types",
  "tokio",

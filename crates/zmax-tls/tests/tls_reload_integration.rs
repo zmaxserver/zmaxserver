@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::server::StoresServerSessions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 use zmax_config::{LoadedVHost, VHostEntry};
-use zmax_tls::{build_acceptor, extract_cert_serial_hex, CertSource, SniResolver};
+use zmax_tls::{
+    build_acceptor, extract_cert_serial_hex, is_acme_challenge_path, AcmeChallengeStore,
+    AlpnConfig, CertSource, InstrumentedSessionCache, ListenerTlsBuilder, SniResolver,
+    TlsSessionConfig, TlsVersion,
+};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("zmax_tls_integ_{}_{}", tag, std::process::id()));
@@ -222,4 +227,84 @@ async fn test_tls_reload_from_vhosts_updates_sni_table() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_listener_tls_builder_with_wildcard_sni() {
+    let dir = temp_dir("integ_wildcard");
+    let wild = generate_test_cert(&dir, "wildcard", &["*.domain.test", "domain.test"]);
+    let resolver = Arc::new(SniResolver::new());
+    resolver.replace(&[wild]);
+
+    let listener_acceptor = ListenerTlsBuilder::new("web_443")
+        .with_resolver(Arc::clone(&resolver))
+        .with_min_version(TlsVersion::Tls12)
+        .with_max_version(TlsVersion::Tls13)
+        .with_alpn(AlpnConfig::h2_and_http11())
+        .with_session_config(TlsSessionConfig::new().with_capacity(512))
+        .build()
+        .expect("ListenerTlsAcceptor build error");
+
+    assert_eq!(listener_acceptor.name(), "web_443");
+
+    // *.domain.test joker eşleşmesi alt alan adlarında test edilir
+    let serial_sub = perform_tls_handshake_and_get_peer_serial(
+        listener_acceptor.tls_acceptor().clone(),
+        "portal.domain.test",
+    )
+    .await;
+    assert!(!serial_sub.is_empty());
+
+    let serial_exact = perform_tls_handshake_and_get_peer_serial(
+        listener_acceptor.tls_acceptor().clone(),
+        "domain.test",
+    )
+    .await;
+    assert_eq!(serial_sub, serial_exact);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_acme_challenge_verification_and_store() {
+    let store = AcmeChallengeStore::new();
+    let token = "test_challenge_token_xyz987";
+    let key_auth = "test_challenge_token_xyz987.abcdef123456";
+
+    assert_eq!(
+        is_acme_challenge_path("/.well-known/acme-challenge/test_challenge_token_xyz987"),
+        Some(token)
+    );
+    assert_eq!(is_acme_challenge_path("/other/path"), None);
+
+    store.insert(token, key_auth);
+    assert_eq!(store.get(token).as_deref(), Some(key_auth));
+    assert!(store.has_token(token));
+
+    assert_eq!(store.remove(token).as_deref(), Some(key_auth));
+    assert!(!store.has_token(token));
+}
+
+#[test]
+fn test_session_cache_metrics_tracking() {
+    let (cache, metrics) = InstrumentedSessionCache::new(64);
+    assert_eq!(metrics.puts(), 0);
+    assert_eq!(metrics.hits(), 0);
+    assert_eq!(metrics.misses(), 0);
+
+    let key = b"sess_1".to_vec();
+    let val = b"val_1".to_vec();
+
+    cache.put(key.clone(), val.clone());
+    assert_eq!(metrics.puts(), 1);
+
+    let res = cache.get(&key);
+    assert_eq!(res, Some(val));
+    assert_eq!(metrics.hits(), 1);
+
+    let miss = cache.get(b"nonexistent");
+    assert_eq!(miss, None);
+    assert_eq!(metrics.misses(), 1);
+    assert_eq!(metrics.total_lookups(), 2);
+    assert!((metrics.hit_ratio() - 0.5).abs() < 1e-6);
 }

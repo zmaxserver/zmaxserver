@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ZMax Katmanlı Mimari Şeması (36 Parça)</title>
+<title>ZMax Katmanlı Mimari Şeması (37 Parça)</title>
 <style>
   :root{--bg:#f2f4f8;--card:#ffffff;--line:#d5dae3;--text:#1b2333;--muted:#4f5870;--accent:#2f5fd0;--accent-h:#244db0}
   *{box-sizing:border-box;margin:0;padding:0}
@@ -25,7 +25,7 @@
 </head>
 <body>
 <header>
-  <h1>ZMax Server — 36 Parçalı Katmanlı Mimari Şeması</h1>
+  <h1>ZMax Server — 37 Parçalı Katmanlı Mimari Şeması</h1>
   <p>Katmanlara göre şema. Ayrıntı belgeleri: doc/00_MIMARI_GENEL_BAKIS.md ve 01–07.</p>
 </header>
 <div class="actions">
@@ -35,7 +35,7 @@
 </div>
 <main class="kutu">
 <svg id="semaSvg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 2000" role="img" aria-labelledby="semaBaslik semaAciklama">
-<title id="semaBaslik">ZMax Server 36 parçalı katmanlı mimari şeması</title>
+<title id="semaBaslik">ZMax Server 37 parçalı katmanlı mimari şeması</title>
 <desc id="semaAciklama">WebAdmin, Rust-Go köprüsü, yönetim API, çekirdek, web trafik boru hattı ve altyapı crate katmanları; katmanlar arası çağrı okları, yeni yazılacak parçalar, açık sorunlar, bağımlılık kuralları ve kararlar.</desc>
 <style>
   .t-main{font:700 26px 'Segoe UI',Roboto,Helvetica,Arial,sans-serif;fill:#1b2333}
@@ -59,8 +59,8 @@
 <marker id="okd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1 L9 5 L0 9 z" fill="#b4531a"/></marker>
 </defs>
 <rect x="0" y="0" width="1700" height="2000" fill="#fafbfd"/>
-<text x="30" y="52" class="t-main">ZMax Server — 36 Parçalı Katmanlı Mimari Şeması (v3.1, kodla eşlenmiş)</text>
-<text x="30" y="78" class="t-sub">7 Çekirdek + 8 Web Trafik Katmanı + 9 Yönetim API Modülü + 7 WebAdmin Bileşeni + 5 Rust↔Go Köprü Parçası = 36</text>
+<text x="30" y="52" class="t-main">ZMax Server — 37 Parçalı Katmanlı Mimari Şeması (v3.2, zCage İzolasyonlu)</text>
+<text x="30" y="78" class="t-sub">7 Çekirdek + 8 Web Trafik Katmanı + 9 Yönetim API Modülü + 7 WebAdmin Bileşeni + 5 Rust↔Go Köprü Parçası + 1 zCage Sandbox = 37</text>
 <text x="30" y="98" class="t-sub">Görsel sıra veri akışına göredir (üstten alta: arayüz → köprü → API → çekirdek → trafik hattı → altyapı); belge numaraları 00–07 sırasıyla farklıdır.</text>
 <rect x="1180" y="38" width="30" height="16" rx="4" fill="#fff" stroke="#555a66" stroke-dasharray="4 3"/><text x="1218" y="51" class="t-note">kesikli: kısmen yazılmış</text>
 <text x="1180" y="74" class="t-open">⚠ kırmızı-turuncu: açık sorun</text>
@@ -537,7 +537,8 @@
 <text x="878" y="1908" class="t-note">6  Go paketi: katmanlizmax/go/zmaxbridge (yol farklı)</text>
 <text x="878" y="1928" class="t-note">7  Köprü rolü yok, yönetim rolü — UYGULANDI (M20)</text>
 <text x="878" y="1948" class="t-note">8  Redis abone + banned_ip_* — UYGULANDI (M19)</text>
-<text x="878" y="1968" class="t-open">9  KISMİ: metrics okuma-token; health loopback YOK</text>
+<text x="878" y="1968" class="t-note">9  Metrics okuma-token; health probe ayrıştırıldı — UYGULANDI</text>
+<text x="878" y="1988" class="t-note">10 zCage Sandboxing: cgroup v1/v2 kotası, seccomp BPF (DEFAULT KILL), rlimit, netns — UYGULANDI (I-01..I-14)</text>
 </svg>
 </main>
 <footer>ZMax Server · katmanlı mimari v3.1 (birlesme2 / dff16c6)</footer>

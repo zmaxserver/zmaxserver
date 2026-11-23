@@ -4,6 +4,47 @@ info:
   version: 1.0.0
   description: ZMax Web Sunucusu ↔ ZPanel Go İstemci Köprü Arayüzü (B1-B5)
 paths:
+  /healthz:
+    get:
+      summary: Liveness ve readiness probe ucu
+      responses:
+        '200':
+          description: Sağlık durumu
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/session/verify:
+    get:
+      summary: Token ve oturum rol doğrulaması
+      security:
+        - BearerAuth: []
+        - HeaderToken: []
+      responses:
+        '200':
+          description: Oturum geçerli
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionVerifyResponse'
+        '401':
+          description: Yetkisiz erişim
+  /api/v1/status:
+    get:
+      summary: Sunucu anlık çalışma ve vHost durumu
+      responses:
+        '200':
+          description: Sunucu durumu
+  /api/v1/events:
+    get:
+      summary: SSE tabanlı canlı sunucu olay akışı
+      responses:
+        '200':
+          description: SSE olay akışı
+          content:
+            text/event-stream:
+              schema:
+                type: string
   /api/v1/version:
     get:
       summary: ZMax ve Köprü sürüm bilgisi
@@ -130,4 +171,24 @@ components:
           type: array
           items:
             type: string
+    SessionVerifyResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        authenticated:
+          type: boolean
+        role:
+          type: string
+          enum: [admin, read]
+        user:
+          type: string
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+    HeaderToken:
+      type: apiKey
+      in: header
+      name: X-ZMax-Token
 

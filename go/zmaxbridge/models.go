@@ -49,5 +49,7 @@ type StatusResponse struct {
 	ActiveConns   int64  `json:"active_connections"`
 	TotalRequests int64  `json:"total_requests"`
 	MemoryUsageKB uint64 `json:"memory_usage_kb"`
+	// RAMMB sunucunun gönderdiği süreç belleği (MB); memory_usage_kb gelmezse buradan türetilir.
+	RAMMB uint64 `json:"ram_mb"`
 }
 

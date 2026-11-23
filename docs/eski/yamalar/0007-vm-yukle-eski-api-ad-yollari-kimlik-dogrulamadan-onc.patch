@@ -1,0 +1,32 @@
+From aee452f61aa3c4b8346b7665d60053672862c3a6 Mon Sep 17 00:00:00 2001
+From: webtasarimofisim <webtasarimofisim@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 11:18:37 +0300
+Subject: [PATCH 7/8] [vm-yukle] eski /api/<ad> yollari kimlik dogrulamadan
+ once 404
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ crates/zmax-bin/src/api/mod.rs | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/crates/zmax-bin/src/api/mod.rs b/crates/zmax-bin/src/api/mod.rs
+index 42c7e9a..675556a 100644
+--- a/crates/zmax-bin/src/api/mod.rs
++++ b/crates/zmax-bin/src/api/mod.rs
+@@ -113,6 +113,13 @@ where
+     }
+ 
+ 
++    // Eski (/api/<ad>) yollar kaldırıldı: kimlik doğrulamadan önce 404 (yalnız /api/v1/* ve /metrics geçerli).
++    if req_path.starts_with("/api/") && !req_path.starts_with("/api/v1/") {
++        let err = r#"{"ok":false,"error":"Bilinmeyen veya desteklenmeyen API uc noktasi"}"#;
++        send_json_response(socket, 404, "Not Found", &cors_origin, err).await?;
++        return Ok(true);
++    }
++
+     if guard::api_koruma_engelle(socket, state, &cors_origin).await? {
+         return Ok(true);
+     }
+-- 
+2.55.0.windows.3
+

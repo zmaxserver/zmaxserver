@@ -6,9 +6,10 @@ license.workspace = true
 
 [dependencies]
 zmax-pool = { path = "../zmax-pool" }
-tokio = { version = "1.38", features = ["net", "io-util", "time"] }
+tokio = { version = "1.38", features = ["net", "io-util", "time", "sync", "process", "rt"] }
 bytes = "1.6"
 
 [dev-dependencies]
 tokio = { version = "1.38", features = ["macros", "rt", "rt-multi-thread"] }
+
 

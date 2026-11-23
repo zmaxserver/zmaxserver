@@ -197,6 +197,9 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/status", nil, &resp); err != nil {
 		return nil, err
 	}
+	if resp.MemoryUsageKB == 0 && resp.RAMMB > 0 {
+		resp.MemoryUsageKB = resp.RAMMB * 1024
+	}
 	return &resp, nil
 }
 

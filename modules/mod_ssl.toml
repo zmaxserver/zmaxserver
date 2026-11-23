@@ -16,7 +16,7 @@ ciphers = [
     "TLS_CHACHA20_POLY1305_SHA256"
 ]
 alpn_protocols = ["h2", "http/1.1"]
-ocsp_stapling = true
+ocsp_stapling = false # zmax-tls çekirdeğinde OCSP cache altyapısı bağlandığında true yapılacak
 session_cache_size = 20480
 session_timeout_sec = 86400
 hsts_preload = true

@@ -12,30 +12,31 @@
     
     --cyan: #00d2ff;
     --cyan-hover: #38bdf8;
-    --cyan-dim: rgba(0, 210, 255, 0.12);
+    --cyan-dim: #0a2738;
     --cyan-border: rgba(0, 210, 255, 0.35);
 
     /* ZMax & ZePanel Kurumsal Logo Turuncusu */
     --orange: #fd7716;
     --orange-hover: #ff8c37;
-    --orange-dim: rgba(253, 119, 22, 0.15);
+    --orange-dim: #2f1f1c;
     --orange-border: rgba(253, 119, 22, 0.4);
     --orange-glow: rgba(253, 119, 22, 0.5);
     --orange-gradient: linear-gradient(135deg, #fd7716 0%, #fec206 100%);
     
     --green: #00e676;
-    --green-bg: rgba(0, 230, 118, 0.12);
+    --green-bg: #0c2e30;
     --green-border: rgba(0, 230, 118, 0.3);
     
     --yellow: #ffb300;
     --yellow-bg: rgba(255, 179, 0, 0.12);
     
     --red: #ff3d71;
-    --red-bg: rgba(255, 61, 113, 0.12);
+    --red-hover: #dc143c;
+    --red-bg: #271422;
     
     --text-white: #ffffff;
     --text-silver: #c2d0e0;
-    --text-muted: #72849e;
+    --text-muted: #7c8fa8;
     --category-title: #435474;
     
     --radius-sm: 6px;
@@ -629,8 +630,8 @@ body {
 }
 
 .btn-danger:hover {
-    background: var(--red);
-    color: white;
+    background: var(--red-hover);
+    color: #ffffff;
 }
 
 /* Data Table */

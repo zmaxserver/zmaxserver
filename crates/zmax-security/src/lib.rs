@@ -13,10 +13,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod acl;
 pub mod hotlink;
+pub mod port_cloak;
 pub mod waf_events;
 
 pub use acl::*;
 pub use hotlink::*;
+pub use port_cloak::*;
 pub use waf_events::*;
 
 const DEFAULT_PURGE_THRESHOLD: usize = 4096;
@@ -165,6 +167,8 @@ struct IpBanEntry {
 /// Kalıcı ve süreli (TTL tabanlı) IP yasak listesi yöneticisi.
 pub struct IpBanManager {
     bans: DashMap<IpAddr, IpBanEntry>,
+    /// Otomatik ban'dan muaf IP/CIDR listesi (`[security] ban_exempt_ips`); loopback her zaman muaftır.
+    exempt: std::sync::RwLock<Vec<String>>,
 }
 
 impl Default for IpBanManager {
@@ -177,11 +181,38 @@ impl IpBanManager {
     pub fn new() -> Self {
         Self {
             bans: DashMap::new(),
+            exempt: std::sync::RwLock::new(Vec::new()),
         }
     }
 
-    /// IP'yi yasaklar. `ttl_secs == 0` ise kalıcı yasak uygulanır; `> 0` ise belirtilen saniye kadar sürer.
+    /// Otomatik ban'dan muaf IP/CIDR listesini değiştirir (yapılandırma yüklenince/yenilenince çağrılır).
+    pub fn set_exempt(&self, specs: Vec<String>) {
+        if let Ok(mut g) = self.exempt.write() {
+            *g = specs;
+        }
+    }
+
+    /// IP otomatik ban'dan muaf mı? Loopback (127.0.0.0/8, ::1) koddan her zaman muaftır.
+    pub fn is_exempt(&self, ip: IpAddr) -> bool {
+        if ip.is_loopback() {
+            return true;
+        }
+        self.exempt
+            .read()
+            .map(|g| g.iter().any(|spec| ip_matches_cidr_spec(ip, spec)))
+            .unwrap_or(false)
+    }
+
+    /// Otomatik yasak (401/WAF/hız sınırı sayacı): muaf IP'lere uygulanmaz. Elle yasak için `ban_forced` kullanılır.
     pub fn ban(&self, ip: IpAddr, reason: impl Into<String>, ttl_secs: u64) {
+        if self.is_exempt(ip) {
+            return;
+        }
+        self.ban_forced(ip, reason, ttl_secs);
+    }
+
+    /// Muafiyeti yok sayarak yasaklar (yönetici elle yasağı). `ttl_secs == 0` ise kalıcı; `> 0` ise saniye kadar sürer.
+    pub fn ban_forced(&self, ip: IpAddr, reason: impl Into<String>, ttl_secs: u64) {
         let expires_at = if ttl_secs == 0 {
             None
         } else {
@@ -1248,5 +1279,31 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 3200);
+    }
+
+    #[test]
+    fn ban_muafiyeti_otomatik_banlari_atlar_loopback_her_zaman_muaf() {
+        let m = IpBanManager::new();
+        m.set_exempt(vec!["192.168.131.1".to_string(), "10.0.0.0/24".to_string()]);
+        let muaf: IpAddr = "192.168.131.1".parse().unwrap();
+        let cidr: IpAddr = "10.0.0.77".parse().unwrap();
+        let digeri: IpAddr = "192.168.131.2".parse().unwrap();
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        m.ban(muaf, "otomatik", 60);
+        m.ban(cidr, "otomatik", 60);
+        m.ban(lo, "otomatik", 60);
+        m.ban(digeri, "otomatik", 60);
+        assert!(!m.is_banned(muaf), "listedeki IP banlanmamalı");
+        assert!(!m.is_banned(cidr), "CIDR içindeki IP banlanmamalı");
+        assert!(!m.is_banned(lo), "loopback her zaman muaf");
+        assert!(m.is_banned(digeri), "muaf olmayan IP banlanmaya devam eder");
+        // elle yasak muafiyeti yok sayar
+        m.ban_forced(muaf, "elle", 60);
+        assert!(m.is_banned(muaf));
+        // liste boşaltılınca otomatik ban yeniden işler
+        m.unban(muaf);
+        m.set_exempt(Vec::new());
+        m.ban(muaf, "otomatik", 60);
+        assert!(m.is_banned(muaf));
     }
 }

@@ -5,11 +5,11 @@
 name = "mod_quic"
 version = "1.0.0"
 category = "Protokol & Çalışma Zamanı"
-enabled = true
+enabled = false # Deneysel: Quinn/h3 çekirdek entegrasyonu tamamlandığında true yapılacak
 
 [settings]
 udp_port = 19483
-zero_rtt = true # 0-RTT hızlı bağlantı açılışı
+zero_rtt = false # 0-RTT Replay saldırısı koruması için varsayılan kapalı
 max_idle_timeout_ms = 30000
 congestion_control = "bbr" # Google BBR Tıkanıklık Kontrolü
 initial_max_streams_bidi = 100

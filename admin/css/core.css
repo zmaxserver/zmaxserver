@@ -14,24 +14,25 @@
     /* ZMax & ZePanel Kurumsal Logo Turuncusu */
     --orange: #fd7716;
     --orange-hover: #ff8c37;
-    --orange-dim: rgba(253, 119, 22, 0.15);
+    --orange-dim: #2f1f1c;
     --orange-border: rgba(253, 119, 22, 0.4);
     --orange-glow: rgba(253, 119, 22, 0.45);
     --orange-gradient: linear-gradient(135deg, #fd7716 0%, #fec206 100%);
 
     --green: #00e676;
-    --green-bg: rgba(0, 230, 118, 0.12);
+    --green-bg: #0c2e30;
     --green-border: rgba(0, 230, 118, 0.3);
 
     --yellow: #ffb300;
     --yellow-bg: rgba(255, 179, 0, 0.12);
 
     --red: #ff3d71;
-    --red-bg: rgba(255, 61, 113, 0.12);
+    --red-hover: #dc143c;
+    --red-bg: #271422;
 
     --text-white: #ffffff;
     --text-silver: #c2d0e0;
-    --text-muted: #72849e;
+    --text-muted: #7c8fa8;
     --category-title: #435474;
 
     --radius-sm: 6px;
@@ -801,8 +802,29 @@ code {
 }
 
 .btn-danger-zmax:hover {
-    background: var(--red);
+    background: var(--red-hover);
     color: #ffffff;
+}
+
+.btn-green-zmax {
+    background: var(--green-bg);
+    border: 1px solid var(--green-border);
+    color: var(--green);
+}
+
+.btn-green-zmax:hover {
+    background: var(--green);
+    color: #070a13;
+    box-shadow: 0 0 16px rgba(0, 230, 118, 0.45);
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.spin-anim {
+    animation: spin 0.8s linear infinite;
 }
 
 .btn-sm-compact {

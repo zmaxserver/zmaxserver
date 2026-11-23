@@ -104,6 +104,15 @@ pub struct ServerGlobalConfig {
     pub graceful_shutdown_secs: u64,
     #[serde(default)]
     pub acme: AcmeConfig,
+    // [ols-parity] Sunucu düzeyi Tuning, Dinleyiciler ve Harici Uygulama Havuzları
+    #[serde(default)]
+    pub tuning: TuningConfig,
+    #[serde(default)]
+    pub listeners: Vec<ListenerConfig>,
+    #[serde(default, alias = "extapps", alias = "external_apps")]
+    pub ext_apps: Vec<ExternalAppConfig>,
+    #[serde(default)]
+    pub script_handlers: Vec<ScriptHandlerConfig>,
 }
 
 pub type ServerConfig = ServerGlobalConfig;
@@ -121,6 +130,10 @@ impl Default for ServerGlobalConfig {
             reuseport_workers: true,
             graceful_shutdown_secs: default_graceful_shutdown_secs(),
             acme: AcmeConfig::default(),
+            tuning: TuningConfig::default(),
+            listeners: Vec::new(),
+            ext_apps: Vec::new(),
+            script_handlers: Vec::new(),
         }
     }
 }
@@ -257,6 +270,675 @@ impl Default for ApiListenerConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct ListenerConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(alias = "ip")]
+    pub address: String,
+    pub port: u16,
+    #[serde(alias = "tls")]
+    pub secure: bool,
+    pub protocol: String,
+    #[serde(default, alias = "vhosts_mapping", alias = "vhost_mapping")]
+    pub vhost_mappings: Vec<String>,
+    #[serde(default)]
+    pub tls_versions: Vec<String>,
+    #[serde(default, alias = "cert_path")]
+    pub cert_file: String,
+    #[serde(default, alias = "key_path")]
+    pub key_file: String,
+    #[serde(default = "default_https_alpn")]
+    pub alpn: Vec<String>,
+    #[serde(default)]
+    pub ca_file: String,
+    #[serde(default = "default_client_verify")]
+    pub client_verify: String,
+    #[serde(default)]
+    pub ciphers: String,
+    #[serde(default)]
+    pub reuse_port: bool,
+    #[serde(default = "default_listener_backlog")]
+    pub backlog: u32,
+    #[serde(default)]
+    pub proxy_protocol: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_listener_backlog() -> u32 {
+    4096
+}
+
+fn default_client_verify() -> String {
+    "none".to_string()
+}
+
+impl Default for ListenerConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            address: "0.0.0.0".to_string(),
+            port: 80,
+            secure: false,
+            protocol: "HTTP/1.1, HTTP/2".to_string(),
+            vhost_mappings: vec!["*".to_string()],
+            tls_versions: vec!["1.2".to_string(), "1.3".to_string()],
+            cert_file: String::new(),
+            key_file: String::new(),
+            alpn: default_https_alpn(),
+            ca_file: String::new(),
+            client_verify: default_client_verify(),
+            ciphers: String::new(),
+            reuse_port: false,
+            backlog: 4096,
+            proxy_protocol: false,
+            enabled: true,
+        }
+    }
+}
+
+impl ListenerConfig {
+    /// Dinleyicinin IP / bind adresini döndürür (OLS denklik takma adı: `ip`).
+    pub fn ip(&self) -> &str {
+        &self.address
+    }
+
+    /// Dinleyicinin IP / bind adresini günceller.
+    pub fn set_ip(&mut self, ip: impl Into<String>) {
+        self.address = ip.into();
+    }
+
+    /// TLS sertifika dosya yolunu döndürür (OLS denklik takma adı: `cert_path`).
+    pub fn cert_path(&self) -> &str {
+        &self.cert_file
+    }
+
+    /// TLS sertifika dosya yolunu günceller.
+    pub fn set_cert_path(&mut self, path: impl Into<String>) {
+        self.cert_file = path.into();
+    }
+
+    /// TLS özel anahtar dosya yolunu döndürür (OLS denklik takma adı: `key_path`).
+    pub fn key_path(&self) -> &str {
+        &self.key_file
+    }
+
+    /// TLS özel anahtar dosya yolunu günceller.
+    pub fn set_key_path(&mut self, path: impl Into<String>) {
+        self.key_file = path.into();
+    }
+
+    /// Eşlenen sanal konak listesini döndürür (OLS denklik takma adı: `vhosts_mapping`).
+    pub fn vhosts_mapping(&self) -> &[String] {
+        &self.vhost_mappings
+    }
+
+    /// Dinleyici yapılandırmasını doğrular.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled && self.port == 0 {
+            return Err(format!("Dinleyici '{}' etkin ancak portu 0 olamaz", self.id));
+        }
+        if !self.address.trim().is_empty() {
+            parse_listener_ip(&self.address)
+                .map_err(|e| format!("Dinleyici '{}' adresi geçersiz: {}", self.id, e))?;
+        }
+        Ok(())
+    }
+}
+
+fn default_compress_mime_types() -> Vec<String> {
+    vec![
+        "text/html".to_string(),
+        "text/plain".to_string(),
+        "text/css".to_string(),
+        "application/javascript".to_string(),
+        "application/json".to_string(),
+        "application/xml".to_string(),
+        "image/svg+xml".to_string(),
+    ]
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct TuningConfig {
+    #[serde(alias = "max_conns")]
+    pub max_connections: u32,
+    #[serde(default = "default_max_ssl_connections")]
+    pub max_ssl_connections: u32,
+    #[serde(alias = "conn_timeout")]
+    pub connection_timeout: u64,
+    pub keep_alive_timeout: u64,
+    #[serde(alias = "max_keep_alive_reqs")]
+    pub max_keep_alive_req: u32,
+    #[serde(default = "default_true")]
+    pub smart_keep_alive: bool,
+    #[serde(default)]
+    pub snd_buf_size: usize,
+    #[serde(default)]
+    pub rcv_buf_size: usize,
+    #[serde(alias = "gzip")]
+    pub gzip_enabled: bool,
+    #[serde(default = "default_compress_level")]
+    pub gzip_level: u32,
+    #[serde(alias = "brotli")]
+    pub brotli_enabled: bool,
+    #[serde(default = "default_compress_level")]
+    pub brotli_level: u32,
+    pub min_compress_size: usize,
+    #[serde(default = "default_compress_mime_types")]
+    pub compress_mime_types: Vec<String>,
+    #[serde(default = "default_true", alias = "ssl_session_cache")]
+    pub ssl_session_cache: bool,
+    pub ssl_cache_size: usize,
+    pub ssl_cache_timeout: u64,
+    #[serde(default = "default_true")]
+    pub ssl_session_tickets: bool,
+    #[serde(alias = "quic")]
+    pub http3_enabled: bool,
+    #[serde(alias = "quic_port")]
+    pub http3_port: u16,
+    #[serde(default = "default_true")]
+    pub cache_static: bool,
+    #[serde(default = "default_max_cached_file_size_kb")]
+    pub max_cached_file_size_kb: usize,
+    #[serde(default = "default_total_in_mem_cache_mb")]
+    pub total_in_mem_cache_mb: usize,
+    #[serde(default = "default_io_model")]
+    pub io_model: String,
+}
+
+fn default_max_ssl_connections() -> u32 {
+    5000
+}
+
+fn default_compress_level() -> u32 {
+    6
+}
+
+fn default_max_cached_file_size_kb() -> usize {
+    1024
+}
+
+fn default_total_in_mem_cache_mb() -> usize {
+    256
+}
+
+fn default_io_model() -> String {
+    "auto".to_string()
+}
+
+impl Default for TuningConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 10000,
+            max_ssl_connections: 5000,
+            connection_timeout: 60,
+            keep_alive_timeout: 15,
+            max_keep_alive_req: 1000,
+            smart_keep_alive: true,
+            snd_buf_size: 0,
+            rcv_buf_size: 0,
+            gzip_enabled: true,
+            gzip_level: 6,
+            brotli_enabled: true,
+            brotli_level: 6,
+            min_compress_size: 256,
+            compress_mime_types: default_compress_mime_types(),
+            ssl_session_cache: true,
+            ssl_cache_size: 1_000_000,
+            ssl_cache_timeout: 3600,
+            ssl_session_tickets: true,
+            http3_enabled: true,
+            http3_port: 443,
+            cache_static: true,
+            max_cached_file_size_kb: 1024,
+            total_in_mem_cache_mb: 256,
+            io_model: "auto".to_string(),
+        }
+    }
+}
+
+impl TuningConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_connections == 0 {
+            return Err("tuning.max_connections değeri 0 olamaz.".to_string());
+        }
+        if self.connection_timeout == 0 {
+            return Err("tuning.connection_timeout değeri 0 olamaz.".to_string());
+        }
+        if self.keep_alive_timeout == 0 {
+            return Err("tuning.keep_alive_timeout değeri 0 olamaz.".to_string());
+        }
+        if self.gzip_level > 9 {
+            return Err("tuning.gzip_level en fazla 9 olabilir.".to_string());
+        }
+        if self.brotli_level > 11 {
+            return Err("tuning.brotli_level en fazla 11 olabilir.".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// OLS (OpenLiteSpeed) WebAdmin standart ayar denkliği sağlayan Sunucu İnce Ayar modeli.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct ServerTuningConfig {
+    #[serde(alias = "conn_timeout")]
+    pub connection_timeout: u64,
+    pub keep_alive_timeout: u64,
+    #[serde(alias = "max_keep_alive_req")]
+    pub max_keep_alive_reqs: u32,
+    #[serde(alias = "gzip_enabled")]
+    pub gzip: bool,
+    #[serde(alias = "brotli_enabled")]
+    pub brotli: bool,
+    pub ssl_session_cache: bool,
+    pub ssl_cache_size: usize,
+    pub ssl_cache_timeout: u64,
+    #[serde(alias = "http3_enabled")]
+    pub quic: bool,
+    #[serde(alias = "http3_port")]
+    pub quic_port: u16,
+    #[serde(alias = "max_conns")]
+    pub max_connections: u32,
+    pub min_compress_size: usize,
+}
+
+impl Default for ServerTuningConfig {
+    fn default() -> Self {
+        Self {
+            connection_timeout: 60,
+            keep_alive_timeout: 15,
+            max_keep_alive_reqs: 1000,
+            gzip: true,
+            brotli: true,
+            ssl_session_cache: true,
+            ssl_cache_size: 1_000_000,
+            ssl_cache_timeout: 3600,
+            quic: true,
+            quic_port: 443,
+            max_connections: 10000,
+            min_compress_size: 256,
+        }
+    }
+}
+
+impl From<TuningConfig> for ServerTuningConfig {
+    fn from(t: TuningConfig) -> Self {
+        Self {
+            connection_timeout: t.connection_timeout,
+            keep_alive_timeout: t.keep_alive_timeout,
+            max_keep_alive_reqs: t.max_keep_alive_req,
+            gzip: t.gzip_enabled,
+            brotli: t.brotli_enabled,
+            ssl_session_cache: t.ssl_session_cache,
+            ssl_cache_size: t.ssl_cache_size,
+            ssl_cache_timeout: t.ssl_cache_timeout,
+            quic: t.http3_enabled,
+            quic_port: t.http3_port,
+            max_connections: t.max_connections,
+            min_compress_size: t.min_compress_size,
+        }
+    }
+}
+
+impl From<ServerTuningConfig> for TuningConfig {
+    fn from(s: ServerTuningConfig) -> Self {
+        Self {
+            max_connections: s.max_connections,
+            connection_timeout: s.connection_timeout,
+            keep_alive_timeout: s.keep_alive_timeout,
+            max_keep_alive_req: s.max_keep_alive_reqs,
+            gzip_enabled: s.gzip,
+            brotli_enabled: s.brotli,
+            min_compress_size: s.min_compress_size,
+            ssl_session_cache: s.ssl_session_cache,
+            ssl_cache_size: s.ssl_cache_size,
+            ssl_cache_timeout: s.ssl_cache_timeout,
+            http3_enabled: s.quic,
+            http3_port: s.quic_port,
+            ..Self::default()
+        }
+    }
+}
+
+fn default_extapp_init_timeout() -> u64 {
+    60
+}
+
+fn default_extapp_instances() -> u32 {
+    1
+}
+
+fn default_extapp_backlog() -> u32 {
+    100
+}
+
+fn default_extapp_mem_limit() -> u64 {
+    2047
+}
+
+fn default_extapp_proc_limit() -> u32 {
+    400
+}
+
+/// OLS (OpenLiteSpeed) Harici Uygulama (PHP LSAPI, FastCGI, Reverse Proxy) yapılandırma modeli.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct ExternalAppConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(alias = "type")]
+    pub app_type: String,
+    #[serde(alias = "socket", alias = "addr")]
+    pub address: String,
+    #[serde(alias = "max_connections")]
+    pub max_conns: u32,
+    #[serde(default)]
+    pub env_vars: HashMap<String, String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default = "default_extapp_init_timeout")]
+    pub init_timeout: u64,
+    #[serde(default)]
+    pub retry_timeout: u64,
+    #[serde(default = "default_true")]
+    pub persist_conn: bool,
+    #[serde(default = "default_true")]
+    pub resp_buffer: bool,
+    #[serde(default = "default_extapp_instances")]
+    pub instances: u32,
+    #[serde(default)]
+    pub ext_path: String,
+    #[serde(default = "default_extapp_backlog")]
+    pub backlog: u32,
+    #[serde(default = "default_true")]
+    pub run_on_startup: bool,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_extapp_mem_limit")]
+    pub mem_soft_limit_mb: u64,
+    #[serde(default = "default_extapp_mem_limit")]
+    pub mem_hard_limit_mb: u64,
+    #[serde(default = "default_extapp_proc_limit")]
+    pub proc_soft_limit: u32,
+    #[serde(default = "default_extapp_proc_limit")]
+    pub proc_hard_limit: u32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+pub type ExtAppConfig = ExternalAppConfig;
+
+impl Default for ExternalAppConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            app_type: "lsphp".to_string(),
+            address: "127.0.0.1:9000".to_string(),
+            max_conns: 100,
+            env_vars: HashMap::new(),
+            env: Vec::new(),
+            init_timeout: 60,
+            retry_timeout: 0,
+            persist_conn: true,
+            resp_buffer: true,
+            instances: 1,
+            ext_path: String::new(),
+            backlog: 100,
+            run_on_startup: true,
+            priority: 0,
+            mem_soft_limit_mb: 2047,
+            mem_hard_limit_mb: 2047,
+            proc_soft_limit: 400,
+            proc_hard_limit: 400,
+            enabled: true,
+        }
+    }
+}
+
+impl ExternalAppConfig {
+    /// Adresin Unix Domain Socket (UDS) olup olmadığını kontrol eder.
+    pub fn is_uds(&self) -> bool {
+        self.address.starts_with("uds://")
+            || self.address.starts_with("unix:")
+            || self.address.ends_with(".sock")
+    }
+
+    /// Adresin TCP bağlantısı olup olmadığını kontrol eder.
+    pub fn is_tcp(&self) -> bool {
+        !self.is_uds()
+    }
+
+    pub fn is_lsapi(&self) -> bool {
+        self.app_type.eq_ignore_ascii_case("lsapi") || self.app_type.eq_ignore_ascii_case("lsphp")
+    }
+
+    pub fn is_fastcgi(&self) -> bool {
+        self.app_type.eq_ignore_ascii_case("fastcgi") || self.app_type.eq_ignore_ascii_case("fcgi")
+    }
+
+    pub fn is_proxy(&self) -> bool {
+        self.app_type.eq_ignore_ascii_case("proxy") || self.app_type.eq_ignore_ascii_case("http")
+    }
+
+    pub fn effective_address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("ExternalAppConfig 'id' boş olamaz".to_string());
+        }
+        if self.address.trim().is_empty() {
+            return Err(format!("ExternalAppConfig '{}' adresi (address) boş olamaz", self.id));
+        }
+        if self.max_conns == 0 {
+            return Err(format!("ExternalAppConfig '{}' max_conns 0 olamaz", self.id));
+        }
+        Ok(())
+    }
+}
+
+/// OLS Script Handler kuralı (uzantı -> harici havuz eşlemesi)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct ScriptHandlerConfig {
+    pub suffix: String,
+    #[serde(default = "default_handler_type", alias = "type")]
+    pub handler_type: String,
+    pub handler: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+fn default_handler_type() -> String {
+    "LSAPI".to_string()
+}
+
+impl Default for ScriptHandlerConfig {
+    fn default() -> Self {
+        Self {
+            suffix: "php".to_string(),
+            handler_type: default_handler_type(),
+            handler: "lsphp83".to_string(),
+            note: String::new(),
+        }
+    }
+}
+
+impl ScriptHandlerConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.suffix.trim().is_empty() {
+            return Err("ScriptHandlerConfig 'suffix' boş olamaz".to_string());
+        }
+        if self.handler.trim().is_empty() {
+            return Err("ScriptHandlerConfig 'handler' boş olamaz".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct ContextConfig {
+    pub uri: String,
+    pub context_type: String,
+    pub target: String,
+    pub location: String,
+    pub handler: String,
+    pub headers: HashMap<String, String>,
+    pub access_allowed: Vec<String>,
+    pub access_denied: Vec<String>,
+    pub rewrite_rules: Vec<String>,
+    pub redirect_status: u16,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct ContextConfigHelper {
+    #[serde(default = "default_context_uri")]
+    uri: String,
+    #[serde(default = "default_context_type", alias = "type")]
+    context_type: String,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    handler: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    access_allowed: Vec<String>,
+    #[serde(default)]
+    access_denied: Vec<String>,
+    #[serde(default)]
+    rewrite_rules: Vec<String>,
+    #[serde(default = "default_redirect_status")]
+    redirect_status: u16,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_context_uri() -> String {
+    "/".to_string()
+}
+
+fn default_context_type() -> String {
+    "static".to_string()
+}
+
+fn default_redirect_status() -> u16 {
+    301
+}
+
+impl<'de> serde::Deserialize<'de> for ContextConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let h = ContextConfigHelper::deserialize(deserializer)?;
+        let resolved_target = h.target
+            .clone()
+            .or_else(|| h.location.clone())
+            .unwrap_or_default();
+        let resolved_location = h.location
+            .clone()
+            .or_else(|| if !resolved_target.is_empty() { Some(resolved_target.clone()) } else { None })
+            .unwrap_or_default();
+        Ok(Self {
+            uri: h.uri,
+            context_type: h.context_type,
+            target: resolved_target,
+            location: resolved_location,
+            handler: h.handler,
+            headers: h.headers,
+            access_allowed: h.access_allowed,
+            access_denied: h.access_denied,
+            rewrite_rules: h.rewrite_rules,
+            redirect_status: h.redirect_status,
+            enabled: h.enabled,
+        })
+    }
+}
+
+/// OLS denklik takma adı: VHost Context yapılandırması
+pub type VHostContextConfig = ContextConfig;
+
+impl ContextConfig {
+    /// Hedef adresi veya dosya yolunu döndürür (OLS denklik takma adı: `target`).
+    pub fn target(&self) -> &str {
+        if !self.target.is_empty() {
+            &self.target
+        } else {
+            &self.location
+        }
+    }
+
+    /// Konum yolunu döndürür.
+    pub fn location(&self) -> &str {
+        if !self.location.is_empty() {
+            &self.location
+        } else {
+            &self.target
+        }
+    }
+
+    /// Context'in Reverse Proxy türünde olup olmadığını denetler.
+    pub fn is_proxy(&self) -> bool {
+        self.context_type.eq_ignore_ascii_case("proxy")
+    }
+
+    /// Context'in Statik Dosya (static) türünde olup olmadığını denetler.
+    pub fn is_static(&self) -> bool {
+        self.context_type.eq_ignore_ascii_case("static")
+    }
+
+    /// Context'in Yeniden Yönlendirme (redirect) türünde olup olmadığını denetler.
+    pub fn is_redirect(&self) -> bool {
+        self.context_type.eq_ignore_ascii_case("redirect")
+    }
+
+    /// Yanıt veya istek başlığı ekler.
+    pub fn add_header(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.headers.insert(key.into(), value.into());
+    }
+
+    /// Context yapılandırmasını doğrular.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.uri.trim().is_empty() || !self.uri.starts_with('/') {
+            return Err(format!("ContextConfig 'uri' '/' ile başlamalıdır ('{}')", self.uri));
+        }
+        let ctype = self.context_type.trim().to_ascii_lowercase();
+        if !matches!(ctype.as_str(), "static" | "proxy" | "redirect" | "cgi" | "fcgi" | "lsapi") {
+            return Err(format!("Geçersiz ContextConfig context_type: '{}'", self.context_type));
+        }
+        Ok(())
+    }
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            uri: "/".to_string(),
+            context_type: "static".to_string(),
+            target: String::new(),
+            location: String::new(),
+            handler: String::new(),
+            headers: HashMap::new(),
+            access_allowed: Vec::new(),
+            access_denied: Vec::new(),
+            rewrite_rules: Vec::new(),
+            redirect_status: 301,
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct ListenersConfig {
@@ -266,6 +948,9 @@ pub struct ListenersConfig {
     pub api: ApiListenerConfig,
     /// `[[listeners.extra]]`: sabit arka uçlu ek TLS ters vekil dinleyicileri (boş = eski davranış).
     pub extra: Vec<ExtraListenerConfig>,
+    /// `[[listeners.custom]]` veya `[[listeners.list]]`: Dinamik dinleyici tanımları
+    #[serde(default)]
+    pub custom: Vec<ListenerConfig>,
 }
 
 fn default_stale_while_revalidate_sec() -> u64 {
@@ -361,6 +1046,10 @@ pub struct SecurityConfig {
     pub allow_ips: Vec<String>,
     #[serde(default)]
     pub deny_ips: Vec<String>,
+    /// Otomatik ban'dan (ardışık 401, WAF, hız sınırı) muaf IP/CIDR listesi. Boş varsayılan; loopback koddan her zaman muaf.
+    /// Not: `allow_ips` sıkı beyaz listedir (listede olmayanı engeller), ban muafiyeti DEĞİLDİR.
+    #[serde(default)]
+    pub ban_exempt_ips: Vec<String>,
     /// Basic Auth için eşzamanlı Argon2/apr1 doğrulama üst sınırı (semafor; yeniden başlatmada geçerli).
     pub auth_max_concurrent_hashes: usize,
     /// API/admin ardışık 401 eşiği (aşılınca IP banlanır).
@@ -378,7 +1067,8 @@ pub struct SecurityConfig {
 fn d_auth_fail_limit() -> u32 { 5 }
 fn d_auth_fail_window() -> u64 { 300 }
 fn d_auth_ban() -> u64 { 900 }
-fn d_api_rate() -> u32 { 120 }
+/// WebAdmin tek sayfa 5 uç noktayı yoklar; birden çok sekme/panel için 120/dk yetersizdi (429).
+fn d_api_rate() -> u32 { 600 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
@@ -393,11 +1083,12 @@ impl Default for SecurityConfig {
             max_header_size_kb: 64,
             allow_ips: Vec::new(),
             deny_ips: Vec::new(),
+            ban_exempt_ips: Vec::new(),
             auth_max_concurrent_hashes: 4,
             auth_fail_limit: 5,
             auth_fail_window_sec: 300,
             auth_ban_sec: 900,
-            api_rate_limit_per_minute: 120,
+            api_rate_limit_per_minute: 600,
         }
     }
 }
@@ -462,6 +1153,64 @@ impl Default for VHostsDirConfig {
     }
 }
 
+fn default_sandbox_engine() -> String {
+    "nsjail".to_string()
+}
+fn default_sandbox_profile() -> String {
+    "conf/jail/default.cfg".to_string()
+}
+fn default_seccomp_policy() -> String {
+    "conf/seccomp/zmax_seccomp.cfg".to_string()
+}
+fn default_cgroup_mem_limit() -> u64 {
+    256
+}
+fn default_cgroup_pids_limit() -> u32 {
+    64
+}
+fn default_cgroup_cpu_percent() -> u32 {
+    50
+}
+
+/// Linux izolasyon ve sandbox modeli (nsjail / cgroups / seccomp) (I-01 .. I-10 / izalasyon.md)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SandboxConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_sandbox_engine")]
+    pub engine: String,
+    #[serde(default = "default_sandbox_profile")]
+    pub profile: String,
+    #[serde(default = "default_seccomp_policy")]
+    pub seccomp_policy: String,
+    #[serde(default = "default_cgroup_mem_limit")]
+    pub cgroup_mem_limit_mb: u64,
+    #[serde(default = "default_cgroup_pids_limit")]
+    pub cgroup_pids_limit: u32,
+    #[serde(default = "default_cgroup_cpu_percent")]
+    pub cgroup_cpu_percent: u32,
+    #[serde(default = "default_true")]
+    pub read_only_root: bool,
+    #[serde(default = "default_true")]
+    pub network_isolated: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            engine: default_sandbox_engine(),
+            profile: default_sandbox_profile(),
+            seccomp_policy: default_seccomp_policy(),
+            cgroup_mem_limit_mb: default_cgroup_mem_limit(),
+            cgroup_pids_limit: default_cgroup_pids_limit(),
+            cgroup_cpu_percent: default_cgroup_cpu_percent(),
+            read_only_root: true,
+            network_isolated: true,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct ZMaxConfig {
@@ -474,7 +1223,44 @@ pub struct ZMaxConfig {
     #[serde(default)]
     pub acme: AcmeConfig,
     #[serde(default)]
+    pub tuning: TuningConfig,
+    #[serde(default, alias = "ext_apps", alias = "external_apps")]
+    pub extapps: Vec<ExternalAppConfig>,
+    #[serde(default)]
+    pub script_handlers: Vec<ScriptHandlerConfig>,
+    #[serde(default)]
     pub vhosts: HashMap<String, VHostEntry>,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+}
+
+impl ZMaxConfig {
+    /// OLS denklik standartlarında sunucu ince ayar modelini (`ServerTuningConfig`) döndürür.
+    pub fn effective_tuning(&self) -> ServerTuningConfig {
+        if self.server.tuning != TuningConfig::default() {
+            self.server.tuning.clone().into()
+        } else {
+            self.tuning.clone().into()
+        }
+    }
+
+    /// Etkin harici uygulama listesini döndürür (server.ext_apps veya top-level extapps).
+    pub fn effective_ext_apps(&self) -> Vec<ExternalAppConfig> {
+        if !self.server.ext_apps.is_empty() {
+            self.server.ext_apps.clone()
+        } else {
+            self.extapps.clone()
+        }
+    }
+
+    /// Etkin dinamik dinleyicileri döndürür (server.listeners veya listeners.custom).
+    pub fn effective_custom_listeners(&self) -> Vec<ListenerConfig> {
+        if !self.server.listeners.is_empty() {
+            self.server.listeners.clone()
+        } else {
+            self.listeners.custom.clone()
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -501,6 +1287,9 @@ pub struct VHostEntry {
     pub logging: VHostLoggingSection,
     #[serde(default)]
     pub error_docs: VHostErrorDocsSection,
+    // [ols-parity] HTTP durum koduna göre özel hata sayfaları eşlemesi
+    #[serde(default, with = "serde_status_hashmap", skip_serializing_if = "HashMap::is_empty")]
+    pub error_pages: HashMap<u16, String>,
     #[serde(default)]
     pub tls: VHostTlsSection,
     #[serde(default, rename = "static")]
@@ -516,7 +1305,18 @@ pub struct VHostEntry {
     pub proxy_ext: ProxyExtConfig,
     #[serde(default)]
     pub auth: VHostAuthSection,
+    // [ols-parity] URI tabanlı Context yönlendiricisi
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<ContextConfig>,
+    // [ols-parity] vHost düzeyinde harici uygulama havuzları
+    #[serde(default, alias = "extapps", skip_serializing_if = "Vec::is_empty")]
+    pub ext_apps: Vec<ExtAppConfig>,
+    // [ols-parity] vHost düzeyinde betik işleyicileri
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_handlers: Vec<ScriptHandlerConfig>,
 }
+
+pub type VHostConfig = VHostEntry;
 
 impl Default for VHostEntry {
     fn default() -> Self {
@@ -538,6 +1338,7 @@ impl Default for VHostEntry {
             headers: VHostHeadersSection::default(),
             logging: VHostLoggingSection::default(),
             error_docs: VHostErrorDocsSection::default(),
+            error_pages: HashMap::new(),
             tls: VHostTlsSection::default(),
             static_files: VHostStaticSection::default(),
             hotlink: HotlinkConfig::default(),
@@ -545,6 +1346,9 @@ impl Default for VHostEntry {
             acme: AcmeConfig::default(),
             proxy_ext: ProxyExtConfig::default(),
             auth: VHostAuthSection::default(),
+            contexts: Vec::new(),
+            ext_apps: Vec::new(),
+            script_handlers: Vec::new(),
         }
     }
 }
@@ -574,12 +1378,15 @@ impl VHostEntry {
 
     /// Verilen HTTP durum kodu için özel hata sayfası yolunu yol enjeksiyonu (`..`) korumalı biçimde çözer.
     pub fn resolve_error_doc_page(&self, status: u16) -> Option<PathBuf> {
-        if !self.error_docs.enabled {
-            return None;
-        }
-        let raw_page = self.error_docs.pages.get(&status).cloned().or_else(|| {
-            if status == 404 {
-                self.error_docs.not_found.clone()
+        let raw_page = self.error_pages.get(&status).cloned().or_else(|| {
+            if self.error_docs.enabled {
+                self.error_docs.pages.get(&status).cloned().or_else(|| {
+                    if status == 404 {
+                        self.error_docs.not_found.clone()
+                    } else {
+                        None
+                    }
+                })
             } else {
                 None
             }
@@ -657,6 +1464,23 @@ impl VHostEntry {
         self.proxy_ext.validate("vhost.proxy_ext")?;
         // [kart-9] Basic Authentication bölüm doğrulaması
         self.auth.validate(&format!("vHost '{}'", self.name))?;
+        for ctx in &self.contexts {
+            ctx.validate()?;
+        }
+        for app in &self.ext_apps {
+            app.validate()?;
+        }
+        for sh in &self.script_handlers {
+            sh.validate()?;
+        }
+        for (code, path) in &self.error_pages {
+            if *code < 100 || *code > 599 {
+                return Err(format!("vHost '{}' geçersiz HTTP durum kodu: {}", self.name, code));
+            }
+            if !is_safe_relative_subpath(path) {
+                return Err(format!("vHost '{}' geçersiz hata sayfası yolu: '{}'", self.name, path));
+            }
+        }
         Ok(())
     }
 }
@@ -743,11 +1567,33 @@ impl VHostPhpSection {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct VHostSslSection {
+    #[serde(alias = "cert", alias = "cert_file")]
     pub certificate: String,
+    #[serde(alias = "key_file")]
     pub key: String,
+    #[serde(default)]
+    pub acme: bool,
+    #[serde(default)]
+    pub acme_config: Option<AcmeConfig>,
+}
+
+pub type SslConfig = VHostSslSection;
+
+impl VHostSslSection {
+    pub fn cert(&self) -> &str {
+        &self.certificate
+    }
+
+    pub fn cert_path(&self) -> &str {
+        &self.certificate
+    }
+
+    pub fn key_path(&self) -> &str {
+        &self.key
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -796,12 +1642,43 @@ pub struct VHostRewriteRule {
     pub last: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+pub type RewriteRule = VHostRewriteRule;
+
+/// OLS (OpenLiteSpeed) Sanal Konak Yeniden Yazma (Rewrite) modeli.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct VHostRewriteConfig {
+    #[serde(alias = "enabled")]
+    pub enable: bool,
+    #[serde(default)]
+    pub rules: Vec<String>,
+    #[serde(default = "default_true")]
+    pub inherit: bool,
+}
+
+pub type RewriteConfig = VHostRewriteConfig;
+
+impl Default for VHostRewriteConfig {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            rules: Vec::new(),
+            inherit: true,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct VHostRewriteSection {
+    #[serde(alias = "enable")]
     pub enabled: bool,
     pub try_files: bool,
     pub htaccess: bool,
+    #[serde(default = "default_true")]
+    pub inherit: bool,
+    #[serde(default)]
+    pub raw_rules: Vec<String>,
     #[serde(default)]
     pub rules: Vec<VHostRewriteRule>,
 }
@@ -812,6 +1689,45 @@ impl Default for VHostRewriteSection {
             enabled: true,
             try_files: true,
             htaccess: true,
+            inherit: true,
+            raw_rules: Vec::new(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl From<VHostRewriteSection> for VHostRewriteConfig {
+    fn from(s: VHostRewriteSection) -> Self {
+        let mut r = s.raw_rules;
+        if r.is_empty() && !s.rules.is_empty() {
+            r = s
+                .rules
+                .iter()
+                .map(|rule| {
+                    if rule.status > 0 {
+                        format!("RewriteRule {} {} [R={}]", rule.pattern, rule.target, rule.status)
+                    } else {
+                        format!("RewriteRule {} {}", rule.pattern, rule.target)
+                    }
+                })
+                .collect();
+        }
+        Self {
+            enable: s.enabled,
+            rules: r,
+            inherit: s.inherit,
+        }
+    }
+}
+
+impl From<VHostRewriteConfig> for VHostRewriteSection {
+    fn from(c: VHostRewriteConfig) -> Self {
+        Self {
+            enabled: c.enable,
+            try_files: true,
+            htaccess: true,
+            inherit: c.inherit,
+            raw_rules: c.rules.clone(),
             rules: Vec::new(),
         }
     }
@@ -894,6 +1810,66 @@ mod serde_status_pages {
                 M: MapAccess<'de>,
             {
                 let mut out = BTreeMap::new();
+                while let Some((key, val)) = access.next_entry::<StatusKey, String>()? {
+                    let code = match key {
+                        StatusKey::Num(n) => n,
+                        StatusKey::Str(s) => s.trim().parse::<u16>().map_err(|_| {
+                            serde::de::Error::custom(format!(
+                                "Geçersiz HTTP durum kodu anahtarı: '{}'",
+                                s
+                            ))
+                        })?,
+                    };
+                    out.insert(code, val);
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_map(StatusMapVisitor)
+    }
+}
+
+mod serde_status_hashmap {
+    use serde::de::{MapAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use std::fmt;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StatusKey {
+        Num(u16),
+        Str(String),
+    }
+
+    pub fn serialize<S>(map: &HashMap<u16, String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let str_map: HashMap<String, &String> =
+            map.iter().map(|(k, v)| (k.to_string(), v)).collect();
+        str_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<u16, String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StatusMapVisitor;
+
+        impl<'de> Visitor<'de> for StatusMapVisitor {
+            type Value = HashMap<u16, String>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("HTTP durum kodu -> dosya yolu eşlemesi")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut out = HashMap::new();
                 while let Some((key, val)) = access.next_entry::<StatusKey, String>()? {
                     let code = match key {
                         StatusKey::Num(n) => n,
@@ -3121,5 +4097,329 @@ x_accel_prefix = "/protected/"
         assert_eq!(cfg.server.tmp_dir, "");
         let cfg2 = ZMaxConfig::parse_toml("[server]\ntmp_dir = \"run/tmp\"\n").unwrap();
         assert_eq!(cfg2.server.tmp_dir, "run/tmp");
+    }
+
+    #[test]
+    fn test_ols_parity_models_roundtrip() {
+        // 1. TuningConfig varsayılanları ve TOML ayrıştırma
+        let tuning_default = TuningConfig::default();
+        assert_eq!(tuning_default.max_connections, 10000);
+        assert_eq!(tuning_default.connection_timeout, 60);
+        assert!(tuning_default.gzip_enabled);
+        assert!(tuning_default.http3_enabled);
+
+        let toml_tuning = r#"
+[server]
+server_name = "ols_test"
+[tuning]
+max_connections = 50000
+connection_timeout = 120
+gzip_enabled = false
+http3_port = 8443
+"#;
+        let cfg = ZMaxConfig::parse_toml(toml_tuning).expect("tuning TOML ayrıştırılmalı");
+        assert_eq!(cfg.tuning.max_connections, 50000);
+        assert_eq!(cfg.tuning.connection_timeout, 120);
+        assert!(!cfg.tuning.gzip_enabled);
+        assert_eq!(cfg.tuning.http3_port, 8443);
+        // Atanmayan alanlar varsayılan kalır
+        assert_eq!(cfg.tuning.keep_alive_timeout, 15);
+
+        // 2. ListenerConfig varsayılanları ve dinamik dinleyici
+        let listener_def = ListenerConfig::default();
+        assert_eq!(listener_def.port, 80);
+        assert!(listener_def.enabled);
+        assert_eq!(listener_def.vhost_mappings, vec!["*".to_string()]);
+
+        let toml_listeners = r#"
+[server]
+server_name = "test_l"
+[[listeners.custom]]
+id = "listener_7080"
+name = "Admin Port"
+address = "127.0.0.1"
+port = 7080
+secure = true
+protocol = "HTTP/2"
+vhost_mappings = ["admin.local"]
+tls_versions = ["1.3"]
+"#;
+        let cfg_l = ZMaxConfig::parse_toml(toml_listeners).expect("dinleyici TOML ayrıştırılmalı");
+        assert_eq!(cfg_l.listeners.custom.len(), 1);
+        let l = &cfg_l.listeners.custom[0];
+        assert_eq!(l.id, "listener_7080");
+        assert_eq!(l.port, 7080);
+        assert!(l.secure);
+        assert_eq!(l.vhost_mappings, vec!["admin.local".to_string()]);
+
+        // 3. ContextConfig varsayılanları ve vHost contexts listesi
+        let ctx_def = ContextConfig::default();
+        assert_eq!(ctx_def.uri, "/");
+        assert_eq!(ctx_def.context_type, "static");
+        assert!(ctx_def.enabled);
+
+        let toml_vhost = r#"
+[vhost]
+name = "context.test"
+document_root = "www/test"
+
+[[vhost.contexts]]
+uri = "/api"
+context_type = "proxy"
+location = "http://127.0.0.1:3000"
+rewrite_rules = ["RewriteRule ^/api/(.*)$ /$1 [P]"]
+
+[[vhost.contexts]]
+uri = "/static"
+context_type = "static"
+location = "/var/www/static"
+"#;
+        let doc: VHostFileDocument = toml::from_str(toml_vhost).expect("vhost contexts ayrıştırılmalı");
+        assert_eq!(doc.vhost.contexts.len(), 2);
+        assert_eq!(doc.vhost.contexts[0].uri, "/api");
+        assert_eq!(doc.vhost.contexts[0].context_type, "proxy");
+        assert_eq!(doc.vhost.contexts[0].location, "http://127.0.0.1:3000");
+        assert_eq!(doc.vhost.contexts[1].uri, "/static");
+        assert_eq!(doc.vhost.contexts[1].context_type, "static");
+    }
+
+    #[test]
+    fn test_ols_server_tuning_config_serde_and_default() {
+        let def = ServerTuningConfig::default();
+        assert_eq!(def.connection_timeout, 60);
+        assert_eq!(def.keep_alive_timeout, 15);
+        assert_eq!(def.max_keep_alive_reqs, 1000);
+        assert!(def.gzip);
+        assert!(def.brotli);
+        assert!(def.ssl_session_cache);
+        assert_eq!(def.ssl_cache_size, 1_000_000);
+        assert_eq!(def.ssl_cache_timeout, 3600);
+        assert!(def.quic);
+        assert_eq!(def.quic_port, 443);
+        assert_eq!(def.max_connections, 10000);
+        assert_eq!(def.min_compress_size, 256);
+
+        let toml_str = r#"
+connection_timeout = 90
+keep_alive_timeout = 25
+max_keep_alive_reqs = 500
+gzip = false
+brotli = true
+ssl_session_cache = true
+ssl_cache_size = 500000
+ssl_cache_timeout = 1800
+quic = false
+quic_port = 8443
+max_connections = 25000
+min_compress_size = 512
+"#;
+        let parsed: ServerTuningConfig = toml::from_str(toml_str).expect("ServerTuningConfig toml parsed");
+        assert_eq!(parsed.connection_timeout, 90);
+        assert_eq!(parsed.keep_alive_timeout, 25);
+        assert_eq!(parsed.max_keep_alive_reqs, 500);
+        assert!(!parsed.gzip);
+        assert!(parsed.brotli);
+        assert!(parsed.ssl_session_cache);
+        assert_eq!(parsed.ssl_cache_size, 500000);
+        assert_eq!(parsed.ssl_cache_timeout, 1800);
+        assert!(!parsed.quic);
+        assert_eq!(parsed.quic_port, 8443);
+        assert_eq!(parsed.max_connections, 25000);
+        assert_eq!(parsed.min_compress_size, 512);
+
+        // From<TuningConfig> ve From<ServerTuningConfig> çift yönlü dönüşüm
+        let tuning_from_server: TuningConfig = parsed.clone().into();
+        assert_eq!(tuning_from_server.connection_timeout, 90);
+        assert_eq!(tuning_from_server.max_keep_alive_req, 500);
+        assert!(!tuning_from_server.gzip_enabled);
+        assert!(!tuning_from_server.http3_enabled);
+
+        let server_from_tuning: ServerTuningConfig = tuning_from_server.into();
+        assert_eq!(server_from_tuning, parsed);
+
+        // ZMaxConfig::effective_tuning() testi
+        let mut zmax = ZMaxConfig::default();
+        zmax.tuning.connection_timeout = 75;
+        let eff = zmax.effective_tuning();
+        assert_eq!(eff.connection_timeout, 75);
+    }
+
+    #[test]
+    fn test_ols_listener_config_aliases_and_methods() {
+        let mut l = ListenerConfig::default();
+        assert_eq!(l.ip(), "0.0.0.0");
+        assert_eq!(l.port, 80);
+        assert!(!l.secure);
+        assert_eq!(l.cert_path(), "");
+        assert_eq!(l.key_path(), "");
+        assert_eq!(l.vhosts_mapping(), &["*".to_string()]);
+
+        l.set_ip("192.168.1.50");
+        l.set_cert_path("/etc/ssl/cert.pem");
+        l.set_key_path("/etc/ssl/key.pem");
+        assert_eq!(l.ip(), "192.168.1.50");
+        assert_eq!(l.address, "192.168.1.50");
+        assert_eq!(l.cert_path(), "/etc/ssl/cert.pem");
+        assert_eq!(l.key_path(), "/etc/ssl/key.pem");
+
+        // Serde takma adları (ip, cert_path, key_path, vhosts_mapping, tls) ile TOML ayrıştırma
+        let toml_listener = r#"
+id = "ls_ols_https"
+name = "OLS Secure Listener"
+ip = "10.0.0.1"
+port = 443
+tls = true
+protocol = "HTTP/2, HTTP/3 (QUIC)"
+vhosts_mapping = ["site1.com", "site2.com"]
+tls_versions = ["1.3"]
+cert_path = "/certs/bundle.crt"
+key_path = "/certs/server.key"
+enabled = true
+"#;
+        let parsed: ListenerConfig = toml::from_str(toml_listener).expect("ListenerConfig with aliases parsed");
+        assert_eq!(parsed.id, "ls_ols_https");
+        assert_eq!(parsed.name, "OLS Secure Listener");
+        assert_eq!(parsed.ip(), "10.0.0.1");
+        assert_eq!(parsed.address, "10.0.0.1");
+        assert_eq!(parsed.port, 443);
+        assert!(parsed.secure);
+        assert_eq!(parsed.vhosts_mapping(), &["site1.com".to_string(), "site2.com".to_string()]);
+        assert_eq!(parsed.cert_path(), "/certs/bundle.crt");
+        assert_eq!(parsed.key_path(), "/certs/server.key");
+    }
+
+    #[test]
+    fn test_ols_external_app_config_serde_and_uds() {
+        let def = ExternalAppConfig::default();
+        assert_eq!(def.app_type, "lsphp");
+        assert_eq!(def.address, "127.0.0.1:9000");
+        assert_eq!(def.max_conns, 100);
+        assert!(def.is_tcp());
+        assert!(!def.is_uds());
+        assert!(def.persist_conn);
+        assert_eq!(def.instances, 1);
+        assert!(def.enabled);
+
+        let uds_app = ExternalAppConfig {
+            id: "lsphp83".to_string(),
+            name: "PHP 8.3 LiteSpeed".to_string(),
+            app_type: "lsphp".to_string(),
+            address: "uds:///tmp/lsphp83.sock".to_string(),
+            max_conns: 200,
+            env_vars: {
+                let mut map = HashMap::new();
+                map.insert("PHP_LSAPI_CHILDREN".to_string(), "50".to_string());
+                map.insert("MEMORY_LIMIT".to_string(), "512M".to_string());
+                map
+            },
+            init_timeout: 45,
+            retry_timeout: 5,
+            persist_conn: true,
+            instances: 4,
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(uds_app.is_uds());
+        assert!(!uds_app.is_tcp());
+
+        // Serde roundtrip testi
+        let toml_str = toml::to_string(&uds_app).expect("ExternalAppConfig serialize to toml");
+        let parsed: ExternalAppConfig = toml::from_str(&toml_str).expect("ExternalAppConfig deserialize from toml");
+        assert_eq!(parsed.id, "lsphp83");
+        assert_eq!(parsed.max_conns, 200);
+        assert_eq!(parsed.env_vars.get("PHP_LSAPI_CHILDREN").map(String::as_str), Some("50"));
+        assert!(parsed.is_uds());
+
+        // ZMaxConfig içine [[extapps]] listesi ekleme ve ayrıştırma
+        let zmax_toml = r#"
+[server]
+server_name = "ols_server"
+
+[[extapps]]
+id = "lsphp81"
+name = "PHP 8.1"
+app_type = "lsphp"
+address = "uds:///tmp/lsphp81.sock"
+max_conns = 80
+
+[[extapps]]
+id = "node_proxy"
+name = "Node Backend"
+app_type = "proxy"
+address = "127.0.0.1:3000"
+max_conns = 150
+"#;
+        let cfg: ZMaxConfig = ZMaxConfig::parse_toml(zmax_toml).expect("ZMaxConfig with extapps parsed");
+        assert_eq!(cfg.extapps.len(), 2);
+        assert_eq!(cfg.extapps[0].id, "lsphp81");
+        assert!(cfg.extapps[0].is_uds());
+        assert_eq!(cfg.extapps[1].id, "node_proxy");
+        assert!(cfg.extapps[1].is_tcp());
+    }
+
+    #[test]
+    fn test_ols_vhost_context_config_headers_and_types() {
+        let mut ctx = VHostContextConfig::default();
+        assert_eq!(ctx.uri, "/");
+        assert!(ctx.is_static());
+        assert!(!ctx.is_proxy());
+        assert!(!ctx.is_redirect());
+
+        ctx.context_type = "proxy".to_string();
+        ctx.location = "http://127.0.0.1:8080".to_string();
+        ctx.add_header("X-Forwarded-Proto", "https");
+        ctx.add_header("X-Real-IP", "$remote_addr");
+        assert!(ctx.is_proxy());
+        assert_eq!(ctx.headers.get("X-Forwarded-Proto").map(String::as_str), Some("https"));
+
+        let toml_ctx = r#"
+uri = "/app"
+context_type = "redirect"
+location = "https://example.com/login"
+handler = "redirect_handler"
+
+[headers]
+X-Redirect-Reason = "Authentication Required"
+"#;
+        let parsed: VHostContextConfig = toml::from_str(toml_ctx).expect("VHostContextConfig parsed");
+        assert_eq!(parsed.uri, "/app");
+        assert!(parsed.is_redirect());
+        assert_eq!(parsed.location, "https://example.com/login");
+        assert_eq!(parsed.headers.get("X-Redirect-Reason").map(String::as_str), Some("Authentication Required"));
+    }
+
+    #[test]
+    fn test_ols_vhost_rewrite_config_roundtrip_and_inherit() {
+        let def = VHostRewriteConfig::default();
+        assert!(def.enable);
+        assert!(def.inherit);
+        assert!(def.rules.is_empty());
+
+        let toml_str = r#"
+enable = true
+inherit = false
+rules = [
+    "RewriteEngine On",
+    "RewriteCond %{REQUEST_FILENAME} !-f",
+    "RewriteCond %{REQUEST_FILENAME} !-d",
+    "RewriteRule ^(.*)$ index.php [L]"
+]
+"#;
+        let parsed: VHostRewriteConfig = toml::from_str(toml_str).expect("VHostRewriteConfig parsed");
+        assert!(parsed.enable);
+        assert!(!parsed.inherit);
+        assert_eq!(parsed.rules.len(), 4);
+        assert_eq!(parsed.rules[3], "RewriteRule ^(.*)$ index.php [L]");
+
+        // From<VHostRewriteConfig> for VHostRewriteSection dönüşümü
+        let section: VHostRewriteSection = parsed.clone().into();
+        assert!(section.enabled);
+        assert!(!section.inherit);
+        assert_eq!(section.raw_rules.len(), 4);
+
+        // From<VHostRewriteSection> for VHostRewriteConfig dönüşümü
+        let back_cfg: VHostRewriteConfig = section.into();
+        assert_eq!(back_cfg.rules, parsed.rules);
+        assert_eq!(back_cfg.inherit, parsed.inherit);
     }
 }

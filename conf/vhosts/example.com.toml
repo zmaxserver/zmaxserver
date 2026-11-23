@@ -1,12 +1,12 @@
-# ============================================================
-# Sanal Konak: example.com (Örnek Domain)
-# ============================================================
-
+# ZMax Server API tarafından otomatik yönetilen Sanal Konak (example.com)
 [vhost]
 name = "example.com"
 aliases = ["www.example.com"]
 document_root = "www/example"
-index_files = ["index.php", "index.html"]
+index_files = [
+    "index.php",
+    "index.html",
+]
 
 [vhost.cache]
 enabled = true
@@ -16,24 +16,156 @@ expire = 600
 enabled = true
 sapi = "fastcgi"
 upstream = "127.0.0.1:9000"
+timeout = 60
+upstreams = []
+lb_policy = "round_robin"
+io_timeout_secs = 60
+keep_conn = true
+max_idle_conns = 16
+resolve_root_symlink = true
+allow_x_accel_redirect = true
+x_accel_prefix = ""
 
 [vhost.ssl]
 certificate = "conf/ssl/example.crt"
 key = "conf/ssl/example.key"
+acme = false
 
-[vhost.tls]
-http2 = true
+[vhost.security]
+hotlink_protection = false
+force_https = false
+allow_ips = []
+deny_ips = []
+wp_brute_force = true
+waf_exclude_paths = []
+block_dangerous_files = false
+
+[vhost.rewrite]
+enabled = true
+try_files = true
+htaccess = true
+inherit = true
+raw_rules = []
+rules = []
+
+[vhost.proxy]
+enabled = false
+upstream = ""
+path_prefix = "/"
+preserve_host = true
+websocket = true
+
+[vhost.headers]
+security_headers = true
+hsts = false
 
 [vhost.logging]
 enabled = false
 access_log = "logs/example.com.access.log"
 error_log = "logs/example.com.error.log"
+format = "combined"
+max_log_size_mb = 100
+also_write_global = true
+
+[vhost.error_docs]
+enabled = false
+dir = ""
+
+[vhost.error_docs.pages]
+
+[vhost.tls]
+http2 = true
+strict_sni = false
+min_version = "1.2"
 
 [vhost.static]
 precompressed = true
 brotli = true
 gzip = true
+autoindex = false
+sendfile = true
 
-[vhost.error_docs]
+[vhost.hotlink]
 enabled = false
+allowed_referers = []
+extensions = [
+    "jpg",
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+    "svg",
+    "mp4",
+    "mp3",
+    "pdf",
+    "zip",
+]
 
+[vhost.acl]
+allow_ips = []
+deny_ips = []
+
+[vhost.acme]
+force_https_exempt = true
+
+[vhost.proxy_ext]
+init_timeout_sec = 60
+keep_alive_timeout_sec = 60
+resp_buffer = false
+max_conns = 100
+ws_idle_timeout_sec = 300
+max_ws = 1000
+
+[vhost.auth]
+enabled = false
+realm = "Restricted Area"
+users = []
+directories = []
+max_failed_attempts = 5
+fail_window_secs = 60
+ban_secs = 300
+fail_min_ms = 500
+queue_timeout_ms = 500
+max_concurrent_per_ip = 2
+
+[[vhost.contexts]]
+uri = "/api_backend"
+context_type = "Proxy"
+target = "http://127.0.0.1:3000"
+location = "http://127.0.0.1:3000"
+handler = ""
+access_allowed = []
+access_denied = []
+rewrite_rules = []
+redirect_status = 302
+enabled = true
+
+[vhost.contexts.headers]
+
+[[vhost.contexts]]
+uri = "/api_test_2"
+context_type = "Proxy"
+target = "http://127.0.0.1:3000"
+location = "http://127.0.0.1:3000"
+handler = ""
+access_allowed = []
+access_denied = []
+rewrite_rules = []
+redirect_status = 302
+enabled = true
+
+[vhost.contexts.headers]
+
+[[vhost.contexts]]
+uri = "/api_test_isolated"
+context_type = "Proxy"
+target = "http://127.0.0.1:3000"
+location = "http://127.0.0.1:3000"
+handler = ""
+access_allowed = []
+access_denied = []
+rewrite_rules = []
+redirect_status = 302
+enabled = true
+
+[vhost.contexts.headers]

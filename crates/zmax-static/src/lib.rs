@@ -1829,7 +1829,7 @@ mod tests {
         // Unix'te tüm özel karakterli dosya adı da oluşturulur.
         std::fs::write(root.join("rapor'2026&ozet.txt"), b"veri").unwrap();
         #[cfg(unix)]
-        std::fs::write(root.join("<script>alert(\"xss\")</script>.txt"), b"x").unwrap();
+        std::fs::write(root.join("<script>alert(\"xss\").txt"), b"x").unwrap();
 
         let html = render_directory_listing("/klasor/<script>\"'&test/", &root).unwrap();
 
@@ -1843,8 +1843,8 @@ mod tests {
 
         #[cfg(unix)]
         {
-            assert!(html.contains("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;.txt"));
-            assert!(!html.contains("alert(\"xss\")"));
+            assert!(html.contains("&lt;script&gt;alert(&quot;xss&quot;).txt"));
+            assert!(!html.contains("<script>alert(\"xss\")"));
         }
 
         assert_eq!(

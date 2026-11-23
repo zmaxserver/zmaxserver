@@ -1,0 +1,174 @@
+[workspace]
+resolver = "2"
+members = [
+    # 1. Altyapı ve Temel Sistem Çekirdeği
+    "crates/zmax-runtime",
+    "crates/zmax-httpparser",
+    "crates/zmax-header",
+    "crates/zmax-pool",
+    "crates/zmax-tls",
+    "crates/zmax-timeout",
+    
+    # 2. Protokol ve Yönlendirme Motorları
+    "crates/zmax-proxy",
+    "crates/zmax-fastcgi",
+    "crates/zmax-static",
+    
+    # 3. Önbellek, Rewrite, Sıkıştırma ve Güvenlik
+    "crates/zmax-cache",
+    "crates/zmax-compress",
+    "crates/zmax-rewrite",
+    "crates/zmax-security",
+    "crates/zmax-config",
+    "crates/zmax-redis",
+    "crates/zmax-obfuscate",
+    
+]
+
+[package]
+name = "zmax-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+autotests = false
+
+[[bin]]
+name = "zmax"
+path = "src/main.rs"
+
+[[test]]
+name = "cache_integration_tests"
+path = "docs/tests/cache_integration_tests.rs"
+
+[[test]]
+name = "cache_purge_auth_tests"
+path = "docs/tests/cache_purge_auth_tests.rs"
+
+[[test]]
+name = "cache_purge_tests"
+path = "docs/tests/cache_purge_tests.rs"
+
+[[test]]
+name = "ek_dinleyici_tests"
+path = "docs/tests/ek_dinleyici_tests.rs"
+
+[[test]]
+name = "kart10_proxy_tests"
+path = "docs/tests/kart10_proxy_tests.rs"
+
+[[test]]
+name = "kart10_smuggling_matrix_tests"
+path = "docs/tests/kart10_smuggling_matrix_tests.rs"
+
+[[test]]
+name = "kart11_waf_tests"
+path = "docs/tests/kart11_waf_tests.rs"
+
+[[test]]
+name = "kart12_filesmatch_tests"
+path = "docs/tests/kart12_filesmatch_tests.rs"
+
+[[test]]
+name = "kart12_reload_stress_tests"
+path = "docs/tests/kart12_reload_stress_tests.rs"
+
+[[test]]
+name = "kart3b_api_tests"
+path = "docs/tests/kart3b_api_tests.rs"
+
+[[test]]
+name = "kart6_acme_tls_tests"
+path = "docs/tests/kart6_acme_tls_tests.rs"
+
+[[test]]
+name = "kart8_sendfile_privs_tests"
+path = "docs/tests/kart8_sendfile_privs_tests.rs"
+
+[[test]]
+name = "kart8_start_tests"
+path = "docs/tests/kart8_start_tests.rs"
+
+[[test]]
+name = "kart9_auth_hardening_tests"
+path = "docs/tests/kart9_auth_hardening_tests.rs"
+
+[[test]]
+name = "kart9_basic_auth_tests"
+path = "docs/tests/kart9_basic_auth_tests.rs"
+
+[[test]]
+name = "ols_b5_htaccess_tests"
+path = "docs/tests/ols_b5_htaccess_tests.rs"
+
+[[test]]
+name = "public_version_tests"
+path = "docs/tests/public_version_tests.rs"
+
+[[test]]
+name = "v1_1b_acl_tests"
+path = "docs/tests/v1_1b_acl_tests.rs"
+
+[dependencies]
+zmax-core = { path = "crates/zmax-core" }
+zmax-runtime = { path = "crates/zmax-runtime" }
+zmax-static = { path = "crates/zmax-static" }
+zmax-fastcgi = { path = "crates/zmax-fastcgi" }
+zmax-cache = { path = "crates/zmax-cache" }
+zmax-compress = { path = "crates/zmax-compress" }
+zmax-proxy = { path = "crates/zmax-proxy" }
+zmax-redis = { path = "crates/zmax-redis" }
+zmax-rewrite = { path = "crates/zmax-rewrite" }
+zmax-config = { path = "crates/zmax-config" }
+zmax-pool = { path = "crates/zmax-pool" }
+zmax-security = { path = "crates/zmax-security" }
+zmax-timeout = { path = "crates/zmax-timeout" }
+zmax-obfuscate = { path = "crates/zmax-obfuscate" }
+zmax-httpparser = { path = "crates/zmax-httpparser" }
+zmax-header = { path = "crates/zmax-header" }
+zmax-tls = { path = "crates/zmax-tls" }
+tokio = { version = "1.38", features = ["full"] }
+bytes = "1.6"
+httparse = "1.9"
+h2 = "0.4"
+http = "1.1"
+serde_json = "1.0"
+toml = "0.8"
+dashmap = "5.5"
+brotli = "3.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+socket2 = { version = "0.5", features = ["all"] }
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+rcgen = "0.14.10"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+[[test]]
+name = "kart12_statik_tests"
+path = "docs/tests/kart12_statik_tests.rs"
+
+[[test]]
+name = "ols_protocol_resilience_tests"
+path = "docs/tests/ols_protocol_resilience_tests.rs"
+
+[workspace.package]
+version = "1.0.1"
+edition = "2021"
+authors = ["ZePanel Team <info@zepanel.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/zmaxserver"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

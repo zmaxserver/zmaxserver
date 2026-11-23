@@ -1,108 +1,235 @@
-# ========================================================================
-# ⚡ ZMax Server - Ana Sunucu Yapılandırma Dosyası (zmax.toml)
-# Evrensel Panel Uyumlu & Çakışmasız Port Mimarisi (19480-19486 Bloğu)
-# ========================================================================
-
-[server]
-server_name = "ZMax"
-# user = ""
-# group = ""
-priority = 0
-cpu_affinity = true
-reuseport_workers = true
-graceful_shutdown_secs = 15
-workers = 0 # 0 = Otomatik (Mevcut tüm CPU çekirdeklerini asenkron kullan)
-
-# Ağ ve Dinleme Portları (Popüler hosting panelleriyle %100 çakışmasız)
-# Üretimde tekil ana web sunucusu moduna geçilirse http=80, https=443 yapılabilir.
-[listeners.http]
-enabled = true
-address = "0.0.0.0"
-port = 19480
-backlog = 4096
-tcp_nodelay = true
-reuse_port = false
-proxy_protocol = false
-
-[listeners.https]
-enabled = false
-address = "0.0.0.0"
-port = 19483
-ssl = true
-alpn = ["h2", "http/1.1"]
-proxy_protocol = false
-strict_sni = false
-
-# Dahili WebAdmin Yönetim Arayüzü (Yerel loopback güvenli varsayılan)
-[listeners.admin]
-enabled = true
-address = "127.0.0.1"
-port = 19485
-document_root = "admin"
-token = ""
-require_token = false
-ssl = false
-tls_cert = ""
-tls_key = ""
-proxy_prefix = ""
-trusted_proxies = []
-
-# Evrensel Kontrol Paneli REST API (/api/v1/*)
-# cPanel, Plesk, DirectAdmin, CyberPanel, Hestia, aaPanel, zPanel ajanları içindir.
-[listeners.api]
-enabled = true
-address = "127.0.0.1"
-port = 19486
-unix_socket = ""
-token = ""
-require_token = false
-cors_allow_origin = "*"
-ssl = false
-tls_cert = ""
-tls_key = ""
-proxy_prefix = ""
-trusted_proxies = []
-
-# L1 & L2 Önbellek Ayarları (LSCache %100 Uyumlu)
 [cache]
+default_ttl_seconds = 300
+disk_cache_dir = "cachedata"
 enabled = true
 memory_cache_mb = 256
-disk_cache_dir = "cachedata"
-default_ttl_seconds = 300
-stale_while_revalidate_sec = 30
 purge_key_header = "X-ZMax-Purge-Key"
-# HTTP PURGE metodu / X-LiteSpeed-Purge istek başlığı: varsayılan KAPALI. Açmak için purge_enabled = true ve
-# purge_key (başlıkta gönderilecek gizli anahtar) ve/veya purge_allow_ips (IP/CIDR listesi) tanımlayın.
-# purge_enabled = false
-# purge_key = ""
-# purge_allow_ips = []
-# İstek Cache-Control/Pragma başlıklarının önbelleği atlamasına izin verir (varsayılan KAPALI; OLS gibi).
-# respect_request_cache_control = false
+stale_while_revalidate_sec = 30
 
-# Güvenlik ve DoS Kalkanı
-[security]
-slowloris_header_timeout_sec = 10
-slowloris_body_timeout_sec = 30
-keep_alive_timeout_sec = 65
-rate_limit_enabled = true
-rate_limit_per_minute = 2000
-block_path_traversal = true
-max_body_size_mb = 64
-max_header_size_kb = 64
-allow_ips = []
-deny_ips = []
+[[extapps]]
+address = "127.0.0.1:9084"
+app_type = "LSAPI"
+backlog = 100
+enabled = true
+env = []
+ext_path = ""
+id = "lsphp84_test"
+init_timeout = 60
+instances = 8
+max_conns = 40
+mem_hard_limit_mb = 2047
+mem_soft_limit_mb = 2047
+name = "LSPHP 8.4 Test Pool"
+persist_conn = true
+priority = 0
+proc_hard_limit = 400
+proc_soft_limit = 400
+resp_buffer = true
+retry_timeout = 0
+run_on_startup = true
 
-# Günlük (Log) Dosyaları
+[extapps.env_vars]
+PHP_LSAPI_CHILDREN = "8"
+
+[listeners]
+custom = []
+
+[listeners.admin]
+address = "127.0.0.1"
+document_root = "admin"
+enabled = true
+port = 19485
+proxy_prefix = ""
+require_token = false
+ssl = false
+tls_cert = ""
+tls_key = ""
+token = ""
+trusted_proxies = []
+
+[listeners.api]
+address = "127.0.0.1"
+cors_allow_origin = "*"
+enabled = true
+port = 19486
+proxy_prefix = ""
+read_token = ""
+require_token = false
+ssl = false
+tls_cert = ""
+tls_key = ""
+token = ""
+trusted_proxies = []
+unix_socket = ""
+
+[listeners.http]
+address = "0.0.0.0"
+backlog = 4096
+enabled = true
+port = 19480
+proxy_protocol = false
+reuse_port = false
+tcp_nodelay = true
+
+[listeners.https]
+address = "0.0.0.0"
+alpn = [
+    "h2",
+    "http/1.1",
+]
+enabled = false
+port = 19483
+proxy_protocol = false
+ssl = true
+strict_sni = false
+
 [logging]
 access_log = "logs/access.log"
+add_request_id = true
+batch_buffer_kb = 64
+batch_flush_ms = 250
 error_log = "logs/error.log"
+log_format = '%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"'
 log_level = "info"
 max_log_size_mb = 100
-log_format = '%h %l %u %t "%r" %>s %b "%{Referer}i" "%{User-Agent}i"'
-batch_flush_ms = 250
-batch_buffer_kb = 64
-add_request_id = true
 
-# Sanal Konaklar Dizini
+[sandbox]
+cgroup_cpu_percent = 50
+cgroup_mem_limit_mb = 256
+cgroup_pids_limit = 64
+enabled = true
+engine = "nsjail"
+network_isolated = true
+profile = "conf/jail/default.cfg"
+read_only_root = true
+seccomp_policy = "conf/seccomp/zmax_seccomp.cfg"
+
+[security]
+allow_ips = []
+api_rate_limit_per_minute = 600
+auth_ban_sec = 900
+auth_fail_limit = 5
+auth_fail_window_sec = 300
+auth_max_concurrent_hashes = 4
+ban_exempt_ips = []
+block_path_traversal = true
+deny_ips = []
+keep_alive_timeout_sec = 65
+max_body_size_mb = 64
+max_header_size_kb = 64
+rate_limit_enabled = true
+rate_limit_per_minute = 2000
+slowloris_body_timeout_sec = 30
+slowloris_header_timeout_sec = 12
+
+[server]
+cpu_affinity = true
+graceful_shutdown_secs = 15
+group = "nobody"
+listeners = []
+priority = 0
+reuseport_workers = true
+script_handlers = []
+server_name = "ZMax Challenger Node"
+tmp_dir = ""
+user = "nobody"
+workers = 4
+
+[server.acme]
+force_https_exempt = true
+
+[[server.ext_apps]]
+address = "127.0.0.1:9084"
+app_type = "LSAPI"
+backlog = 100
+enabled = true
+env = []
+ext_path = ""
+id = "lsphp84_test"
+init_timeout = 60
+instances = 8
+max_conns = 40
+mem_hard_limit_mb = 2047
+mem_soft_limit_mb = 2047
+name = "LSPHP 8.4 Test Pool"
+persist_conn = true
+priority = 0
+proc_hard_limit = 400
+proc_soft_limit = 400
+resp_buffer = true
+retry_timeout = 0
+run_on_startup = true
+
+[server.ext_apps.env_vars]
+PHP_LSAPI_CHILDREN = "8"
+
+[server.tuning]
+brotli_enabled = true
+brotli_level = 6
+cache_static = true
+compress_mime_types = [
+    "text/html",
+    "text/plain",
+    "text/css",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "image/svg+xml",
+]
+connection_timeout = 60
+gzip_enabled = true
+gzip_level = 6
+http3_enabled = true
+http3_port = 443
+io_model = "auto"
+keep_alive_timeout = 15
+max_cached_file_size_kb = 1024
+max_connections = 10000
+max_keep_alive_req = 1000
+max_ssl_connections = 5000
+min_compress_size = 256
+rcv_buf_size = 0
+smart_keep_alive = true
+snd_buf_size = 0
+ssl_cache_size = 1000000
+ssl_cache_timeout = 3600
+ssl_session_cache = true
+ssl_session_tickets = true
+total_in_mem_cache_mb = 256
+
+[tuning]
+brotli_enabled = true
+brotli_level = 6
+cache_static = true
+compress_mime_types = [
+    "text/html",
+    "text/plain",
+    "text/css",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "image/svg+xml",
+]
+connection_timeout = 45
+gzip_enabled = true
+gzip_level = 6
+http3_enabled = false
+http3_port = 443
+io_model = "auto"
+keep_alive_timeout = 60
+max_cached_file_size_kb = 1024
+max_connections = 25000
+max_keep_alive_req = 2000
+max_ssl_connections = 5000
+min_compress_size = 256
+rcv_buf_size = 0
+smart_keep_alive = true
+snd_buf_size = 0
+ssl_cache_size = 1000000
+ssl_cache_timeout = 3600
+ssl_session_cache = true
+ssl_session_tickets = true
+total_in_mem_cache_mb = 256
+
 [vhosts_dir]
 path = "conf/vhosts"

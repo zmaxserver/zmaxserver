@@ -1,0 +1,12 @@
+[package]
+name = "zmax-obfuscate"
+version = "0.1.0"
+edition = "2021"
+authors = ["ZePanel Team <info@zepanel.com>"]
+description = "ZMax Server Tescilli Derleme Anı Polimorfik Dize Şifreleme Motoru"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZMax WebAdmin - ZePanel</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <link rel="stylesheet" href="css/core.css">
+</head>
+<body>
+    <div id="app" v-cloak class="app-shell">
+        <!-- Mobil Menü Arka Plan Perdesi -->
+        <div v-if="mobileMenuOpen" class="sidebar-backdrop d-lg-none" @click="closeMobileMenu"></div>
+
+        <!-- Sol Kenar Çubuğu (Desktop Sabit, Mobil Çekmece) -->
+        <aside class="sidebar" :class="{ 'mobile-open': mobileMenuOpen }">
+            <div class="brand-header">
+                <div class="brand-logo-group">
+                    <img src="favicon.svg" alt="ZePanel" class="brand-icon-img">
+                    <img src="assets/zmax_white.svg" alt="ZMax Server" class="brand-wordmark">
+                </div>
+                <button type="button" class="sidebar-close-btn d-lg-none" @click="closeMobileMenu" :aria-label="t('close_menu')">
+                    <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="nav-category">{{ t('nav_core') }}</div>
+            <ul class="nav-menu">
+                <li class="nav-item" :class="{ active: currentTab === 'overview' }" @click="selectTab('overview')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 3v18h18"></path><path d="M18 9l-5 5-4-4-3 3"></path>
+                        </svg>
+                        <span>{{ t('nav_overview') }}</span>
+                    </div>
+                </li>
+            </ul>
+
+            <div class="nav-category">{{ t('nav_hosting') }}</div>
+            <ul class="nav-menu">
+                <li class="nav-item" :class="{ active: currentTab === 'vhosts' }" @click="selectTab('vhosts')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>
+                        </svg>
+                        <span>{{ t('nav_vhosts') }}</span>
+                    </div>
+                    <span class="nav-badge">{{ vhosts.length }}</span>
+                </li>
+                <li class="nav-item" :class="{ active: currentTab === 'cache' }" @click="selectTab('cache')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                        </svg>
+                        <span>{{ t('nav_cache') }}</span>
+                    </div>
+                </li>
+            </ul>
+
+            <div class="nav-category">{{ t('nav_security') }}</div>
+            <ul class="nav-menu">
+                <li class="nav-item" :class="{ active: currentTab === 'security' }" @click="selectTab('security')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                        </svg>
+                        <span>{{ t('nav_waf') }}</span>
+                    </div>
+                    <span class="nav-badge nav-badge-orange">{{ t('status_active') }}</span>
+                </li>
+            </ul>
+
+            <div class="nav-category">{{ t('nav_system') }}</div>
+            <ul class="nav-menu">
+                <li class="nav-item" :class="{ active: currentTab === 'modules' }" @click="selectTab('modules')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>
+                        </svg>
+                        <span>{{ t('nav_modules') }}</span>
+                    </div>
+                    <span class="nav-badge">{{ modules.length }}</span>
+                </li>
+                <li class="nav-item" :class="{ active: currentTab === 'logs' }" @click="selectTab('logs')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line>
+                        </svg>
+                        <span>{{ t('nav_logs') }}</span>
+                    </div>
+                </li>
+                <li class="nav-item" :class="{ active: currentTab === 'settings' }" @click="selectTab('settings')">
+                    <div class="nav-item-content">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                        <span>{{ t('nav_settings') }}</span>
+                    </div>
+                </li>
+            </ul>
+        </aside>
+
+        <!-- Ana Ekran Alanı -->
+        <div class="main-wrapper">
+            <!-- Sabit Üst Çubuk (Topbar) -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button type="button" class="mobile-menu-btn d-lg-none" @click="toggleMobileMenu" :aria-label="t('mobile_menu')">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line>
+                        </svg>
+                    </button>
+                    <img src="assets/zmax_white.svg" alt="ZMax Server" class="mobile-brand-mini d-lg-none d-md-none">
+                    <div class="topbar-search d-none d-md-flex">
+                        <svg class="icon text-muted-custom" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" v-model="globalSearch" :placeholder="t('search_placeholder')">
+                    </div>
+                </div>
+
+                <div class="topbar-right">
+                    <!-- Tema Geçiş Düğmesi (Aydınlık / Karanlık) -->
+                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="toggleTheme" :title="theme === 'light' ? 'Karanlık Mod' : 'Aydınlık Mod'" :aria-label="theme === 'light' ? 'Karanlık Mod' : 'Aydınlık Mod'">
+                        <svg v-if="theme === 'light'" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                        </svg>
+                        <svg v-else class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <circle cx="12" cy="12" r="5"></circle>
+                            <line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                            <line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                        </svg>
+                    </button>
+
+                    <!-- Çoklu Dil Seçici (i18n) -->
+                    <select class="lang-select" v-model="currentLang" @change="setLang(currentLang)" aria-label="Language">
+                        <option v-for="l in availableLanguages" :key="l.code" :value="l.code">
+                            {{ l.flag }} {{ l.label }}
+                        </option>
+                    </select>
+
+                    <div class="system-load d-none d-xl-flex">
+                        <span class="status-dot"></span>
+                        {{ t('system_load') }}: 0.00 · 0.00 · 0.00
+                    </div>
+
+                    <!-- API Token / Oturum Butonu -->
+                    <button type="button" class="btn-zmax btn-ghost btn-sm-compact d-flex align-items-center gap-2" @click="openAuthModal" :title="t('auth_modal_title')">
+                        <svg class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                        <span class="d-none d-md-inline">{{ hasActiveToken ? t('auth_status_logged_in') : t('auth_btn_login') }}</span>
+                        <span class="status-dot" :class="hasActiveToken ? 'status-dot-active' : 'status-dot-warning'"></span>
+                    </button>
+
+                    <div class="user-pill d-none d-sm-flex" role="button" @click="openAuthModal" style="cursor: pointer;" :title="t('auth_modal_title')">
+                        <svg class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle>
+                        </svg>
+                        <span>{{ t('admin_user') }}</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Bildirim Toast -->
+            <div v-if="notification" class="zmax-toast">
+                {{ notification }}
+            </div>
+
+            <!-- Kaydırılabilir Bootstrap 5 İçerik Alanı -->
+            <main class="content-area">
+                <div class="container-fluid px-0">
+                    <!-- U4: GENEL BAKIŞ (OVERVIEW / DASHBOARD) -->
+                    <view-dashboard
+                        v-if="currentTab === 'overview'"
+                        :stats="stats"
+                        :vhosts-count="vhosts.length"
+                        :hit-rate="hitRate"
+                        :formatted-uptime="formattedUptime"
+                        :t="t"
+                        @fetch-status="fetchStatus"
+                        @purge-all-cache="fetchStatus"
+                    ></view-dashboard>
+
+                    <!-- U5: SANAL KONAKLAR (VHOSTS) -->
+                    <view-vhosts
+                        v-if="currentTab === 'vhosts'"
+                        :vhosts="vhosts"
+                        :filtered-vhosts="filteredVhosts"
+                        :t="t"
+                        @vhost-saved="fetchStatus"
+                        @vhost-deleted="onVhostDeleted"
+                        @show-notice="showNotice"
+                    ></view-vhosts>
+
+                    <!-- U6: ÖNBELLEK YÖNETİCİSİ (CACHE) -->
+                    <view-cache-waf
+                        v-if="currentTab === 'cache'"
+                        mode="cache"
+                        :banned-ips="bannedIps"
+                        :t="t"
+                        @purge-all="fetchStatus"
+                        @unban-ip="onUnbanIp"
+                        @show-notice="showNotice"
+                    ></view-cache-waf>
+
+                    <!-- U6: GÜVENLİK / WAF (SECURITY) -->
+                    <view-cache-waf
+                        v-if="currentTab === 'security'"
+                        mode="security"
+                        :banned-ips="bannedIps"
+                        :t="t"
+                        @unban-ip="onUnbanIp"
+                        @show-notice="showNotice"
+                    ></view-cache-waf>
+
+                    <!-- SUNUCU MODÜLLERİ (MODULES) -->
+                    <view-modules
+                        v-if="currentTab === 'modules'"
+                        :modules="modules"
+                        :filtered-modules="filteredModules"
+                        v-model:selected-module-category="selectedModuleCategory"
+                        :module-categories="moduleCategories"
+                        :t="t"
+                    ></view-modules>
+
+                    <!-- U7: CANLI LOGLAR (LOGS) -->
+                    <view-logs
+                        v-if="currentTab === 'logs'"
+                        :logs="logs"
+                        :vhosts="vhosts"
+                        :t="t"
+                        @refresh-logs="fetchLogs"
+                        @show-notice="showNotice"
+                    ></view-logs>
+
+                    <!-- YAPILANDIRMA (SETTINGS) -->
+                    <view-settings
+                        v-if="currentTab === 'settings'"
+                        :stats="stats"
+                        :t="t"
+                    ></view-settings>
+                </div>
+            </main>
+
+            <!-- API Token Giriş Modalı -->
+            <div id="tokenModal" v-if="isAuthModalOpen" class="d-flex align-items-center justify-content-center p-3" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 1060; overflow-y: auto;" @click.self="closeAuthModal">
+                <div class="panel-card w-100 mb-0" style="max-width: 500px; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.85); border: 1px solid var(--border-color);">
+                    <div class="panel-header">
+                        <h3 class="panel-title">
+                            <svg class="icon panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                            </svg>
+                            <span>{{ t('auth_modal_title') }}</span>
+                        </h3>
+                        <button type="button" class="btn-zmax btn-ghost btn-sm-compact" @click="closeAuthModal" :aria-label="t('close_menu')">✕</button>
+                    </div>
+
+                    <form @submit.prevent="loginWithToken()">
+                        <p class="text-muted-custom small mb-3">
+                            {{ t('auth_modal_desc') }}
+                        </p>
+
+                        <!-- Aktif Token Durum Kutusu -->
+                        <div v-if="hasActiveToken" class="p-2 mb-3 rounded small d-flex align-items-center justify-content-between" style="background: rgba(0, 230, 118, 0.08); border: 1px solid rgba(0, 230, 118, 0.25);">
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="status-dot status-dot-active"></span>
+                                <span class="text-silver">{{ t('auth_active_token_info') }}</span>
+                            </div>
+                        </div>
+
+                        <!-- Hata Uyarısı -->
+                        <div v-if="authError" class="p-2 mb-3 rounded small d-flex align-items-center gap-2" style="background: rgba(255, 61, 113, 0.15); border: 1px solid var(--red); color: var(--red);">
+                            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="12" y1="8" x2="12" y2="12"></line>
+                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                            </svg>
+                            <span>{{ authError }}</span>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="form-label text-muted-custom small mb-1">{{ t('auth_token_label') }}</label>
+                            <div class="position-relative">
+                                <input
+                                    :type="authShowPassword ? 'text' : 'password'"
+                                    v-model="authTokenInput"
+                                    required
+                                    autofocus
+                                    :placeholder="t('auth_token_placeholder')"
+                                    class="zmax-input w-100 pe-5"
+                                    style="font-family: monospace;"
+                                >
+                                <button
+                                    type="button"
+                                    class="btn-zmax btn-ghost"
+                                    style="position: absolute; right: 4px; top: 4px; bottom: 4px; padding: 0 10px; border: none;"
+                                    @click="authShowPassword = !authShowPassword"
+                                    :title="authShowPassword ? t('auth_hide_token') : t('auth_show_token')"
+                                >
+                                    <svg v-if="!authShowPassword" class="icon text-muted-custom" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                    </svg>
+                                    <svg v-else class="icon text-orange" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="d-flex justify-content-between align-items-center gap-2 pt-3 border-top" style="border-color: var(--border-color) !important;">
+                            <div>
+                                <button
+                                    v-if="hasActiveToken"
+                                    type="button"
+                                    class="btn-zmax btn-ghost text-danger btn-sm-compact"
+                                    @click="logoutToken"
+                                >
+                                    {{ t('auth_btn_logout') }}
+                                </button>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn-zmax btn-ghost" @click="closeAuthModal">
+                                    {{ t('auth_btn_cancel') }}
+                                </button>
+                                <button type="submit" class="btn-zmax btn-orange" :disabled="authLoading">
+                                    <span v-if="authLoading">{{ t('auth_validating') }}</span>
+                                    <span v-else>{{ t('auth_btn_login') }}</span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Sabit Alt Bilgi (Fixed Footer) -->
+            <footer class="app-footer">
+                <div class="footer-left">
+                    <span>&copy; 2026 {{ t('footer_copyright') }} &middot; <strong class="text-orange">ZMax Server v1.0.01</strong> <span class="d-none d-md-inline">({{ t('footer_enterprise') }})</span></span>
+                </div>
+                <div class="footer-right">
+                    <span class="footer-badge d-none d-lg-inline-flex">{{ t('footer_engine') }}</span>
+                    <span class="footer-badge d-none d-sm-inline-flex">{{ t('footer_cache_status') }}</span>
+                    <span class="footer-ping"><span class="ping-dot"></span>0.04 ms</span>
+                </div>
+            </footer>
+        </div>
+    </div>
+
+    <!-- Script Yükleme Sırası: Vue 3 -> Bootstrap -> i18n -> API Client -> Views -> App Root -->
+    <script src="js/vue.global.prod.js"></script>
+    <script src="js/bootstrap.bundle.min.js"></script>
+    <script src="js/i18n.js"></script>
+    <script src="js/api_client.js"></script>
+    <script src="js/views/dashboard.js"></script>
+    <script src="js/views/vhosts.js"></script>
+    <script src="js/views/cache_waf.js"></script>
+    <script src="js/views/modules.js"></script>
+    <script src="js/views/logs.js"></script>
+    <script src="js/views/settings.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

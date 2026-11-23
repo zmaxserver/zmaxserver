@@ -2459,4 +2459,187 @@ RewriteRule . /index.php [L]
         assert!(is_protected_or_dangerous_path("/readme.html", true));
         assert!(is_protected_or_dangerous_path("/license.txt", true));
     }
+
+    #[test]
+    fn test_nextjs_clean_url_and_static_routing_e2e() {
+        let root = temp_site("nextjs_e2e");
+        let static_chunks = root.join("_next").join("static").join("chunks");
+        let blog_dir = root.join("blog");
+        std::fs::create_dir_all(&static_chunks).unwrap();
+        std::fs::create_dir_all(&blog_dir).unwrap();
+
+        std::fs::write(root.join("index.html"), "<h1>Next Home</h1>").unwrap();
+        std::fs::write(root.join("about.html"), "<h1>About Us</h1>").unwrap();
+        std::fs::write(blog_dir.join("index.html"), "<h1>Blog Index</h1>").unwrap();
+        std::fs::write(root.join("404.html"), "<h1>Not Found</h1>").unwrap();
+        std::fs::write(static_chunks.join("main.js"), "console.log('main');").unwrap();
+
+        let nextjs_ht = concat!(
+            "RewriteEngine On\n",
+            "RewriteBase /\n",
+            "# Clean URLs: /about -> /about.html\n",
+            "RewriteCond %{REQUEST_FILENAME} !-f\n",
+            "RewriteCond %{REQUEST_FILENAME} !-d\n",
+            "RewriteCond %{REQUEST_FILENAME}.html -f\n",
+            "RewriteRule ^(.+)$ $1.html [L]\n",
+            "# 404 fallback\n",
+            "RewriteCond %{REQUEST_FILENAME} !-f\n",
+            "RewriteCond %{REQUEST_FILENAME} !-d\n",
+            "RewriteCond %{DOCUMENT_ROOT}/404.html -f\n",
+            "RewriteRule ^ /404.html [L]\n",
+        );
+        std::fs::write(root.join(".htaccess"), nextjs_ht).unwrap();
+
+        let resolver = HtAccessResolver::from_doc_root(&root);
+
+        // 1. /about -> /about.html statik dosyası olarak çözülmeli
+        let mut req_about = RouteRequest::new(&root, "/about");
+        req_about.php_enabled = false;
+        assert_eq!(
+            resolver.resolve(&req_about),
+            RouteOutcome::StaticFile {
+                path: "/about.html".into(),
+                query: String::new(),
+            }
+        );
+
+        // 2. /blog/ -> /blog/index.html olarak çözülmeli
+        let mut req_blog = RouteRequest::new(&root, "/blog/");
+        req_blog.php_enabled = false;
+        assert_eq!(
+            resolver.resolve(&req_blog),
+            RouteOutcome::StaticFile {
+                path: "/blog/index.html".into(),
+                query: String::new(),
+            }
+        );
+
+        // 3. /_next/static/chunks/main.js -> doğrudan statik dosya
+        let mut req_asset = RouteRequest::new(&root, "/_next/static/chunks/main.js");
+        req_asset.php_enabled = false;
+        assert_eq!(
+            resolver.resolve(&req_asset),
+            RouteOutcome::StaticFile {
+                path: "/_next/static/chunks/main.js".into(),
+                query: String::new(),
+            }
+        );
+
+        // 4. /olmayan-yol -> /404.html
+        let mut req_missing = RouteRequest::new(&root, "/olmayan-yol");
+        req_missing.php_enabled = false;
+        assert_eq!(
+            resolver.resolve(&req_missing),
+            RouteOutcome::StaticFile {
+                path: "/404.html".into(),
+                query: String::new(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_wordpress_multisite_and_subdirectories_e2e() {
+        let root = temp_site("wp_multi_e2e");
+        let sub_wp = root.join("blog");
+        let sub_wp_admin = sub_wp.join("wp-admin");
+        let sub_wp_content = sub_wp.join("wp-content");
+        std::fs::create_dir_all(&sub_wp_admin).unwrap();
+        std::fs::create_dir_all(&sub_wp_content).unwrap();
+
+        std::fs::write(root.join("index.php"), "<?php // main").unwrap();
+        std::fs::write(sub_wp.join("index.php"), "<?php // sub blog").unwrap();
+        std::fs::write(sub_wp_admin.join("index.php"), "<?php // sub admin").unwrap();
+        std::fs::write(sub_wp_content.join("logo.png"), b"png").unwrap();
+
+        let sub_ht = concat!(
+            "RewriteEngine On\n",
+            "RewriteBase /blog/\n",
+            "RewriteRule ^index\\.php$ - [L]\n",
+            "RewriteCond %{REQUEST_FILENAME} !-f\n",
+            "RewriteCond %{REQUEST_FILENAME} !-d\n",
+            "RewriteRule . /blog/index.php [L]\n",
+        );
+        std::fs::write(sub_wp.join(".htaccess"), sub_ht).unwrap();
+
+        let resolver = HtAccessResolver::from_doc_root(&root);
+
+        // 1. /blog/ornek-makale/ -> /blog/index.php
+        let req_article = RouteRequest::new(&root, "/blog/ornek-makale/");
+        assert_eq!(
+            resolver.resolve(&req_article),
+            RouteOutcome::PhpScript {
+                path: "/blog/index.php".into(),
+                query: String::new(),
+            }
+        );
+
+        // 2. /blog/wp-admin/ -> /blog/wp-admin/index.php
+        let req_admin = RouteRequest::new(&root, "/blog/wp-admin/");
+        assert_eq!(
+            resolver.resolve(&req_admin),
+            RouteOutcome::PhpScript {
+                path: "/blog/wp-admin/index.php".into(),
+                query: String::new(),
+            }
+        );
+
+        // 3. /blog/wp-content/logo.png -> Statik dosya
+        let req_logo = RouteRequest::new(&root, "/blog/wp-content/logo.png");
+        assert_eq!(
+            resolver.resolve(&req_logo),
+            RouteOutcome::StaticFile {
+                path: "/blog/wp-content/logo.png".into(),
+                query: String::new(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_force_https_and_www_e2e() {
+        let root = temp_site("force_ssl_e2e");
+        let ht = concat!(
+            "RewriteEngine On\n",
+            "# Force HTTPS\n",
+            "RewriteCond %{HTTPS} off\n",
+            "RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]\n",
+            "# Enforce non-WWW\n",
+            "RewriteCond %{HTTP_HOST} ^www\\.(.+)$ [NC]\n",
+            "RewriteRule ^(.*)$ https://%1%{REQUEST_URI} [L,R=301]\n",
+        );
+        std::fs::write(root.join(".htaccess"), ht).unwrap();
+
+        let resolver = HtAccessResolver::from_doc_root(&root);
+
+        // HTTP -> HTTPS 301
+        let mut req_http = RouteRequest::new(&root, "/panel/giris");
+        req_http.host = "panel.test";
+        req_http.https = false;
+        req_http.query = "ref=ana";
+        assert_eq!(
+            resolver.resolve(&req_http),
+            RouteOutcome::Redirect {
+                status: 301,
+                location: "https://panel.test/panel/giris?ref=ana".into(),
+            }
+        );
+
+        // HTTPS + www -> non-www 301
+        let mut req_www = RouteRequest::new(&root, "/panel/giris");
+        req_www.host = "www.panel.test";
+        req_www.https = true;
+        req_www.query = "ref=ana";
+        assert_eq!(
+            resolver.resolve(&req_www),
+            RouteOutcome::Redirect {
+                status: 301,
+                location: "https://panel.test/panel/giris?ref=ana".into(),
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

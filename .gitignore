@@ -1,6 +1,7 @@
 # derleme çıktıları
 /target/
 **/target/
+/target_*/
 *.pdb
 *.exe
 *.d
@@ -37,3 +38,7 @@
 # ic surec belgeleri depoya girmez
 /duzeltme.md
 /goentegre.md
+
+/docs/tools/
+/docs/target/
+/docs/packed/

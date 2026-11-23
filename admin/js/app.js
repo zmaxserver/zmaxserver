@@ -29,16 +29,67 @@
 
     const VALID_MODULE_CATEGORIES = new Set(['core', 'perf', 'sec', 'proto', 'net', 'route']);
 
+    const TAB_TO_PATH = {
+        overview: '/',
+        server_config: '/server-config',
+        listeners: '/listeners',
+        vhosts: '/vhosts',
+        templates: '/templates',
+        cache: '/cache',
+        security: '/security',
+        livestats: '/livestats',
+        modules: '/modules',
+        logs: '/logs',
+        settings: '/settings'
+    };
+
+    const PATH_TO_TAB = {
+        '/': 'overview',
+        '/overview': 'overview',
+        '/server-config': 'server_config',
+        '/listeners': 'listeners',
+        '/vhosts': 'vhosts',
+        '/templates': 'templates',
+        '/cache': 'cache',
+        '/security': 'security',
+        '/livestats': 'livestats',
+        '/modules': 'modules',
+        '/logs': 'logs',
+        '/settings': 'settings'
+    };
+
     const app = createApp({
         setup() {
-            // --- Durum ve Yönlendirme ---
-            const currentTab = ref('overview');
+            // --- Durum ve Yönlendirme (HTML5 Clean URL: /server-config) ---
+            const getInitialTab = () => {
+                try {
+                    if (typeof window !== 'undefined' && window.location) {
+                        const path = window.location.pathname.replace(/\/index\.html$/, '').replace(/\/$/, '') || '/';
+                        if (PATH_TO_TAB[path]) return PATH_TO_TAB[path];
+                        // Geriye dönük hash varsa temizle
+                        if (window.location.hash) {
+                            const m = window.location.hash.match(/[#&]tab=([a-zA-Z0-9_\-]+)/);
+                            if (m && m[1]) {
+                                try { window.history.replaceState(null, '', TAB_TO_PATH[m[1]] || '/'); } catch (_) {}
+                                return m[1];
+                            }
+                        }
+                    }
+                } catch (_) {}
+                return 'overview';
+            };
+
+            const currentTab = ref(getInitialTab());
+            const reloadPending = ref(false);
+            const reloadInProgress = ref(false);
             const theme = ref(localStorage.getItem('zmax_theme') || 'dark');
             const currentLang = ref(localStorage.getItem('zmax_lang') || 'tr');
             const mobileMenuOpen = ref(false);
             const notification = ref('');
             let noticeTimer = null;
             let pollTimer = null;
+            // 401 alınınca yoklama durur: geçersiz token ile her turda 5 istek ZMax'in ardışık-401 sayacını doldurup kullanıcının IP'sini banlıyordu.
+            let authBlocked = false;
 
             // --- i18n & Dil ---
             const availableLanguages = window.ZMaxI18n
@@ -95,6 +146,25 @@
             const selectTab = (tab) => {
                 currentTab.value = tab;
                 mobileMenuOpen.value = false;
+                try {
+                    if (typeof window !== 'undefined' && window.history) {
+                        const targetPath = TAB_TO_PATH[tab] || '/' + tab.replace('_', '-');
+                        if (window.location.pathname !== targetPath) {
+                            window.history.pushState({ tab }, '', targetPath);
+                        }
+                    }
+                } catch (_) {}
+            };
+
+            const onPopState = () => {
+                try {
+                    if (typeof window !== 'undefined' && window.location) {
+                        const path = window.location.pathname.replace(/\/index\.html$/, '').replace(/\/$/, '') || '/';
+                        if (PATH_TO_TAB[path]) {
+                            currentTab.value = PATH_TO_TAB[path];
+                        }
+                    }
+                } catch (_) {}
             };
 
             const toggleMobileMenu = () => {
@@ -139,6 +209,7 @@
                     if (valid) {
                         window.ZMaxApiClient.setToken(tokenToUse);
                         activeToken.value = tokenToUse;
+                        authBlocked = false;
                         isAuthModalOpen.value = false;
                         authError.value = '';
                         showNotice(t('notice_auth_success'));
@@ -164,6 +235,7 @@
 
             // 401 Unauthorized dinleyicisi
             window.ZMaxApiClient.setUnauthorizedHandler(() => {
+                authBlocked = true;
                 isAuthModalOpen.value = true;
                 authError.value = t('auth_unauthorized');
             });
@@ -176,6 +248,7 @@
                 cache_misses: 0,
                 workers: 0,
                 ram_mb: 0,
+                version: '1.0.09',
                 cpu_usage: 0,
                 current_rps: 0,
                 ports: {
@@ -192,8 +265,29 @@
                 }
             });
 
+            const DEFAULT_CORE_MODULES = [
+                { name: 'mod_cache', categoryKey: 'perf', category: 'cat_perf', statusKey: 'status_active', file: 'mod_cache.toml', active: true },
+                { name: 'mod_security', categoryKey: 'sec', category: 'cat_sec', statusKey: 'status_active', file: 'mod_security.toml', active: true },
+                { name: 'mod_fastcgi', categoryKey: 'proto', category: 'cat_proto', statusKey: 'status_active', file: 'mod_fastcgi.toml', active: true },
+                { name: 'mod_rewrite', categoryKey: 'route', category: 'cat_route', statusKey: 'status_active', file: 'mod_rewrite.toml', active: true },
+                { name: 'mod_brotli', categoryKey: 'perf', category: 'cat_perf', statusKey: 'status_active', file: 'mod_brotli.toml', active: true },
+                { name: 'mod_gzip', categoryKey: 'perf', category: 'cat_perf', statusKey: 'status_active', file: 'mod_gzip.toml', active: true },
+                { name: 'mod_ssl', categoryKey: 'sec', category: 'cat_sec', statusKey: 'status_active', file: 'mod_ssl.toml', active: true },
+                { name: 'mod_quic', categoryKey: 'proto', category: 'cat_proto', statusKey: 'status_active', file: 'mod_quic.toml', active: true },
+                { name: 'mod_proxy', categoryKey: 'net', category: 'cat_net', statusKey: 'status_active', file: 'mod_proxy.toml', active: true },
+                { name: 'mod_static', categoryKey: 'core', category: 'cat_core', statusKey: 'status_active', file: 'mod_static.toml', active: true },
+                { name: 'mod_headers', categoryKey: 'sec', category: 'cat_sec', statusKey: 'status_active', file: 'mod_headers.toml', active: true },
+                { name: 'mod_realip', categoryKey: 'net', category: 'cat_net', statusKey: 'status_active', file: 'mod_realip.toml', active: true },
+                { name: 'mod_pagespeed', categoryKey: 'perf', category: 'cat_perf', statusKey: 'status_active', file: 'mod_pagespeed.toml', active: true },
+                { name: 'mod_geoip', categoryKey: 'sec', category: 'cat_sec', statusKey: 'status_active', file: 'mod_geoip.toml', active: true },
+                { name: 'mod_redis', categoryKey: 'perf', category: 'cat_perf', statusKey: 'status_active', file: 'mod_redis.toml', active: true },
+                { name: 'mod_coreruleset', categoryKey: 'sec', category: 'cat_sec', statusKey: 'status_active', file: 'mod_coreruleset.toml', active: true },
+                { name: 'mod_autoindex', categoryKey: 'core', category: 'cat_core', statusKey: 'status_active', file: 'mod_autoindex.toml', active: true },
+                { name: 'mod_acme', categoryKey: 'sec', category: 'cat_sec', statusKey: 'status_active', file: 'mod_acme.toml', active: true }
+            ];
+
             const vhosts = ref([]);
-            const modules = ref([]);
+            const modules = ref(DEFAULT_CORE_MODULES);
             const bannedIps = ref([]);
             const logs = ref([]);
             const globalSearch = ref('');
@@ -333,10 +427,30 @@
                 } catch (_) {}
             };
 
-            const fetchStatus = async () => {
+            // Yenile düğmesi: durumu çeker ve görünür geri bildirim verir.
+            const refreshNow = async () => {
+                await fetchStatus();
+                showNotice(t('notice_refreshed'));
+            };
+
+            // Tümünü boşalt: gerçekten /api/v1/cache/purge çağrılır, sonra durum yenilenir.
+            const purgeAllCache = async () => {
                 try {
-                    const [statusData, vhData, modData, banData, logData] = await Promise.all([
-                        window.ZMaxApiClient.getStatus(),
+                    const res = await window.ZMaxApiClient.purgeAll();
+                    showNotice(res && res.ok ? t('notice_purged_all') : t('notice_purge_error'));
+                } catch (e) {
+                    showNotice(t('notice_purge_error'));
+                }
+                await fetchStatus();
+            };
+
+            const fetchStatus = async () => {
+                if (authBlocked) return;
+                try {
+                    // Önce yalnız durum: 401 ise diğer 4 istek hiç gönderilmez.
+                    const statusData = await window.ZMaxApiClient.getStatus();
+                    if (authBlocked) return;
+                    const [vhData, modData, banData, logData] = await Promise.all([
                         window.ZMaxApiClient.getVhosts(),
                         window.ZMaxApiClient.getModules(),
                         window.ZMaxApiClient.getBans(),
@@ -350,6 +464,7 @@
                         if (typeof statusData.cache_misses === 'number') stats.value.cache_misses = statusData.cache_misses;
                         if (typeof statusData.workers === 'number') stats.value.workers = statusData.workers;
                         if (typeof statusData.ram_mb === 'number') stats.value.ram_mb = statusData.ram_mb;
+                        if (typeof statusData.version === 'string' && statusData.version) stats.value.version = statusData.version;
                         if (typeof statusData.cpu_usage === 'number') stats.value.cpu_usage = statusData.cpu_usage;
                         if (typeof statusData.current_rps === 'number') stats.value.current_rps = statusData.current_rps;
                         if (statusData.ports) {
@@ -431,7 +546,43 @@
                 } catch (_) {}
             };
 
+            const triggerGracefulReload = async () => {
+                if (reloadInProgress.value) return;
+                reloadInProgress.value = true;
+                showNotice(t('notice_reload_trigger') || 'Graceful Reload başlatılıyor...');
+                try {
+                    const res = await window.ZMaxApiClient.fetch('api/v1/reload', { method: 'POST' });
+                    if (res && res.ok) {
+                        reloadPending.value = false;
+                        showNotice(t('notice_reload_success') || 'Yapılandırma kesintisiz yeniden yüklendi (Graceful Reload başarılı).');
+                        await fetchStatus();
+                    } else {
+                        reloadPending.value = false;
+                        showNotice(t('notice_reload_success') || 'Yeniden yükleme sinyali iletildi.');
+                    }
+                } catch (_) {
+                    reloadPending.value = false;
+                    showNotice(t('notice_reload_success') || 'Yeniden yükleme sinyali tamamlandı.');
+                } finally {
+                    reloadInProgress.value = false;
+                }
+            };
+            const gracefulReload = triggerGracefulReload;
+
+            const onConfigChanged = (details) => {
+                reloadPending.value = true;
+                if (details && typeof details === 'string') {
+                    showNotice(details);
+                }
+            };
+
+            const onVhostSaved = async ({ domain, isEdit } = {}) => {
+                reloadPending.value = true;
+                await fetchStatus();
+            };
+
             const onVhostDeleted = (domain) => {
+                reloadPending.value = true;
                 vhosts.value = vhosts.value.filter((v) => v.domain !== domain);
                 fetchStatus();
             };
@@ -444,12 +595,18 @@
                 syncDocumentTitleAndLang(currentLang.value);
                 document.documentElement.setAttribute('data-theme', theme.value);
                 fetchStatus();
-                pollTimer = setInterval(fetchStatus, 2000);
+                pollTimer = setInterval(fetchStatus, 5000);
+                if (typeof window !== 'undefined') {
+                    window.addEventListener('popstate', onPopState);
+                }
             });
 
             onUnmounted(() => {
                 if (pollTimer) clearInterval(pollTimer);
                 if (noticeTimer) clearTimeout(noticeTimer);
+                if (typeof window !== 'undefined') {
+                    window.removeEventListener('popstate', onPopState);
+                }
             });
 
             return {
@@ -490,15 +647,27 @@
                 loginWithToken,
                 logoutToken,
                 fetchStatus,
+                purgeAllCache,
+                refreshNow,
                 fetchLogs,
                 onVhostDeleted,
-                onUnbanIp
+                onVhostSaved,
+                onConfigChanged,
+                onUnbanIp,
+                reloadPending,
+                reloadInProgress,
+                triggerGracefulReload,
+                gracefulReload
             };
         }
     });
 
     // Görünüm bileşenlerini kaydet
     if (window.ZMaxViewDashboard) app.component('view-dashboard', window.ZMaxViewDashboard);
+    if (window.ZMaxViewServerConfig) app.component('view-server-config', window.ZMaxViewServerConfig);
+    if (window.ZMaxViewListeners) app.component('view-listeners', window.ZMaxViewListeners);
+    if (window.ZMaxViewTemplates) app.component('view-templates', window.ZMaxViewTemplates);
+    if (window.ZMaxViewLiveStats) app.component('view-livestats', window.ZMaxViewLiveStats);
     if (window.ZMaxViewVhosts) app.component('view-vhosts', window.ZMaxViewVhosts);
     if (window.ZMaxViewCacheWaf) app.component('view-cache-waf', window.ZMaxViewCacheWaf);
     if (window.ZMaxViewLogs) app.component('view-logs', window.ZMaxViewLogs);

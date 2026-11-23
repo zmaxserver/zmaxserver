@@ -43,7 +43,7 @@
                         <div>
                             <div class="welcome-title">{{ t('welcome_title') }}</div>
                             <div class="welcome-meta">
-                                panel.zmaxserver.local · <strong class="text-orange">ZMax Server v1.0.01</strong> · {{ t('card_uptime') }}: {{ formattedUptime }}
+                                panel.zmaxserver.local · {{ t('card_uptime') }}: {{ formattedUptime }}
                             </div>
                         </div>
                     </div>
@@ -151,23 +151,23 @@
                             <div class="meter-row">
                                 <div class="meter-header">
                                     <span class="label">{{ t('lbl_memory') }}</span>
-                                    <span class="val">{{ stats.ram_mb }} MB / 256 MB</span>
+                                    <span class="val">{{ stats.ram_mb || 0 }} MB</span>
                                 </div>
-                                <progress class="zmax-progress zmax-progress-green" max="100" value="5"></progress>
+                                <progress class="zmax-progress zmax-progress-green" max="100" :value="stats.ram_percent || Math.min(100, Math.round((stats.ram_mb || 0) / 2.56))"></progress>
                             </div>
 
                             <div class="meter-row meter-row-last">
                                 <div class="meter-header">
                                     <span class="label">{{ t('lbl_disk_cache') }}</span>
-                                    <span class="val">0.2 GB / 20 GB</span>
+                                    <span class="val">{{ stats.disk_cache_mb ? stats.disk_cache_mb + ' MB' : (stats.cache_items ? stats.cache_items + ' öğe' : '0 MB') }}</span>
                                 </div>
-                                <progress class="zmax-progress zmax-progress-yellow" max="100" value="2"></progress>
+                                <progress class="zmax-progress zmax-progress-yellow" max="100" :value="stats.disk_cache_percent || 0"></progress>
                             </div>
 
                             <div class="info-kv-list">
-                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_hostname') }}</span> <strong>zmaxserver.local</strong></div>
+                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_hostname') }}</span> <strong>{{ stats.hostname || window.location.hostname || 'localhost' }}</strong></div>
                                 <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_ip_port') }}</span> <strong>{{ stats.listeners && stats.listeners.http ? stats.listeners.http : '0.0.0.0:19480' }}</strong></div>
-                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v1.0.01 ({{ t('footer_engine') }})</strong></div>
+                                <div class="info-kv-row"><span class="text-muted-custom">{{ t('lbl_engine') }}</span> <strong>ZMax Server v{{ stats.version || '…' }} ({{ t('footer_engine') }})</strong></div>
                             </div>
                         </div>
                     </div>
