@@ -205,18 +205,19 @@ pub(crate) async fn send_response_with_content_type<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let origin = if cors_origin.is_empty() {
-        "*"
+    // Boş origin = CORS kapalı. Wildcard'a düşüş kaldırıldı (W-05/W-06).
+    let cors_header = if cors_origin.trim().is_empty() {
+        String::new()
     } else {
-        cors_origin
+        format!("Access-Control-Allow-Origin: {}\r\n", cors_origin.trim())
     };
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nServer: {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nServer: {}\r\nContent-Type: {}\r\n{}Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status_code,
         status_text,
         zpoly!("zmaxserver-api").as_str(),
         content_type,
-        origin,
+        cors_header,
         body.len(),
         body
     );
@@ -236,17 +237,20 @@ pub async fn send_json_response_retry<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let origin = if cors_origin.is_empty() { "*" } else { cors_origin };
+    let cors_header = if cors_origin.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Access-Control-Allow-Origin: {}\n", cors_origin.trim())
+    };
     let resp = format!(
         "HTTP/1.1 {} {}
 Content-Type: application/json; charset=utf-8
-Access-Control-Allow-Origin: {}
-Retry-After: {}
+{}Retry-After: {}
 Content-Length: {}
 Connection: close
 
 {}",
-        status_code, status_text, origin, retry_after, json_body.len(), json_body
+        status_code, status_text, cors_header, retry_after, json_body.len(), json_body
     );
     tokio::io::AsyncWriteExt::write_all(socket, resp.as_bytes()).await?;
     Ok(())

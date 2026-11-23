@@ -66,6 +66,8 @@ impl SniResolver {
         Self {
             table: RwLock::new(Arc::new(CertTable::default())),
             sources: RwLock::new(Vec::new()),
+            // Varsayılan gevşek tutulur; üretimde boot, config.listeners.https.strict_sni
+            // değerini set_strict_sni() ile uygular (mevcut test istemcileri SNI göndermiyor).
             strict_sni: std::sync::atomic::AtomicBool::new(false),
         }
     }

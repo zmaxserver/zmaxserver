@@ -49,7 +49,8 @@ trusted_proxies = []
 
 [listeners.api]
 address = "127.0.0.1"
-cors_allow_origin = "*"
+# Boş = CORS kapalı. Gerekirse tek bir http(s) origin'i girin (wildcard reddedilir).
+cors_allow_origin = ""
 enabled = true
 port = 19486
 proxy_prefix = ""

@@ -38,8 +38,9 @@ where
         return Ok(true);
     }
 
-    // 1a. Genel altyapı sürüm ucu (/version): token'sız, salt okunur probe.
-    if clean == "/version" {
+    // 1a. Genel altyapı sürüm ucu (/version, /api/version): token'sız, salt okunur probe.
+    // Sürüm bilgisi /version üzerinden zaten herkese açıktır; ikinci yol aynı sözleşmeyi kullanır.
+    if clean == "/version" || (clean == "/api/version" && !req_path.ends_with('/')) {
         if req.method != "GET" && req.method != "HEAD" {
             let err = r#"{"ok":false,"error":"Yonteme izin verilmiyor (Method Not Allowed)"}"#;
             send_json_response(socket, 405, "Method Not Allowed", cors_origin, err).await?;

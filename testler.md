@@ -120,3 +120,4 @@ Server: zmaxserver
 
 ---
 *Bu rapor v1.0.10 sürümünün kararlılık, güvenlik ve işlevsel yetkinlik belgesidir.*
+

@@ -99,14 +99,14 @@ where
 
     // CORS Preflight
     if req.method == "OPTIONS" {
-        let origin = if cors_origin.is_empty() {
-            "*"
+        let cors_header = if cors_origin.trim().is_empty() {
+            String::new()
         } else {
-            &cors_origin
+            format!("Access-Control-Allow-Origin: {}\r\n", cors_origin.trim())
         };
         let resp = format!(
-            "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            origin
+            "HTTP/1.1 204 No Content\r\n{}Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-ZMax-Token, X-ZMax-Purge-Key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            cors_header
         );
         socket.write_all(resp.as_bytes()).await?;
         return Ok(true);

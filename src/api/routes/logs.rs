@@ -58,19 +58,22 @@ where
         return Ok(true);
     };
 
-    let origin = if cors_origin.is_empty() { "*" } else { cors_origin.as_str() };
+    let cors_header = if cors_origin.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Access-Control-Allow-Origin: {}\n", cors_origin.trim())
+    };
     let head = format!(
         "HTTP/1.1 200 OK
 Content-Type: text/event-stream; charset=utf-8
 Cache-Control: no-cache
 Connection: close
 X-Accel-Buffering: no
-Access-Control-Allow-Origin: {}
-
+{}
 : connected
 
 ",
-        origin
+        cors_header
     );
     socket.write_all(head.as_bytes()).await?;
     socket.flush().await?;

@@ -98,10 +98,14 @@ where
 
     if req_path == "/api/v1/events" && req.method == "GET" {
         let mut rx = bus().subscribe();
-        let origin = if cors_origin.is_empty() { "*" } else { cors_origin.as_str() };
+        let cors_header = if cors_origin.trim().is_empty() {
+            String::new()
+        } else {
+            format!("Access-Control-Allow-Origin: {}\r\n", cors_origin.trim())
+        };
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: {}\r\nConnection: close\r\n\r\n: ok\n\n",
-            origin
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\n{}Connection: close\r\n\r\n: ok\n\n",
+            cors_header
         );
         socket.write_all(head.as_bytes()).await?;
         socket.flush().await?;

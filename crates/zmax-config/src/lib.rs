@@ -176,7 +176,8 @@ pub struct HttpsListenerConfig {
     pub alpn: Vec<String>,
     #[serde(default)]
     pub proxy_protocol: bool,
-    #[serde(default)]
+    // Güvenli varsayılan: TOML'da alan yazılmasa bile strict SNI açık kalır.
+    #[serde(default = "default_true")]
     pub strict_sni: bool,
 }
 
@@ -189,7 +190,7 @@ impl Default for HttpsListenerConfig {
             ssl: true,
             alpn: default_https_alpn(),
             proxy_protocol: false,
-            strict_sni: false,
+            strict_sni: true,
         }
     }
 }
@@ -260,7 +261,8 @@ impl Default for ApiListenerConfig {
             token: String::new(),
             read_token: String::new(),
             require_token: false,
-            cors_allow_origin: "*".to_string(),
+            // Boş = CORS kapalı. Wildcard varsayılanı kaldırıldı (W-05/W-06).
+            cors_allow_origin: String::new(),
             ssl: false,
             tls_cert: String::new(),
             tls_key: String::new(),
@@ -1915,7 +1917,7 @@ impl Default for VHostTlsSection {
     fn default() -> Self {
         Self {
             http2: true,
-            strict_sni: false,
+            strict_sni: true,
             min_version: default_tls_min_version(),
         }
     }
@@ -2225,6 +2227,33 @@ impl ZMaxConfig {
                 proxy_prefix,
             )?;
         }
+
+        // [Güvenlik] Wildcard CORS, kötü niyetli bir sitenin kullanıcı token'ıyla
+        // çapraz-origin yönetim çağrısı yapmasına olanak tanır. Boş değer CORS'u
+        // kapatır; aksi halde yalnızca http(s) origin'i kabul edilir.
+        let cors = self.listeners.api.cors_allow_origin.trim();
+        if !cors.is_empty()
+            && (cors == "*"
+                || (!cors.starts_with("http://") && !cors.starts_with("https://")))
+        {
+            return Err(format!(
+                "listeners.api.cors_allow_origin güvensiz: '{}'. Boş bırakılabilir (CORS kapalı) veya https://... biçiminde tek bir origin verilmelidir.",
+                cors
+            ));
+        }
+
+        // [Güvenlik] Etkin TLS dinleyicisinde strict SNI zorunludur; aksi halde
+        // IP/literal Host başlıkları iç vhost'lara erişebilir.
+        if self.listeners.https.enabled
+            && self.listeners.https.ssl
+            && !self.listeners.https.strict_sni
+        {
+            return Err(
+                "listeners.https.strict_sni = false güvensizdir; etkin TLS dinleyicisinde true olmalıdır."
+                    .to_string(),
+            );
+        }
+
         Ok(())
     }
 
@@ -2271,6 +2300,9 @@ impl ZMaxConfig {
                         key_path.display()
                     ));
                 }
+                if let Some(warning) = sensitive_file_permission_warning(&key_path, true) {
+                    warnings.push(format!("'{}' dinleyicisi: {}", name, warning));
+                }
             }
         }
 
@@ -2308,6 +2340,39 @@ impl ZMaxConfig {
                     ));
                 }
             }
+            if !vh.entry.ssl.key.trim().is_empty() {
+                let key_path = resolve_path(base_dir, vh.entry.ssl.key.trim());
+                if let Some(warning) = sensitive_file_permission_warning(&key_path, true) {
+                    warnings.push(format!("vHost '{}': {}", vh.entry.name, warning));
+                }
+            }
+        }
+
+        for (name, enabled, address, require_token, token) in [
+            (
+                "admin",
+                self.listeners.admin.enabled,
+                self.listeners.admin.address.as_str(),
+                self.listeners.admin.require_token,
+                self.listeners.admin.token.as_str(),
+            ),
+            (
+                "api",
+                self.listeners.api.enabled,
+                self.listeners.api.address.as_str(),
+                self.listeners.api.require_token,
+                self.listeners.api.token.as_str(),
+            ),
+        ] {
+            if enabled && !is_loopback_bind(address) && (!require_token || token.trim().is_empty()) {
+                warnings.push(format!(
+                    "Güvenlik: '{}' dinleyicisi {} adresine bağlanıyor ancak require_token={} ve token {}. Çalışma anında otomatik token üretilse de yapılandırmada açıkça token tanımlanmalıdır.",
+                    name,
+                    address,
+                    require_token,
+                    if token.trim().is_empty() { "boş" } else { "dolu" }
+                ));
+            }
         }
 
         if modules.len() < 18 {
@@ -2319,6 +2384,38 @@ impl ZMaxConfig {
 
         Ok(warnings)
     }
+}
+
+/// Duyarlı bir dosyanın dünya tarafından okunabilir/yazılabilir olup olmadığını denetler.
+/// Özel anahtarlar için `private = true` kullanılır; bu durumda group/other bitleri
+/// uyarı üretir. Diğer dosyalarda yalnızca world-write biti denetlenir.
+/// Unix dışı platformlarda anlamlı olmadığından `None` döner.
+pub fn sensitive_file_permission_warning(path: &Path, private: bool) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path).ok()?;
+        let mode = meta.permissions().mode() & 0o777;
+        let (bad, expected, reason) = if private {
+            (mode & 0o077 != 0, "0640 root:nobody", "group/other izni açık")
+        } else {
+            (mode & 0o002 != 0, "0644 veya daha kısıtlı", "world-write izni açık")
+        };
+        if bad {
+            return Some(format!(
+                "'{}' izni {:04o}; {} olmalı ({}).",
+                path.display(),
+                mode,
+                expected,
+                reason
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, private);
+    }
+    None
 }
 
 fn parse_listener_ip(raw: &str) -> Result<std::net::IpAddr, String> {
@@ -3395,7 +3492,7 @@ document_root = "admin"
 enabled = true
 address = "127.0.0.1"
 port = 19486
-cors_allow_origin = "*"
+cors_allow_origin = "https://panel.example.com"
 "#;
         let cfg = ZMaxConfig::parse_toml(legacy_toml)
             .expect("Panel TLS ve proxy alanları olmadan eski zmax.toml ayrıştırılmalı");
@@ -3412,6 +3509,49 @@ cors_allow_origin = "*"
         assert!(cfg.listeners.api.trusted_proxies.is_empty());
 
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_secure_listener_defaults_and_cors_validation() {
+        let def = ZMaxConfig::default();
+        assert!(def.listeners.https.strict_sni);
+        assert!(def.listeners.api.cors_allow_origin.is_empty());
+
+        // TOML'da alan yazılmasa bile strict_sni güvenli varsayılana düşmeli.
+        let omitted = ZMaxConfig::parse_toml(
+            "[listeners.https]\nenabled = true\naddress = \"127.0.0.1\"\nport = 8443\n",
+        )
+        .expect("TOML ayrıştırılmalı");
+        assert!(
+            omitted.listeners.https.strict_sni,
+            "eksik strict_sni alanı güvenli varsayılana düşmeli"
+        );
+
+        // Wildcard CORS reddedilmeli.
+        let wildcard = ZMaxConfig::parse_toml(
+            "[listeners.api]\nenabled = true\naddress = \"127.0.0.1\"\nport = 19486\ncors_allow_origin = \"*\"\n",
+        )
+        .expect("TOML ayrıştırılmalı");
+        let err = wildcard.validate().expect_err("wildcard CORS reddedilmeli");
+        assert!(err.contains("cors_allow_origin"), "{err}");
+
+        // Boş origin güvenli: CORS kapalı.
+        let off = ZMaxConfig::parse_toml(
+            "[listeners.api]\nenabled = true\naddress = \"127.0.0.1\"\nport = 19486\n",
+        )
+        .expect("TOML ayrıştırılmalı");
+        assert!(off.listeners.api.cors_allow_origin.is_empty());
+        assert!(off.validate().is_ok());
+
+        // Açıkça kapatılan strict SNI reddedilmeli.
+        let insecure_tls = ZMaxConfig::parse_toml(
+            "[listeners.https]\nenabled = true\naddress = \"127.0.0.1\"\nport = 8443\nssl = true\nstrict_sni = false\n",
+        )
+        .expect("TOML ayrıştırılmalı");
+        let err = insecure_tls
+            .validate()
+            .expect_err("strict_sni=false reddedilmeli");
+        assert!(err.contains("strict_sni"), "{err}");
     }
 
     #[test]
@@ -3701,7 +3841,7 @@ deny_ips = ["203.0.113.5"]
         assert!(!def.listeners.http.proxy_protocol);
         assert_eq!(def.listeners.https.alpn, vec!["h2".to_string(), "http/1.1".to_string()]);
         assert!(!def.listeners.https.proxy_protocol);
-        assert!(!def.listeners.https.strict_sni);
+        assert!(def.listeners.https.strict_sni);
         assert_eq!(def.logging.batch_flush_ms, 250);
         assert_eq!(def.logging.batch_buffer_kb, 64);
         assert!(def.logging.add_request_id);
@@ -3767,7 +3907,7 @@ add_request_id = false
         assert!(minimal_vhost.logging.also_write_global);
         assert!(!minimal_vhost.error_docs.enabled);
         assert!(minimal_vhost.tls.http2);
-        assert!(!minimal_vhost.tls.strict_sni);
+        assert!(minimal_vhost.tls.strict_sni);
         assert_eq!(minimal_vhost.tls.min_version, "1.2");
         assert!(minimal_vhost.static_files.precompressed);
         assert!(minimal_vhost.static_files.brotli);

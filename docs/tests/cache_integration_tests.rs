@@ -129,7 +129,7 @@ address = "127.0.0.1"
 port = {api_port}
 require_token = false
 token = ""
-cors_allow_origin = "*"
+cors_allow_origin = "https://panel.example.com"
 
 [cache]
 enabled = true
