@@ -1,5 +1,7 @@
 # ZMax Server
 
+🌐 **Diller / Languages:** [Türkçe (Dokümantasyon)](readme-tr.md) · [English (Documentation)](readme-en.md) · [Test Kütüğü](testler.md)
+
 Rust ile yazılmış, yüksek performanslı ve güvenli web sunucusu. Hedef: hosting panelleriyle (zPanel dahil) birlikte çalışan, OpenLiteSpeed ile işlev denkliği sağlayan bir HTTP/HTTPS sunucusu.
 
 *English: a high-performance web server written in Rust, aiming at feature parity with OpenLiteSpeed for hosting-panel use.*
